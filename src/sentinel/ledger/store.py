@@ -351,6 +351,38 @@ class LedgerStore:
             last_event_seq=seq,
         )
 
+    # ------------------------------------------------------------ guards API
+
+    async def has_unresolved(self, instrument: str) -> bool:
+        """True if any order on the instrument is UNKNOWN or RECONCILING —
+        the R1.4 instrument hold is DERIVED from durable state, so it
+        survives restarts for free."""
+        return await self._pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM orders WHERE instrument = $1 "
+            "AND state IN ('UNKNOWN','RECONCILING'))",
+            instrument,
+        )
+
+    async def has_open_entry(self, instrument: str) -> bool:
+        """True if a non-terminal ENTRY order exists (R1.9 duplicate guard)."""
+        return await self._pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM orders WHERE instrument = $1 "
+            "AND authority = 'ENTRY' "
+            "AND state NOT IN ('FILLED','CANCELED','REJECTED'))",
+            instrument,
+        )
+
+    async def open_exit_remaining(self, instrument: str) -> Decimal:
+        """Unfilled quantity already committed to live protective exits —
+        counted against the position so stacked exits can't over-exit (R1.10)."""
+        val = await self._pool.fetchval(
+            "SELECT COALESCE(SUM(qty - filled_qty), 0) FROM orders "
+            "WHERE instrument = $1 AND authority = 'PROTECTIVE_EXIT' "
+            "AND state NOT IN ('FILLED','CANCELED','REJECTED')",
+            instrument,
+        )
+        return val
+
     # ------------------------------------------------------------ positions
 
     async def get_position(self, instrument: str) -> Decimal:

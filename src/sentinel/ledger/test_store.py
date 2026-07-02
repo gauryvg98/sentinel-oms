@@ -1,7 +1,6 @@
 """Ledger integration tests against a real PostgreSQL (testcontainers).
 
-Skipped cleanly when Docker isn't available. Each test gets a fresh database
-so state never leaks between tests.
+Fixtures (container, fresh-db pool, docker skip) come from sentinel/conftest.py.
 """
 
 from __future__ import annotations
@@ -12,9 +11,6 @@ from uuid import uuid4
 import pytest
 
 pytest.importorskip("testcontainers.postgres", reason="testcontainers not installed")
-
-import asyncpg
-from testcontainers.postgres import PostgresContainer
 
 from sentinel.domain import (
     Authority,
@@ -31,46 +27,6 @@ from sentinel.domain import (
     SubmissionTimedOut,
 )
 from sentinel.ledger import FillOutcome, LedgerStore, apply_migrations
-
-
-def _docker_available() -> bool:
-    try:
-        import docker
-
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _docker_available(), reason="docker unavailable"
-)
-
-
-@pytest.fixture(scope="module")
-def pg_container():
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
-@pytest.fixture
-async def pool(pg_container):
-    # Fresh database per test: no state leaks (the tria lesson).
-    admin = await asyncpg.connect(
-        pg_container.get_connection_url().replace("postgresql+psycopg2", "postgresql")
-    )
-    dbname = f"t_{uuid4().hex[:12]}"
-    await admin.execute(f'CREATE DATABASE "{dbname}"')
-    await admin.close()
-
-    base = pg_container.get_connection_url().replace("postgresql+psycopg2", "postgresql")
-    url = base.rsplit("/", 1)[0] + f"/{dbname}"
-    pool = await asyncpg.create_pool(url, min_size=1, max_size=4)
-    async with pool.acquire() as conn:
-        await apply_migrations(conn)
-    yield pool
-    await pool.close()
 
 
 def intent(key="K1", qty="4", side=Side.BUY, authority=Authority.ENTRY):

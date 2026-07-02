@@ -391,6 +391,13 @@ class LedgerStore:
         )
         return val if val is not None else Decimal(0)
 
+    async def load_positions(self) -> dict[str, Decimal]:
+        """All nonzero positions — the protective-exit supervisor's worklist."""
+        rows = await self._pool.fetch(
+            "SELECT instrument, qty FROM positions WHERE qty != 0"
+        )
+        return {r["instrument"]: r["qty"] for r in rows}
+
     # -------------------------------------------------------------- rebuild
 
     async def rebuild_projections(self) -> int:

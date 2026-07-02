@@ -1,0 +1,22 @@
+# Local development database. The test suite does NOT need this — tests spin
+# their own throwaway Postgres via testcontainers. This is for running the
+# app / demos against a persistent local instance.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinel
+    ports:
+      - "5433:5432"
+    volumes:
+      - sentinel-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  sentinel-pgdata:

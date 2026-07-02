@@ -55,18 +55,26 @@ Full specification: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — 14
 execution-integrity scenarios (including the compound test), runtime and
 persistence requirements, and the documented interface boundaries.
 
-## Status
+## Status — 124 tests green
 
-- [x] Requirements specification
-- [x] Architecture diagrams
-- [ ] Event ledger schema + migrations
-- [ ] Order state machine + writer coordinator
-- [ ] Deterministic broker simulator (failure-scriptable)
-- [ ] Reconciliation engine
-- [ ] Protective-exit supervisor
-- [ ] The 14 scenario tests + fault injection
-- [ ] Replay data contract + product definitions
-- [ ] Docker Compose environment, pinned deps, one-command suite
+```bash
+./run-tests.sh        # clean machine -> venv, pinned deps, full suite (~8s)
+```
+
+- [x] Requirements specification + architecture diagrams
+- [x] `domain/` — pure state machine, intents, events, products (44 tests)
+- [x] `ledger/` — event log, projections, exec-id dedup, rebuild-from-log (9)
+- [x] `broker/sim/` — deterministic failure-scriptable simulator (12)
+- [x] `oms/` — gateway, single-writer engine, coordinator, exposure guards (13)
+- [x] `recon/` — the single recovery mechanism + startup recovery (7)
+- [x] `protect/` — independent exit supervisor, idempotent by arithmetic (7)
+- [x] `scenarios/` — **acceptance suite R1.1–R1.14**, incl. the full compound
+      crash/reconcile scenario as one deterministic test (14)
+- [x] `replay/` — as-of-T data contract, lifetime gates, determinism (13)
+- [x] `runtime/` — task supervision, fail-loud policies, graceful drain,
+      assembled `SentinelApp` lifecycle (5)
+- [x] CI (3.11/3.12/3.13) · pinned lockfile · Docker Compose · one-command suite
+- [ ] `perf/` — load harness + live invariant auditor (next)
 
 ## Design lineage
 

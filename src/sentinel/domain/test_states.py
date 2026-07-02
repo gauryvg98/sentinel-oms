@@ -32,9 +32,11 @@ def test_no_state_transitions_directly_to_unknown_except_submitting():
 
 def test_reconciling_resolves_only_to_broker_expressible_states():
     """Reconciliation adopts broker truth; the broker cannot report CREATED,
-    SUBMITTING, UNKNOWN, or RECONCILING."""
+    SUBMITTING, or UNKNOWN. The self-loop is fill-backfill ingestion — evidence
+    absorbed without concluding; only resolution exits."""
     assert ALLOWED[OrderState.RECONCILING] == frozenset(
         {
+            OrderState.RECONCILING,
             OrderState.WORKING,
             OrderState.PARTIAL,
             OrderState.FILLED,

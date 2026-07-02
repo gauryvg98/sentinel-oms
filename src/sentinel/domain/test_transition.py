@@ -171,6 +171,26 @@ def test_terminal_states_reopen_via_reconcile():
     assert o.state is OrderState.RECONCILING
 
 
+# --------------------------------------------- backfill ingestion during recon
+
+
+def test_reconciling_ingests_fills_without_concluding():
+    """Backfilled fills accumulate during reconciliation, but even a
+    completing fill stays RECONCILING — only resolution exits."""
+    o = order(OrderState.RECONCILING)
+    o = transition(o, fill("3", "E1"))
+    assert o.state is OrderState.RECONCILING and o.filled_qty == 3
+    o = transition(o, fill("1", "E2"))          # completes the quantity
+    assert o.state is OrderState.RECONCILING    # still not concluded
+    assert o.filled_qty == 4
+
+
+def test_reconciling_backfill_cannot_overfill():
+    o = order(OrderState.RECONCILING, filled="3")
+    with pytest.raises(OverfillViolation):
+        transition(o, fill("2"))
+
+
 # ------------------------------------------------- R1.11/R1.12 reconciliation
 
 

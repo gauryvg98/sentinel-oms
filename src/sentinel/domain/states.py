@@ -73,6 +73,8 @@ ALLOWED: dict[OrderState, frozenset[OrderState]] = {
     OrderState.UNKNOWN: frozenset({OrderState.RECONCILING}),
     OrderState.RECONCILING: frozenset(
         {
+            OrderState.RECONCILING,  # ingests backfilled fills (evidence) without
+                                     # acting; only resolution exits this state
             OrderState.WORKING,
             OrderState.PARTIAL,
             OrderState.FILLED,

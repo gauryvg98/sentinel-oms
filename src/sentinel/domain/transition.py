@@ -99,6 +99,7 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
                 OrderState.WORKING,
                 OrderState.PARTIAL,
                 OrderState.CANCEL_PENDING,  # fill during cancel-pending (R1.6)
+                OrderState.RECONCILING,     # backfill ingestion during recovery
             ):
                 raise IllegalTransition(f"fill in {s.value}")
             if fqty <= 0:
@@ -108,7 +109,11 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
                 raise OverfillViolation(
                     f"fill of {fqty} takes filled to {new_filled} > order qty {order.qty}"
                 )
-            if new_filled == order.qty:
+            if s is OrderState.RECONCILING:
+                # Reconciliation ingests evidence but never concludes from it:
+                # even a completing fill stays RECONCILING until resolution.
+                target = OrderState.RECONCILING
+            elif new_filled == order.qty:
                 target = OrderState.FILLED
             elif s is OrderState.CANCEL_PENDING:
                 # Cancel is still open at the broker; the partial fill does not

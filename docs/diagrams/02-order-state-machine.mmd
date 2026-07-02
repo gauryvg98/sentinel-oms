@@ -1,0 +1,51 @@
+%% Sentinel OMS — authoritative order state machine
+%% Author: Yashvardhan Gaur
+%% UNKNOWN and RECONCILING are first-class states; timeout is never rejection
+stateDiagram-v2
+  [*] --> CREATED: intent persisted (durable + idempotent)
+  CREATED --> SUBMITTING: submit to broker
+
+  SUBMITTING --> WORKING: ack with broker order id
+  SUBMITTING --> REJECTED: broker reject
+  SUBMITTING --> UNKNOWN: timeout / no broker id
+
+  UNKNOWN --> RECONCILING: query broker by client order id
+
+  RECONCILING --> WORKING: found working
+  RECONCILING --> PARTIAL: found partially filled
+  RECONCILING --> FILLED: found filled
+  RECONCILING --> CANCELED: conclusively not accepted
+  RECONCILING --> REJECTED: found rejected
+
+  WORKING --> PARTIAL: partial fill
+  PARTIAL --> PARTIAL: further partial fill
+  PARTIAL --> FILLED: final fill
+  WORKING --> FILLED: full fill
+
+  WORKING --> CANCEL_PENDING: cancel or replace requested
+  PARTIAL --> CANCEL_PENDING: cancel or replace requested
+
+  CANCEL_PENDING --> CANCELED: cancel confirmed
+  CANCEL_PENDING --> PARTIAL: fill arrives DURING cancel-pending
+  CANCEL_PENDING --> FILLED: filled before cancel took effect
+
+  FILLED --> RECONCILING: late event / disagreement after presumed terminal
+  CANCELED --> RECONCILING: late fill after cancel
+
+  FILLED --> [*]
+  CANCELED --> [*]
+  REJECTED --> [*]
+
+  note right of UNKNOWN
+    UNKNOWN locks the instrument.
+    Conflicting submissions are blocked
+    until reconciliation resolves true
+    broker state. NEVER a blind retry.
+  end note
+
+  note right of CANCEL_PENDING
+    Replace sizes only from
+    conclusively remaining quantity
+    (broker-confirmed), never from
+    optimistic local state.
+  end note

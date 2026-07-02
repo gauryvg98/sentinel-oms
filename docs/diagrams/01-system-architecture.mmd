@@ -1,0 +1,56 @@
+%% Sentinel OMS — system architecture
+%% Author: Yashvardhan Gaur
+%% Execution-integrity-first OMS: durable intent, single-writer, broker as source of truth
+flowchart TB
+  subgraph intake["Command intake"]
+    CMD["Immutable commands\n(place / cancel / replace)\nclient-generated idempotency key"]
+    GATE["Command gateway\nvalidate -> persist intent -> ack"]
+  end
+
+  subgraph core["OMS core — single-writer per instrument"]
+    SM["Order state machine\nUNKNOWN + RECONCILING\nare first-class states"]
+    COORD["Writer coordinator\nasyncio.Lock (in-process)\n+ pg advisory lock (cross-process)"]
+    RISK["Exposure guards\nduplicate-entry block\nnever-over-exit"]
+  end
+
+  subgraph persist["Persistence — PostgreSQL"]
+    LEDGER[("Append-only event ledger\ncommands + lifecycle events\ntrace id, monotonic seq")]
+    PROJ[("Projections\nworking orders · positions\nauthorized risk")]
+    CKPT[("Checkpoints")]
+  end
+
+  subgraph broker["Broker boundary"]
+    ADPT["BrokerAdapter interface"]
+    SIM["Deterministic simulator\nscriptable acks / fills /\nexecutions / failures"]
+    REAL["Real broker adapter\n(drop-in, future)"]
+  end
+
+  RECON["Reconciliation engine\nbroker = source of truth\nresolves UNKNOWN + disagreement"]
+  PROT["Protective-exit supervisor\nINDEPENDENT authority —\nruns even when entries fail"]
+
+  subgraph replaydom["Replay & product domain"]
+    REPLAY["ReplayDataAccess\nevery read as-of time T\nfuture unreachable by construction"]
+    PRODCFG["Product definitions\nsettlement · exercise · expiry\nas first-class config"]
+  end
+
+  CMD --> GATE
+  GATE --> COORD
+  COORD --> SM
+  SM -->|append| LEDGER
+  LEDGER --> PROJ
+  SM --- RISK
+  SM -->|submit / cancel / replace| ADPT
+  ADPT --> SIM
+  ADPT -.-> REAL
+  ADPT -->|acks · fills · events| SM
+  RECON <-->|query orders + positions| ADPT
+  RECON -->|corrections| SM
+  PROJ --> PROT
+  PROT -->|exit orders| ADPT
+  LEDGER --> CKPT
+  REPLAY --- PRODCFG
+
+  classDef store fill:#1f2937,stroke:#22e07b,color:#e5e7eb;
+  classDef guard fill:#3a1f1f,stroke:#f87171,color:#fee2e2;
+  class LEDGER,PROJ,CKPT store;
+  class RISK guard;

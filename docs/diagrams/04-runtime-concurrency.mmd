@@ -1,0 +1,30 @@
+%% Sentinel OMS — asyncio runtime: supervision, backpressure, single-writer, shutdown
+%% Author: Yashvardhan Gaur
+flowchart TB
+  SUP["Root supervisor\nstructured task tree · per-task restart policy\nfailures surface loudly, never swallowed"]
+
+  SUP --> T1["Command intake task"]
+  SUP --> T2["Writer task\n(one per instrument)"]
+  SUP --> T3["Broker-event consumer"]
+  SUP --> T4["Reconciler task"]
+  SUP --> T5["Protective-exit supervisor\nISOLATED — survives failure of\nintake, entries, or upstream services"]
+
+  Q1{{"bounded queue\n(backpressure)"}}
+  Q2{{"bounded queue\n(backpressure)"}}
+  T1 --> Q1
+  Q1 --> T2
+  T3 --> Q2
+  Q2 --> T2
+
+  T2 --> OWN["Single-writer ownership\nasyncio.Lock per instrument (in-process)\npg advisory lock (cross-process)\ntwo writers are impossible, not discouraged"]
+
+  subgraph lifecycle["Lifecycle guarantees"]
+    CANC["Cancellation propagation\nevery task honors CancelledError\ncleanup in finally — no orphans"]
+    SHUT["Graceful shutdown\nstop intake -> drain queues ->\ncheckpoint -> cancel tasks\nno accepted event lost"]
+  end
+  SUP --- lifecycle
+
+  classDef iso fill:#0f3d2e,stroke:#22e07b,color:#d1fae5;
+  classDef own fill:#1f2937,stroke:#22e07b,color:#e5e7eb;
+  class T5 iso;
+  class OWN own;

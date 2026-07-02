@@ -1,0 +1,27 @@
+%% Sentinel OMS — point-in-time replay contract + first-class product definitions
+%% Author: Yashvardhan Gaur
+flowchart LR
+  subgraph contract["Point-in-time data contract"]
+    CLK["ReplayClock\nsimulated now = T\n(no wall-clock reads)"]
+    DA["ReplayDataAccess\nread(instrument, as_of = T)"]
+    DENY[/"read beyond T -> REJECTED\nunreachable by construction,\nproven by tests"/]
+    LIFE["Contract-lifetime gate\nan instrument is queryable only\nwithin its listed lifetime"]
+  end
+  CLK --> DA
+  DA --> DENY
+  DA --> LIFE
+
+  subgraph products["First-class product definitions (config, not conditionals)"]
+    IDXOPT["Cash-settled index option\nEuropean exercise\ncash settlement · defined expiries"]
+    MINI["Mini index option\nsame semantics, 1/10 notional"]
+    ETFOPT["ETF option\nAmerican exercise\nphysical delivery · early assignment\ndividend-date risk"]
+  end
+  DA --> products
+
+  DET["Deterministic replay\nsame inputs -> identical outputs\nno wall clock · no uncontrolled randomness"]
+  contract --> DET
+
+  classDef deny fill:#3a1f1f,stroke:#f87171,color:#fee2e2;
+  classDef det fill:#0f3d2e,stroke:#22e07b,color:#d1fae5;
+  class DENY deny;
+  class DET det;

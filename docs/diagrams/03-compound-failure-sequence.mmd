@@ -1,0 +1,41 @@
+%% Sentinel OMS — compound failure scenario (the hardest end-to-end test)
+%% Author: Yashvardhan Gaur
+%% Timeout + hidden acceptance + fills + cancel race + crash + restart + reconciliation
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant O as OMS core
+  participant L as Event ledger (Postgres)
+  participant B as Broker (simulated)
+  participant R as Reconciler
+
+  C->>O: place order — 4 contracts (idempotency key K)
+  O->>L: persist intent — CREATED (before any submission)
+  O->>B: submit (client order id K)
+  Note over O,B: response lost — timeout, NO broker order id
+  O->>L: SUBMITTING -> UNKNOWN (instrument locked, no blind retry)
+  Note over B: broker actually ACCEPTED the order
+
+  R->>B: query open orders by client id K
+  B-->>R: found — WORKING, broker id X
+  R->>L: UNKNOWN -> WORKING (order recovered, not resubmitted)
+
+  B-->>O: partial fill +1 (1 of 4)
+  O->>L: PARTIAL — position 1
+  B-->>O: partial fill +1 (2 of 4)
+  O->>L: PARTIAL — position 2
+
+  C->>O: cancel remaining
+  O->>B: cancel (broker id X)
+  O->>L: CANCEL_PENDING
+  B-->>O: fill +1 DURING cancel-pending (3 of 4)
+  O->>L: fill recorded — position 3
+
+  Note over O,L: CRASH — process killed mid-flight
+  Note over O: restart
+  O->>L: rebuild orders, fills, locks, authorized risk from ledger
+  R->>B: reconcile — broker says 3 filled, remainder canceled
+  R->>L: CANCELED (remaining 1) — position converged = 3
+
+  Note over O: assertions — no duplicate entry ·<br/>remaining quantity correct · no over-exit
+  O->>B: protective exit restored for exactly 3 contracts

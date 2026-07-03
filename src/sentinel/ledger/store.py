@@ -433,6 +433,29 @@ class LedgerStore:
             for r in rows
         ]
 
+    async def recent_fills(self, instrument: str, limit: int = 200
+                           ) -> list[dict[str, Any]]:
+        """Fills with side + wall time — the chart's trade markers."""
+        rows = await self._pool.fetch(
+            """
+            SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
+            FROM fills f JOIN orders o ON o.order_id = f.order_id
+            WHERE o.instrument = $1
+            ORDER BY f.event_seq DESC LIMIT $2
+            """,
+            instrument,
+            limit,
+        )
+        return [
+            {
+                "t": int(r["occurred_at"].timestamp()),
+                "side": r["side"],
+                "qty": format(r["qty"].normalize(), "f"),
+                "price": format(r["price"].normalize(), "f"),
+            }
+            for r in rows
+        ]
+
     # ------------------------------------------------------------ guards API
 
     async def has_unresolved(self, instrument: str) -> bool:

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>sentinel · paper</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root {
+    --bg: #0a0e0d; --panel: #101614; --edge: #1d2a25; --ink: #cfe3da;
+    --dim: #5e7268; --green: #22e07b; --red: #f87171; --amber: #fbbf24;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--mono);
+         font-size: 13px; padding: 12px; max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+  .brand { color: var(--green); font-weight: 700; letter-spacing: 2px; }
+  .chip { padding: 2px 8px; border-radius: 4px; font-size: 11px;
+          color: var(--amber); border: 1px solid var(--amber); }
+  #price { font-size: 22px; font-weight: 700; }
+  .dim { color: var(--dim); font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .ok { background: var(--green); } .bad { background: var(--red); }
+  .spacer { flex: 1; }
+
+  #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+           margin-bottom: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--edge);
+          border-radius: 8px; padding: 10px 14px; }
+  .stat span { color: var(--dim); font-size: 10px; text-transform: uppercase;
+               letter-spacing: 1.5px; display: block; margin-bottom: 4px; }
+  .stat b { font-size: 24px; font-weight: 700; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+
+  #chart { background: var(--panel); border: 1px solid var(--edge);
+           border-radius: 8px; height: 420px; margin-bottom: 12px; }
+
+  #controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  button { font-family: var(--mono); font-size: 15px; font-weight: 700;
+           border-radius: 8px; padding: 12px 28px; cursor: pointer;
+           background: transparent; }
+  #buy  { color: var(--green); border: 2px solid var(--green); }
+  #buy:hover  { background: rgba(34,224,123,.12); }
+  #sell { color: var(--red); border: 2px solid var(--red); }
+  #sell:hover { background: rgba(248,113,113,.12); }
+
+  #activity { background: var(--panel); border: 1px solid var(--edge);
+              border-radius: 8px; padding: 10px 14px; min-height: 90px; }
+  #activity h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px;
+                 text-transform: uppercase; margin-bottom: 6px; }
+  .line { padding: 2px 0; font-size: 12px; border-bottom: 1px dotted var(--edge); }
+  .line .t { color: var(--dim); }
+  .blocked { color: var(--red); }
+  #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
+           border: 1px solid var(--green); border-radius: 8px; padding: 10px 14px;
+           opacity: 0; transition: opacity .3s; max-width: 420px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">SENTINEL</span>
+  <span class="chip">PAPER · BINANCE TESTNET</span>
+  <span id="price">—</span>
+  <span class="dim" id="symbol"></span>
+  <span class="spacer"></span>
+  <span id="invs"></span>
+  <span id="conn" class="dim"><span class="dot bad"></span> connecting…</span>
+</header>
+
+<div id="stats">
+  <div class="stat"><span>Position (BTC)</span><b id="position">—</b></div>
+  <div class="stat"><span>Avg Entry</span><b id="avg">—</b></div>
+  <div class="stat"><span>Unrealized P&amp;L</span><b id="unreal">—</b></div>
+  <div class="stat"><span>Realized P&amp;L</span><b id="real">—</b></div>
+</div>
+
+<div id="chart"></div>
+
+<div id="controls">
+  <button id="buy" onclick="trade('BUY')">BUY <span id="qty-b"></span></button>
+  <button id="sell" onclick="trade('SELL')">SELL <span id="qty-s"></span></button>
+  <span class="dim" id="working"></span>
+</div>
+
+<div id="activity">
+  <h2>Activity</h2>
+  <div id="decisions"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const chart = LightweightCharts.createChart($("chart"), {
+  layout: { background: { color: "#101614" }, textColor: "#5e7268" },
+  grid: { vertLines: { color: "#16201c" }, horzLines: { color: "#16201c" } },
+  timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#1d2a25" },
+  rightPriceScale: { borderColor: "#1d2a25" },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+});
+const series = chart.addCandlestickSeries({
+  upColor: "#22e07b", downColor: "#f87171",
+  wickUpColor: "#22e07b", wickDownColor: "#f87171",
+  borderVisible: false,
+});
+new ResizeObserver(() =>
+  chart.applyOptions({ width: $("chart").clientWidth,
+                       height: $("chart").clientHeight })
+).observe($("chart"));
+
+let chartInit = false;
+let lastPrice = null;
+
+function render(s) {
+  $("symbol").textContent = s.symbol + " · 1m";
+  if (s.price) {
+    const p = parseFloat(s.price);
+    $("price").textContent = p.toLocaleString(undefined,
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    $("price").style.color =
+      lastPrice === null || p === lastPrice ? "#cfe3da"
+      : p > lastPrice ? "#22e07b" : "#f87171";
+    lastPrice = p;
+  }
+  $("invs").innerHTML = Object.entries(s.invariants).map(([k, ok]) =>
+    `<span class="dot ${ok ? "ok" : "bad"}" title="${k}"></span>`).join(" ");
+
+  $("position").textContent = s.position;
+  $("avg").textContent = s.avg_cost ?? "—";
+  const money = (el, v) => {
+    if (v === null) { el.textContent = "—"; el.className = ""; return; }
+    const up = !v.startsWith("-");
+    el.textContent = (up ? "+" : "") + v;
+    el.className = up ? "pos" : "neg";
+  };
+  money($("unreal"), s.unrealized);
+  money($("real"), s.realized);
+
+  const bars = s.candles.map(c => ({
+    time: c.t, open: c.o, high: c.h, low: c.l, close: c.c,
+  }));
+  if (!chartInit && bars.length) {
+    series.setData(bars);
+    chartInit = true;
+  } else if (bars.length) {
+    series.update(bars[bars.length - 1]);
+  }
+  series.setMarkers(s.markers.slice().reverse().map(m => ({
+    time: m.t,
+    position: m.side === "BUY" ? "belowBar" : "aboveBar",
+    color: m.side === "BUY" ? "#22e07b" : "#f87171",
+    shape: m.side === "BUY" ? "arrowUp" : "arrowDown",
+    text: m.side === "BUY" ? "B" : "S",
+  })));
+
+  $("qty-b").textContent = s.trade_qty;
+  $("qty-s").textContent = s.trade_qty;
+  $("working").textContent = s.working.length
+    ? "working: " + s.working.map(o => `${o.key} ${o.state}`).join(" · ")
+    : "";
+
+  $("decisions").innerHTML = s.decisions.map(d => {
+    const cls = d.decision.includes("BLOCKED") ? "blocked" : "";
+    return `<div class="line"><span class="t">#${d.seq}</span>
+      <span class="${cls}">${d.decision}</span>
+      ${d.detail.key ?? ""} ${d.detail.reason ?? ""}</div>`;
+  }).join("");
+
+  $("conn").innerHTML = s.halted
+    ? '<span class="dot bad"></span> HALTED'
+    : `<span class="dot ok"></span> live · feed ${s.price_age ?? "—"}s`;
+}
+
+async function trade(side) {
+  const res = await fetch("/trade/" + side, { method: "POST" });
+  const body = await res.json();
+  const toast = $("toast");
+  toast.style.borderColor = body.blocked ? "#f87171" : "#22e07b";
+  toast.textContent = body.blocked
+    ? `refused: ${body.reason}`
+    : `${side} ${body.qty} placed (${body.placed}) — watch the chart`;
+  toast.style.opacity = 1;
+  setTimeout(() => toast.style.opacity = 0, 3500);
+}
+
+function connect() {
+  const ws = new WebSocket(
+    (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onmessage = ev => render(JSON.parse(ev.data));
+  ws.onclose = () => {
+    $("conn").innerHTML = '<span class="dot bad"></span> reconnecting…';
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

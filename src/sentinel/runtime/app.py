@@ -53,12 +53,19 @@ class SentinelApp:
 
     # ------------------------------------------------------------ lifecycle
 
-    async def start(self) -> RecoveryReport:
-        report = await self.recon.startup_recovery()      # 1. recover
-        await self.protect.ensure_protection()            # 2. re-arm
+    async def start(self, *, arm_protection: bool = True) -> RecoveryReport:
+        # Consumers FIRST: anything recovery or re-arming submits must have
+        # its execution reports heard — a fill that lands before the stream
+        # subscribes is a silent divergence (found live against Binance).
         self.supervisor.spawn("broker-intake", self._broker_intake)
         self.supervisor.spawn("event-apply", self._event_apply)
         self.supervisor.spawn("reconcile", self._reconcile_loop, restart=True)
+        report = await self.recon.startup_recovery()      # 1. recover
+        if arm_protection:
+            # NOTE: with market-style exits, auto-arm means flatten-on-boot
+            # against a real broker. Manual/paper terminals pass False and
+            # keep exit authority on the human or the strategy.
+            await self.protect.ensure_protection()        # 2. re-arm
         self._accepting.set()                             # 3. open for business
         return report
 

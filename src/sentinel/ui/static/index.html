@@ -32,6 +32,13 @@
   .stat b { font-size: 24px; font-weight: 700; }
   .pos { color: var(--green); } .neg { color: var(--red); }
 
+  #tfbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  .tf { font-family: var(--mono); font-size: 12px; color: var(--dim);
+        background: var(--panel); border: 1px solid var(--edge);
+        border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  .tf:hover { color: var(--ink); }
+  .tf.active { color: var(--bg); background: var(--green);
+               border-color: var(--green); font-weight: 700; }
   #chart { background: var(--panel); border: 1px solid var(--edge);
            border-radius: 8px; height: 420px; margin-bottom: 12px; }
 
@@ -95,6 +102,14 @@
   <div class="stat"><span>Realized P&amp;L</span><b id="real">—</b></div>
 </div>
 
+<div id="tfbar">
+  <button class="tf" onclick="setTf('1m')">1m</button>
+  <button class="tf" onclick="setTf('5m')">5m</button>
+  <button class="tf" onclick="setTf('15m')">15m</button>
+  <button class="tf" onclick="setTf('1h')">1h</button>
+  <button class="tf" onclick="setTf('4h')">4h</button>
+  <button class="tf" onclick="setTf('1d')">1d</button>
+</div>
 <div id="chart"></div>
 
 <div id="sys">
@@ -166,11 +181,14 @@ new ResizeObserver(() =>
                        height: $("chart").clientHeight })
 ).observe($("chart"));
 
-let chartInit = false;
 let lastPrice = null;
 
+async function setTf(interval) {
+  await fetch("/timeframe/" + interval, { method: "POST" });
+}
+
 function render(s) {
-  $("symbol").textContent = s.symbol + " · 1m";
+  $("symbol").textContent = s.symbol + " · " + s.interval;
   if (s.price) {
     const p = parseFloat(s.price);
     $("price").textContent = p.toLocaleString(undefined,
@@ -196,12 +214,13 @@ function render(s) {
   money($("real"), s.realized);
 
   const toBar = c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c });
-  if (s.candles && !chartInit) {          // init frame: full history, once
+  if (s.candles) {                          // full history: initial OR tf switch
     series.setData(s.candles.map(toBar));
-    chartInit = true;
   } else if (s.candle) {                    // delta frames: the forming bar only
     series.update(toBar(s.candle));
   }
+  document.querySelectorAll(".tf").forEach(b =>
+    b.classList.toggle("active", b.textContent === s.interval));
   series.setMarkers(s.markers.slice().reverse().map(m => ({
     time: m.t,
     position: m.side === "BUY" ? "belowBar" : "aboveBar",

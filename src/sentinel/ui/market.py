@@ -21,7 +21,8 @@ log = logging.getLogger("sentinel.market")
 
 REST_BASE = "https://testnet.binance.vision"
 STREAM_BASE = "wss://stream.testnet.binance.vision"
-HISTORY = 180  # minutes of 1m candles
+HISTORY = 200  # candles kept, any interval
+VALID_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 
 
 class MarketData:
@@ -30,9 +31,11 @@ class MarketData:
         self.symbol = symbol
         self._rest = rest_base
         self._stream = stream_base
+        self.interval = "1m"
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
         self._price: Decimal | None = None
         self._price_ts: float = 0.0
+        self._ws = None                        # live stream, closed on tf switch
         # Async callback fired on every price/candle tick, so the UI pushes
         # in real time instead of on a timer. Wired to app.changes.bump.
         self.on_change = None
@@ -50,11 +53,28 @@ class MarketData:
 
     # ------------------------------------------------------------ lifecycle
 
+    async def set_interval(self, interval: str) -> None:
+        """Switch chart timeframe: load the new interval's history, then drop
+        the live stream so run() reconnects on the new interval."""
+        if interval not in VALID_INTERVALS or interval == self.interval:
+            return
+        self.interval = interval
+        await self.load_history()              # replaces candles for the new tf
+        ws = self._ws
+        if ws is not None:
+            try:
+                await ws.close()               # forces run() to reconnect
+            except Exception:  # noqa: BLE001
+                pass
+        if self.on_change is not None:
+            await self.on_change()
+
     async def load_history(self) -> None:
         async with httpx.AsyncClient(base_url=self._rest, timeout=10) as http:
             resp = await http.get(
                 "/api/v3/klines",
-                params={"symbol": self.symbol, "interval": "1m", "limit": HISTORY},
+                params={"symbol": self.symbol, "interval": self.interval,
+                        "limit": HISTORY},
             )
             resp.raise_for_status()
         self.candles = [
@@ -67,17 +87,23 @@ class MarketData:
             self._price_ts = time.time()
 
     async def run(self) -> None:
-        """Supervised task: stream the forming candle, reconnect forever."""
+        """Supervised task: stream the forming candle, reconnect forever.
+        Reads self.interval each connection, so a timeframe switch (which
+        closes the socket) simply reconnects on the new interval."""
         import websockets
 
         backoff = 1.0
-        url = f"{self._stream}/ws/{self.symbol.lower()}@kline_1m"
         while True:
+            interval = self.interval
+            url = f"{self._stream}/ws/{self.symbol.lower()}@kline_{interval}"
             try:
                 async with websockets.connect(url) as ws:
-                    log.info("market stream connected: %s", self.symbol)
+                    self._ws = ws
+                    log.info("market stream: %s %s", self.symbol, interval)
                     backoff = 1.0
                     async for raw in ws:
+                        if self.interval != interval:
+                            break              # switched — stale frames ignored
                         k = json.loads(raw).get("k")
                         if not k:
                             continue
@@ -96,6 +122,8 @@ class MarketData:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if self.interval != interval:
+                    continue                   # deliberate close on tf switch
                 log.warning("market stream dropped (%r); reconnecting", e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)

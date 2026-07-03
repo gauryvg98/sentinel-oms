@@ -186,6 +186,7 @@ class Terminal:
         snap = {
             "type": "state",
             "symbol": symbol,
+            "interval": self.market.interval,
             "price": str(mark.price) if mark else None,
             "price_age": self.market.price_age_s,
             "candle": self.market.candles[-1] if self.market.candles else None,
@@ -243,15 +244,20 @@ def build_ui(app: SentinelApp, market: MarketData,
         price-age keeps ticking even in dead-quiet markets."""
         await websocket.accept()
         seen = -1
+        last_interval = None
         try:
-            # Initial frame carries the candle history; deltas after don't.
+            # Initial frame carries the candle history; deltas don't — EXCEPT
+            # when the timeframe changed, which needs a full chart refresh.
             await websocket.send_text(json.dumps(await terminal.snapshot()))
             seen = app.changes.revision
+            last_interval = market.interval
             while True:
                 seen = await app.changes.wait_past(seen, timeout=2.0)
+                switched = market.interval != last_interval
                 await websocket.send_text(
-                    json.dumps(await terminal.snapshot(with_candles=False))
+                    json.dumps(await terminal.snapshot(with_candles=switched))
                 )
+                last_interval = market.interval
         except WebSocketDisconnect:
             pass
 
@@ -264,5 +270,10 @@ def build_ui(app: SentinelApp, market: MarketData,
     @ui.post("/flatten")
     async def flatten():
         return await terminal.flatten_all()
+
+    @ui.post("/timeframe/{interval}")
+    async def timeframe(interval: str):
+        await market.set_interval(interval)
+        return {"interval": market.interval}
 
     return ui

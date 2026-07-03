@@ -33,6 +33,9 @@ class MarketData:
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
         self._price: Decimal | None = None
         self._price_ts: float = 0.0
+        # Async callback fired on every price/candle tick, so the UI pushes
+        # in real time instead of on a timer. Wired to app.changes.bump.
+        self.on_change = None
 
     # ------------------------------------------------------------- MarkFeed
 
@@ -88,6 +91,8 @@ class MarketData:
                             del self.candles[:-HISTORY]
                         self._price = Decimal(k["c"])
                         self._price_ts = time.time()
+                        if self.on_change is not None:
+                            await self.on_change()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

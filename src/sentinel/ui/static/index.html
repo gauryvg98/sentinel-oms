@@ -195,14 +195,12 @@ function render(s) {
   money($("unreal"), s.unrealized);
   money($("real"), s.realized);
 
-  const bars = s.candles.map(c => ({
-    time: c.t, open: c.o, high: c.h, low: c.l, close: c.c,
-  }));
-  if (!chartInit && bars.length) {
-    series.setData(bars);
+  const toBar = c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c });
+  if (s.candles && !chartInit) {          // init frame: full history, once
+    series.setData(s.candles.map(toBar));
     chartInit = true;
-  } else if (bars.length) {
-    series.update(bars[bars.length - 1]);
+  } else if (s.candle) {                    // delta frames: the forming bar only
+    series.update(toBar(s.candle));
   }
   series.setMarkers(s.markers.slice().reverse().map(m => ({
     time: m.t,
@@ -248,9 +246,7 @@ function renderWallet(w) {
   const eq = $("wallet-equity");
   eq.textContent = w.equity != null
     ? fmtAmt(w.equity) + " " + w.quote : "—";
-  const src = $("wallet-src");
-  src.textContent = w.error ? "stale · " + w.error : "testnet";
-  src.className = "pill" + (w.error ? " warn" : "");
+  $("wallet-src").textContent = "live stream";
   const assets = Object.keys(w.balances || {});
   $("wallet-balances").innerHTML = assets.length
     ? assets.map(a =>

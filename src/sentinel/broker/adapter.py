@@ -59,7 +59,18 @@ class BrokerCancelConfirmed:
     client_order_id: str
 
 
-BrokerEvent = BrokerFill | BrokerCancelConfirmed
+@dataclass(frozen=True, slots=True)
+class BrokerBalanceUpdate:
+    """Account balances pushed by the broker after a trade. PARTIAL by nature
+    — only changed assets are included — so consumers MERGE, never replace."""
+
+    balances: dict[str, Decimal]
+
+
+# Order-lifecycle events route to the OMS engine; account events (balances)
+# are runtime state, routed straight to the app. See SentinelApp._event_apply.
+OrderStreamEvent = BrokerFill | BrokerCancelConfirmed
+BrokerEvent = OrderStreamEvent | BrokerBalanceUpdate
 
 
 @dataclass(frozen=True, slots=True)

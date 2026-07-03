@@ -260,8 +260,9 @@ def test_parse_cancel_uses_original_client_id():
     assert event.client_order_id == "K1"
 
 
-def test_parse_ignores_everything_else():
-    assert parse_user_event({"e": "outboundAccountPosition"}) is None
+def test_parse_ignores_non_actionable_execution_reports():
+    # NEW/ack execution reports carry no fill and no cancel — nothing to apply
+    # (we learn the ack from the synchronous submit response instead).
     assert parse_user_event({"e": "executionReport", "x": "NEW"}) is None
 
 
@@ -274,3 +275,18 @@ def test_ws_auth_signature_is_computed_over_sorted_params():
                             hashlib.sha256).hexdigest()
     assert params["signature"] == expected
     assert set(params) == {"apiKey", "timestamp", "signature"}
+
+
+def test_parse_balance_update_merges_free_and_locked():
+    from sentinel.broker import BrokerBalanceUpdate
+    event = parse_user_event({
+        "e": "outboundAccountPosition", "E": 1,
+        "B": [{"a": "BTC", "f": "1.00", "l": "0.02"},
+              {"a": "USDT", "f": "500.5", "l": "0"}],
+    })
+    assert isinstance(event, BrokerBalanceUpdate)
+    assert event.balances == {"BTC": Decimal("1.02"), "USDT": Decimal("500.5")}
+
+
+def test_parse_ignores_account_events_that_arent_positions():
+    assert parse_user_event({"e": "balanceUpdate"}) is None

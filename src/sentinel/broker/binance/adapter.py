@@ -31,6 +31,7 @@ import httpx
 from sentinel.domain import Side
 
 from ..adapter import (
+    BrokerBalanceUpdate,
     BrokerCancelConfirmed,
     BrokerError,
     BrokerEvent,
@@ -68,7 +69,16 @@ _STATUS_MAP = {
 def parse_user_event(payload: dict) -> BrokerEvent | None:
     """Pure parser for user-data-stream messages -> broker events.
     Unit-testable without a socket."""
-    if payload.get("e") != "executionReport":
+    event_type = payload.get("e")
+
+    if event_type == "outboundAccountPosition":
+        # Balances pushed after every trade — free (f) + locked (l) per asset.
+        # Only CHANGED assets are present; the consumer merges.
+        return BrokerBalanceUpdate(balances={
+            b["a"]: Decimal(b["f"]) + Decimal(b["l"]) for b in payload.get("B", [])
+        })
+
+    if event_type != "executionReport":
         return None
     exec_type = payload.get("x")
     if exec_type == "TRADE":

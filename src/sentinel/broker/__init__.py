@@ -2,6 +2,7 @@
 
 from .adapter import (
     BrokerAdapter,
+    BrokerBalanceUpdate,
     BrokerCancelConfirmed,
     BrokerError,
     BrokerEvent,
@@ -14,6 +15,7 @@ from .adapter import (
 
 __all__ = [
     "BrokerAdapter",
+    "BrokerBalanceUpdate",
     "BrokerCancelConfirmed",
     "BrokerError",
     "BrokerEvent",

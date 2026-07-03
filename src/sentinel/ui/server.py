@@ -75,34 +75,11 @@ async def order_stats(app: SentinelApp) -> dict:
 
 
 class Terminal:
-    # Balances refresh on this cadence — a signed weight-20 call, so never
-    # per-snapshot.
-    WALLET_TTL_S = 5.0
-
     def __init__(self, app: SentinelApp, market: MarketData,
                  trade_qty: Decimal) -> None:
         self.app = app
         self.market = market
         self.trade_qty = trade_qty
-        self._wallet: dict[str, Decimal] = {}
-        self._wallet_error: str | None = None
-
-    async def wallet_poller(self) -> None:
-        """Supervised background poller — the codebase's one pattern for live
-        I/O: the task owns the network, snapshot() only reads memory. Also
-        kills the multi-viewer thundering herd the read-through cache had
-        (two WS loops could both see the TTL expired mid-fetch)."""
-        while True:
-            try:
-                with self.app.metrics.timer("wallet_fetch_ms"):
-                    self._wallet = await self.app.broker.query_positions()
-                self._wallet_error = None
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — degrade panel, keep polling
-                self._wallet_error = type(e).__name__
-                self.app.metrics.inc("wallet_fetch_errors")
-            await asyncio.sleep(self.WALLET_TTL_S)
 
     def _intent(self, side: Side, authority: Authority) -> EconomicOrderIntent:
         mark = self.market.latest(self.market.symbol)
@@ -182,12 +159,15 @@ class Terminal:
                 results.append({"instrument": instrument, "blocked": str(e)})
         return {"flattened": results} if results else {"flat": "nothing to dump"}
 
-    async def snapshot(self) -> dict:
+    async def snapshot(self, *, with_candles: bool = True) -> dict:
+        """The UI state. with_candles=False omits the ~180-bar history (sent
+        once on connect) and ships only the forming bar — the bulk of the
+        payload — so per-tick updates are tiny."""
         symbol = self.market.symbol
         pnl_all = await compute_pnl(self.app.store._pool, self.market)
         pnl = pnl_all.get(symbol)
         mark = self.market.latest(symbol)
-        balances = self._wallet  # poller-owned; this path never does network I/O
+        balances = self.app.latest_balances  # stream-fed, never polled
         working = [
             o for o in await self.app.store.recent_orders(20)
             if o["state"] not in ("FILLED", "CANCELED", "REJECTED")
@@ -200,21 +180,24 @@ class Terminal:
         if base and mark and balances.get(base):
             equity += balances[base] * mark.price
         # Display only the traded pair's assets: the testnet account holds
-        # ~445 airdropped tokens — shipping them all at 1Hz bloats the WS
-        # payload and the panel, and equity only prices base+quote anyway.
+        # ~445 airdropped tokens — shipping them all bloats the payload/panel,
+        # and equity only prices base+quote anyway.
         shown = {a: v for a, v in balances.items() if a in (base, quote)}
-        return {
+        snap = {
+            "type": "state",
             "symbol": symbol,
             "price": str(mark.price) if mark else None,
             "price_age": self.market.price_age_s,
+            "candle": self.market.candles[-1] if self.market.candles else None,
             "accepting": self.app.accepting,
             "halted": self.app.supervisor.halted.is_set(),
             "task_failures": len(self.app.supervisor.failures),
             "metrics": self.app.metrics.snapshot(),
             "orders": await order_stats(self.app),
             "invariants": await check_invariants(self.app),
-            "candles": self.market.candles,
-            "markers": await self.app.store.recent_fills(symbol),
+            # Chart markers: only the recent window — older fills scroll off
+            # the visible chart, and shipping hundreds bloats every delta.
+            "markers": await self.app.store.recent_fills(symbol, limit=60),
             "position": format(pnl.position.normalize(), "f") if pnl else "0",
             "avg_cost": quantize(pnl.avg_cost) if pnl else None,
             "realized": quantize(pnl.realized) if pnl else "0.00",
@@ -224,14 +207,15 @@ class Terminal:
             "trade_qty": str(self.trade_qty),
             "wallet": {
                 "balances": {
-                    a: format(v.normalize(), "f")
-                    for a, v in sorted(shown.items())
+                    a: format(v.normalize(), "f") for a, v in sorted(shown.items())
                 },
                 "equity": quantize(equity) if balances else None,
                 "quote": quote,
-                "error": self._wallet_error,
             },
         }
+        if with_candles:
+            snap["candles"] = self.market.candles
+        return snap
 
 
 def build_ui(app: SentinelApp, market: MarketData,
@@ -242,11 +226,11 @@ def build_ui(app: SentinelApp, market: MarketData,
     @ui.on_event("startup")
     async def _startup() -> None:
         await market.load_history()
+        market.on_change = app.changes.bump          # ticks push to the UI
         # Manual terminal: no auto-arm — a market-style protective exit on
         # boot would flatten the position. Exits stay on the SELL button.
         await app.start(arm_protection=False)
         app.supervisor.spawn("market-data", market.run, restart=True)
-        app.supervisor.spawn("wallet-poller", terminal.wallet_poller, restart=True)
 
     @ui.get("/")
     async def index():
@@ -254,11 +238,20 @@ def build_ui(app: SentinelApp, market: MarketData,
 
     @ui.websocket("/ws")
     async def ws(websocket: WebSocket):
+        """Event-driven: send full state once, then push only when the world
+        changes (fill, order update, balance, tick), with a 2s heartbeat so
+        price-age keeps ticking even in dead-quiet markets."""
         await websocket.accept()
+        seen = -1
         try:
+            # Initial frame carries the candle history; deltas after don't.
+            await websocket.send_text(json.dumps(await terminal.snapshot()))
+            seen = app.changes.revision
             while True:
-                await websocket.send_text(json.dumps(await terminal.snapshot()))
-                await asyncio.sleep(1.0)
+                seen = await app.changes.wait_past(seen, timeout=2.0)
+                await websocket.send_text(
+                    json.dumps(await terminal.snapshot(with_candles=False))
+                )
         except WebSocketDisconnect:
             pass
 

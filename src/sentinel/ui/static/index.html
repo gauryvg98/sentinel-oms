@@ -70,6 +70,32 @@
            border: 1px solid var(--green); border-radius: 6px; padding: 8px 12px;
            opacity: 0; transition: opacity .3s; max-width: 380px; }
   .wide { grid-column: span 2; }
+  /* ------- story mode ------- */
+  #story { display: none; background: #0d1512; border: 1px solid var(--green);
+           border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
+           box-shadow: 0 0 24px rgba(34,224,123,.12); }
+  #story.on { display: block; }
+  #story .head { display: flex; align-items: baseline; gap: 12px; }
+  #story .stitle { color: var(--green); font-weight: 700; font-size: 14px;
+                   letter-spacing: 1px; }
+  #story .step { color: var(--dim); font-size: 11px; }
+  #story .acttitle { font-size: 16px; color: var(--ink); margin: 10px 0 6px;
+                     font-weight: 700; }
+  #story .text { font-size: 13px; line-height: 1.55; max-width: 900px; }
+  #story .contrast { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+                     margin-top: 12px; }
+  #story .ghost { border-radius: 8px; padding: 8px 12px; font-size: 12px;
+                  line-height: 1.45; }
+  #story .ghost.naive { border: 1px solid var(--red);
+                        background: rgba(248,113,113,.06); }
+  #story .ghost.ours { border: 1px solid var(--green);
+                       background: rgba(34,224,123,.06); }
+  #story .ghost b { display: block; font-size: 10px; letter-spacing: 1.5px;
+                    margin-bottom: 4px; }
+  #story .ghost.naive b { color: var(--red); }
+  #story .ghost.ours b { color: var(--green); }
+  #story .controls { margin-top: 12px; display: flex; gap: 8px; }
+  .glow { box-shadow: 0 0 0 1px var(--green), 0 0 22px rgba(34,224,123,.25) !important; }
 </style>
 </head>
 <body>
@@ -83,14 +109,31 @@
   <span id="conn" class="dim"><span class="dot bad"></span> connecting…</span>
 </header>
 
+<div id="story">
+  <div class="head">
+    <span class="stitle" id="s-title"></span>
+    <span class="step" id="s-step"></span>
+  </div>
+  <div class="acttitle" id="s-acttitle"></div>
+  <div class="text" id="s-text"></div>
+  <div class="contrast">
+    <div class="ghost naive"><b>THE NAIVE BOT</b><span id="s-naive"></span></div>
+    <div class="ghost ours"><b>SENTINEL</b><span id="s-sentinel"></span></div>
+  </div>
+  <div class="controls">
+    <button id="s-next" onclick="storyNext()">next ▸</button>
+    <button class="danger" onclick="storyExit()">exit story</button>
+  </div>
+</div>
+
 <div class="grid">
-  <div class="panel">
+  <div class="panel" id="p-orders">
     <h2>Orders</h2>
     <table><thead><tr><th>key</th><th>side</th><th>fill</th><th></th>
       <th>state</th></tr></thead><tbody id="orders"></tbody></table>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="p-positions">
     <h2>Positions &amp; P&amp;L</h2>
     <table><thead><tr><th>instr</th><th class="num">pos</th>
       <th class="num">avg</th><th class="num">real</th>
@@ -104,14 +147,16 @@
     <div style="margin-top:8px" id="session"></div>
   </div>
 
-  <div class="panel wide">
+  <div class="panel wide" id="p-log">
     <h2>Decision Log — why it did (and didn't)</h2>
     <div id="log"></div>
   </div>
 
   <div class="panel">
-    <h2>Chaos</h2>
+    <h2>Stories &amp; Chaos</h2>
     <div id="chaos">
+      <button onclick="storyStart('vanishing-ack')">▶ story: the vanishing ack</button>
+      <button onclick="storyStart('the-crash')">▶ story: kill it mid-trade</button>
       <button onclick="demo('trade')">place trade</button>
       <button onclick="demo('storm')">fill storm ×9</button>
       <button class="danger" onclick="demo('timeout')">timeout + hidden fill</button>
@@ -121,7 +166,7 @@
     </div>
   </div>
 
-  <div class="panel wide">
+  <div class="panel wide" id="p-ledger">
     <h2>Ledger Tail</h2>
     <div id="ledger"></div>
   </div>
@@ -213,12 +258,39 @@ async function demo(action) {
   setTimeout(() => toast.style.opacity = 0, 2500);
 }
 
+const PANELS = ["p-orders", "p-positions", "p-log", "p-ledger"];
+function renderStory(s) {
+  const box = $("story");
+  PANELS.forEach(id => $(id)?.classList.remove("glow"));
+  $("invs").classList.remove("glow");
+  if (!s || !s.active) { box.classList.remove("on"); return; }
+  box.classList.add("on");
+  $("s-title").textContent = s.title.toUpperCase();
+  $("s-step").textContent = `act ${s.step} / ${s.total}`;
+  $("s-acttitle").textContent = s.act_title;
+  $("s-text").textContent = s.text;
+  $("s-naive").textContent = s.naive;
+  $("s-sentinel").textContent = s.sentinel;
+  $("s-next").textContent = s.done ? "finish ✓" : "next ▸";
+  const target = s.highlight === "invs" ? $("invs") : $("p-" + s.highlight);
+  target?.classList.add("glow");
+}
+async function storyStart(name) {
+  await fetch("/story/start/" + name, { method: "POST" });
+}
+async function storyNext() { await fetch("/story/next", { method: "POST" }); }
+async function storyExit() { await fetch("/story/exit", { method: "POST" }); }
+
 function connect() {
   const ws = new WebSocket(
     (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.onopen = () =>
     $("conn").innerHTML = '<span class="dot ok"></span> live';
-  ws.onmessage = ev => render(JSON.parse(ev.data));
+  ws.onmessage = ev => {
+    const snap = JSON.parse(ev.data);
+    render(snap);
+    renderStory(snap.story);
+  };
   ws.onclose = () => {
     $("conn").innerHTML = '<span class="dot bad"></span> reconnecting…';
     setTimeout(connect, 1000);

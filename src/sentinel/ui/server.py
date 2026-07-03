@@ -244,8 +244,11 @@ async def build_snapshot(app: SentinelApp, marks: SimMarkFeed,
 
 def build_ui(app: SentinelApp, sim: ScriptedBroker,
              marks: SimMarkFeed) -> FastAPI:
+    from .story import StoryEngine
+
     ui = FastAPI(title="sentinel-terminal")
     driver = DemoDriver(app, sim, marks)
+    stories = StoryEngine(driver)
 
     @ui.on_event("startup")
     async def _startup() -> None:
@@ -262,10 +265,23 @@ def build_ui(app: SentinelApp, sim: ScriptedBroker,
         try:
             while True:
                 snap = await build_snapshot(app, marks, driver)
+                snap["story"] = stories.snapshot()
                 await websocket.send_text(json.dumps(snap))
                 await asyncio.sleep(0.25)
         except WebSocketDisconnect:
             pass
+
+    @ui.post("/story/start/{name}")
+    async def story_start(name: str):
+        return await stories.start(name)
+
+    @ui.post("/story/next")
+    async def story_next():
+        return await stories.next()
+
+    @ui.post("/story/exit")
+    async def story_exit():
+        return await stories.exit()
 
     @ui.post("/demo/{action}")
     async def demo(action: str):

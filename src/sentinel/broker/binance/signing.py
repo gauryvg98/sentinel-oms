@@ -19,6 +19,18 @@ def fmt_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def ws_auth_params(api_key: str, secret: str, *, timestamp_ms: int) -> dict:
+    """Params for WebSocket-API signed requests (userDataStream.subscribe.signature).
+    The signature payload is the urlencoded params SORTED ALPHABETICALLY —
+    unlike REST, where we sign the string exactly as sent."""
+    params = {"apiKey": api_key, "timestamp": timestamp_ms}
+    payload = urlencode(sorted(params.items()))
+    params["signature"] = hmac.new(
+        secret.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    return params
+
+
 def signed_query(params: dict, secret: str, *, timestamp_ms: int) -> str:
     """Return the final query string: params + timestamp + signature.
     Order matters: the signature covers exactly the encoded string."""

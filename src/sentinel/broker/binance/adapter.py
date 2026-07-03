@@ -45,7 +45,10 @@ from .signing import ServerClock, fmt_decimal, signed_query
 log = logging.getLogger("sentinel.binance")
 
 TESTNET_BASE = "https://testnet.binance.vision"
-TESTNET_WS = "wss://stream.testnet.binance.vision"
+# The WebSocket API endpoint: user-data events arrive on THIS connection
+# after userDataStream.subscribe.signature. (The REST listenKey flow —
+# POST /api/v3/userDataStream — is dead: 410 Gone, found live 2026-07.)
+TESTNET_WS = "wss://ws-api.testnet.binance.vision/ws-api/v3"
 
 _ABSENT_CODE = -2013           # "Order does not exist" — the ONLY proof of absence
 
@@ -257,37 +260,40 @@ class BinanceSpotAdapter:
 
     # --------------------------------------------------------- user stream
 
-    async def _listen_key(self) -> str:
-        resp = await self._http.post("/api/v3/userDataStream")
-        resp.raise_for_status()
-        return resp.json()["listenKey"]
-
-    async def _keepalive(self, listen_key: str) -> None:
-        while True:
-            await asyncio.sleep(25 * 60)
-            await self._http.put(
-                "/api/v3/userDataStream", params={"listenKey": listen_key}
-            )
-
     async def events(self) -> AsyncIterator[BrokerEvent]:
-        """At-least-once event stream with reconnect. Gaps across reconnects
-        are the reconciler's job (query_order backfills); duplicates are the
-        ledger's job (exec_id dedup). The stream just delivers."""
+        """At-least-once event stream with reconnect, via the WebSocket API:
+        connect -> userDataStream.subscribe.signature (HMAC) -> events arrive
+        on the SAME connection as {"subscriptionId", "event": {...}} frames.
+        Gaps across reconnects are the reconciler's job (query_order
+        backfills); duplicates are the ledger's job (exec_id dedup)."""
         import websockets
+
+        from .signing import ws_auth_params
 
         backoff = 1.0
         while True:
-            keepalive: asyncio.Task | None = None
             try:
-                listen_key = await self._listen_key()
-                keepalive = asyncio.create_task(self._keepalive(listen_key))
-                async with websockets.connect(
-                    f"{self._ws_url}/ws/{listen_key}"
-                ) as ws:
-                    log.info("user stream connected")
+                await self._sync_clock()
+                async with websockets.connect(self._ws_url) as ws:
+                    await ws.send(json.dumps({
+                        "id": "sentinel-subscribe",
+                        "method": "userDataStream.subscribe.signature",
+                        "params": ws_auth_params(
+                            self._http.headers["X-MBX-APIKEY"], self._secret,
+                            timestamp_ms=self._clock.now_ms(),
+                        ),
+                    }))
+                    ack = json.loads(await ws.recv())
+                    if ack.get("status") != 200:
+                        raise BrokerError(f"user stream subscribe failed: {ack}")
+                    log.info("user stream subscribed")
                     backoff = 1.0
                     async for raw in ws:
-                        event = parse_user_event(json.loads(raw))
+                        frame = json.loads(raw)
+                        payload = frame.get("event")
+                        if payload is None:
+                            continue  # request responses, session notices
+                        event = parse_user_event(payload)
                         if event is not None:
                             yield event
             except asyncio.CancelledError:
@@ -296,9 +302,6 @@ class BinanceSpotAdapter:
                 log.warning("user stream dropped (%r); reconnecting", e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
-            finally:
-                if keepalive is not None:
-                    keepalive.cancel()
 
     # ------------------------------------------------------------- helpers
 

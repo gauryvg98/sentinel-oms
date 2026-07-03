@@ -263,3 +263,14 @@ def test_parse_cancel_uses_original_client_id():
 def test_parse_ignores_everything_else():
     assert parse_user_event({"e": "outboundAccountPosition"}) is None
     assert parse_user_event({"e": "executionReport", "x": "NEW"}) is None
+
+
+def test_ws_auth_signature_is_computed_over_sorted_params():
+    from sentinel.broker.binance.signing import ws_auth_params
+
+    params = ws_auth_params(KEY, SECRET, timestamp_ms=1_700_000_000_000)
+    payload = f"apiKey={KEY}&timestamp=1700000000000"  # alphabetical order
+    expected = hmac_lib.new(SECRET.encode(), payload.encode(),
+                            hashlib.sha256).hexdigest()
+    assert params["signature"] == expected
+    assert set(params) == {"apiKey", "timestamp", "signature"}

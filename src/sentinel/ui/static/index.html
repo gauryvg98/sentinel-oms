@@ -60,6 +60,10 @@
   #buy:hover  { background: rgba(34,224,123,.12); }
   #sell { color: var(--red); border: 2px solid var(--red); }
   #sell:hover { background: rgba(248,113,113,.12); }
+  #flatten { color: var(--amber); border: 2px solid var(--amber);
+             margin-left: auto; }
+  #flatten:hover { background: rgba(251,191,36,.12); }
+  #flatten:disabled { opacity: .35; cursor: not-allowed; }
 
   #activity { background: var(--panel); border: 1px solid var(--edge);
               border-radius: 8px; padding: 10px 14px; min-height: 90px; }
@@ -132,6 +136,7 @@
   <button id="buy" onclick="trade('BUY')">BUY <span id="qty-b"></span></button>
   <button id="sell" onclick="trade('SELL')">SELL <span id="qty-s"></span></button>
   <span class="dim" id="working"></span>
+  <button id="flatten" onclick="flatten()">⚑ DUMP ALL</button>
 </div>
 
 <div id="activity">
@@ -178,6 +183,7 @@ function render(s) {
     `<span class="dot ${ok ? "ok" : "bad"}" title="${k}"></span>`).join(" ");
 
   $("position").textContent = s.position;
+  $("flatten").disabled = parseFloat(s.position) === 0;
   $("avg").textContent = s.avg_cost ?? "—";
   const money = (el, v) => {
     if (v === null) { el.textContent = "—"; el.className = ""; return; }
@@ -302,16 +308,37 @@ function renderSys(s) {
     : "";
 }
 
-async function trade(side) {
-  const res = await fetch("/trade/" + side, { method: "POST" });
-  const body = await res.json();
+function showToast(msg, good = true) {
   const toast = $("toast");
-  toast.style.borderColor = body.blocked ? "#f87171" : "#22e07b";
-  toast.textContent = body.blocked
-    ? `refused: ${body.reason}`
-    : `${side} ${body.qty} placed (${body.placed}) — watch the chart`;
+  toast.style.borderColor = good ? "#22e07b" : "#f87171";
+  toast.textContent = msg;
   toast.style.opacity = 1;
   setTimeout(() => toast.style.opacity = 0, 3500);
+}
+
+async function trade(side) {
+  const body = await (await fetch("/trade/" + side, { method: "POST" })).json();
+  showToast(
+    body.blocked ? `refused: ${body.reason}`
+                 : `${side} ${body.qty} placed (${body.placed}) — watch the chart`,
+    !body.blocked);
+}
+
+async function flatten() {
+  const btn = $("flatten");
+  btn.disabled = true;
+  const body = await (await fetch("/flatten", { method: "POST" })).json();
+  if (body.flat) {
+    showToast("already flat — nothing to dump");
+  } else {
+    const f = body.flattened || [];
+    const ok = f.filter(x => x.placed).map(x => `${x.instrument} ${x.qty}`);
+    const bad = f.filter(x => x.blocked);
+    showToast(
+      `dumped: ${ok.join(", ") || "none"}` +
+        (bad.length ? ` · blocked: ${bad.length}` : ""),
+      bad.length === 0);
+  }
 }
 
 function connect() {

@@ -140,6 +140,36 @@ class Terminal:
             self.app.metrics.inc("orders_blocked")
             return {"blocked": type(e).__name__, "reason": str(e)}
 
+    async def flatten_all(self) -> dict:
+        """Dump every open position to flat with market exits. Each is a
+        PROTECTIVE_EXIT for the full |position|, so the never-over-exit guard
+        bounds it to reconciled holdings — a dump can undershoot (a fill
+        raced it) but can NEVER oversell or flip us short."""
+        results = []
+        for instrument, qty in (await self.app.store.load_positions()).items():
+            if qty == 0:
+                continue
+            side = Side.SELL if qty > 0 else Side.BUY
+            mark = self.market.latest(instrument)
+            intent = EconomicOrderIntent(
+                intent_id=uuid4(),
+                idempotency_key=f"DUMP-{uuid4().hex[:12]}",
+                instrument=instrument, side=side, qty=abs(qty),
+                limit_price=None,                 # market: flatten now
+                authority=Authority.PROTECTIVE_EXIT, trace_id=uuid4(),
+                quote_at_decision=mark.price if mark else None,
+            )
+            try:
+                stored = await self.app.gateway.place(uuid4(), intent)
+                self.app.metrics.inc("orders_placed")
+                results.append({"instrument": instrument,
+                                "placed": stored.core.client_order_id,
+                                "qty": str(stored.core.qty)})
+            except PlacementBlocked as e:
+                self.app.metrics.inc("orders_blocked")
+                results.append({"instrument": instrument, "blocked": str(e)})
+        return {"flattened": results} if results else {"flat": "nothing to dump"}
+
     async def snapshot(self) -> dict:
         symbol = self.market.symbol
         pnl_all = await compute_pnl(self.app.store._pool, self.market)
@@ -225,5 +255,9 @@ def build_ui(app: SentinelApp, market: MarketData,
         if side not in ("BUY", "SELL"):
             return {"error": side}
         return await terminal.trade(side)
+
+    @ui.post("/flatten")
+    async def flatten():
+        return await terminal.flatten_all()
 
     return ui

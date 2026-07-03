@@ -133,17 +133,27 @@ class DemoDriver:
         report = await self.app.protect.ensure_protection()
         return {"protection_orders": len(report.placed)}
 
-    async def crash_recover(self) -> dict:
-        """Corrupt every projection, then run startup recovery live."""
+    async def corrupt(self) -> dict:
+        """Vandalize the projections — positions become lies (99), live
+        orders forget their fills. Watch the INV lights go RED: the auditor
+        catches the corruption live. Nothing self-heals until you recover."""
         await self.app.store._pool.execute("UPDATE positions SET qty = 99")
         await self.app.store._pool.execute(
             "UPDATE orders SET filled_qty = 0 WHERE state NOT IN "
             "('FILLED','CANCELED','REJECTED')"
         )
+        return {"corrupted": "positions=99, live fills zeroed",
+                "watch": "INV strip + positions panel"}
+
+    async def recover(self) -> dict:
+        """R1.11/R1.12 live: rebuild projections from the event ledger,
+        reconcile every non-terminal order against the broker, re-arm
+        protection. The lies are corrected by the two sources of truth."""
         report = await self.app.recon.startup_recovery()
-        await self.app.protect.ensure_protection()
+        armed = await self.app.protect.ensure_protection()
         return {"events_replayed": report.events_replayed,
-                "reconciled": report.reconciled}
+                "reconciled": report.reconciled,
+                "protection_orders": len(armed.placed)}
 
 
 async def check_invariants(app: SentinelApp) -> dict[str, bool]:
@@ -259,7 +269,8 @@ def build_ui(app: SentinelApp, sim: ScriptedBroker,
             "timeout": driver.timeout,
             "storm": driver.storm,
             "flatten": driver.flatten,
-            "crash": driver.crash_recover,
+            "corrupt": driver.corrupt,
+            "recover": driver.recover,
         }
         if action not in actions:
             return {"error": f"unknown action {action}"}

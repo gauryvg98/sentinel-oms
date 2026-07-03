@@ -30,11 +30,18 @@ from sentinel.runtime import SentinelApp
 STATIC = Path(__file__).parent / "static"
 
 INSTRUMENT = "IDX-OPT"
+INSTRUMENTS = ["IDX-OPT", "IDX-MINI", "ETF-OPT"]
+STARTS = {"IDX-OPT": "4.20", "IDX-MINI": "0.42", "ETF-OPT": "5.10"}
 
 
 class DemoDriver:
     """Drives the ScriptedBroker + marks on a real-time cadence and exposes
-    the chaos actions the UI buttons call."""
+    the chaos actions the UI buttons call.
+
+    Demo-script rule learned the hard way: every scripted order must reach a
+    terminal state (fill fully or get canceled). A permanently-PARTIAL entry
+    holds the one-live-entry guard forever and deadlocks the whole demo —
+    the OMS refusing correctly, the script deserving it."""
 
     def __init__(self, app: SentinelApp, sim: ScriptedBroker,
                  marks: SimMarkFeed) -> None:
@@ -42,7 +49,9 @@ class DemoDriver:
         self.sim = sim
         self.marks = marks
         self._n = 0
-        marks.add_instrument(INSTRUMENT, "4.20")
+        self._rotate = 0
+        for inst in INSTRUMENTS:
+            marks.add_instrument(inst, STARTS[inst])
 
     async def run(self) -> None:
         while True:
@@ -56,47 +65,67 @@ class DemoDriver:
         self._n += 1
         return f"{prefix}-{self._n}"
 
-    def _intent(self, key: str, qty: str, side=Side.BUY,
+    def _next_instrument(self) -> str:
+        self._rotate += 1
+        return INSTRUMENTS[self._rotate % len(INSTRUMENTS)]
+
+    def _intent(self, key: str, qty: str, instrument: str, side=Side.BUY,
                 authority=Authority.ENTRY) -> EconomicOrderIntent:
-        mark = self.marks.latest(INSTRUMENT)
+        mark = self.marks.latest(instrument)
         return EconomicOrderIntent(
-            intent_id=uuid4(), idempotency_key=key, instrument=INSTRUMENT,
+            intent_id=uuid4(), idempotency_key=key, instrument=instrument,
             side=side, qty=Decimal(qty), limit_price=None,
             authority=authority, trace_id=uuid4(),
             quote_at_decision=mark.price if mark else None,
         )
 
-    async def trade(self) -> dict:
-        """Place an entry that fills over the next few steps."""
+    async def trade(self, instrument: str | None = None) -> dict:
+        """Place an entry that fills COMPLETELY over the next few steps —
+        terminal by construction, so the entry lane frees itself."""
         key = self._key("K")
+        instrument = instrument or self._next_instrument()
         step = self.sim.current_step
-        self.sim._script.fill(key, qty="1", price="4.20", at_step=step + 1)
-        self.sim._script.fill(key, qty="1", price="4.25", at_step=step + 3)
+        mark = self.marks.latest(instrument)
+        px = mark.price if mark else Decimal("4.20")
+        self.sim._script.fill(key, qty="1", price=str(px), at_step=step + 1)
+        self.sim._script.fill(key, qty="1", price=str(px), at_step=step + 3)
         try:
-            stored = await self.app.gateway.place(uuid4(), self._intent(key, "2"))
-            return {"placed": key, "state": stored.core.state.value}
+            stored = await self.app.gateway.place(
+                uuid4(), self._intent(key, "2", instrument)
+            )
+            return {"placed": key, "instrument": instrument,
+                    "state": stored.core.state.value}
         except PlacementBlocked as e:
             return {"blocked": key, "reason": str(e)}
 
     async def timeout(self) -> dict:
-        """Force the classic: timeout with hidden broker acceptance + a fill
-        while UNKNOWN. The reconcile loop discovers and adopts it."""
+        """The classic: timeout with hidden broker acceptance, and the FULL
+        quantity fills while UNKNOWN. Reconciliation discovers, adopts, and
+        the order completes — the lane frees itself after the drama."""
         key = self._key("T")
+        instrument = self._next_instrument()
         step = self.sim.current_step
+        mark = self.marks.latest(instrument)
+        px = mark.price if mark else Decimal("4.30")
         self.sim._script.on_submit(key, timeout=True, accept_on_timeout=True)
-        self.sim._script.fill(key, qty="1", price="4.30", at_step=step + 2)
+        self.sim._script.fill(key, qty="2", price=str(px), at_step=step + 2)
         try:
-            stored = await self.app.gateway.place(uuid4(), self._intent(key, "2"))
-            return {"placed": key, "state": stored.core.state.value}
+            stored = await self.app.gateway.place(
+                uuid4(), self._intent(key, "2", instrument)
+            )
+            return {"placed": key, "instrument": instrument,
+                    "state": stored.core.state.value}
         except PlacementBlocked as e:
             return {"blocked": key, "reason": str(e)}
 
     async def storm(self) -> dict:
-        """A burst of trades — watch throughput, queue depth, backpressure."""
+        """A burst of trades rotated across instruments — parallel writer
+        lanes, throughput, queue depth. Some blocks are EXPECTED (a lane is
+        busy until its order completes): that's the guard, visible."""
         results = []
-        for _ in range(10):
+        for _ in range(9):
             results.append(await self.trade())
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.4)
         return {"placed": sum(1 for r in results if "placed" in r),
                 "blocked": sum(1 for r in results if "blocked" in r)}
 

@@ -119,13 +119,18 @@ class DemoDriver:
             return {"blocked": key, "reason": str(e)}
 
     async def storm(self) -> dict:
-        """A burst of trades rotated across instruments — parallel writer
-        lanes, throughput, queue depth. Some blocks are EXPECTED (a lane is
-        busy until its order completes): that's the guard, visible."""
+        """Three waves × three lanes. Within a wave, all lanes fire
+        simultaneously (parallel single-writer lanes); between waves we wait
+        for fills to complete so the storm never fights the one-live-entry
+        guard it's supposed to showcase. A lane still mid-fill from earlier
+        clicking may block once — the guard, visible, not broken."""
         results = []
-        for _ in range(9):
-            results.append(await self.trade())
-            await asyncio.sleep(0.4)
+        for _ in range(3):
+            wave = await asyncio.gather(
+                *(self.trade(instrument) for instrument in INSTRUMENTS)
+            )
+            results.extend(wave)
+            await asyncio.sleep(2.2)      # fills land at ~1.5s; free the lanes
         return {"placed": sum(1 for r in results if "placed" in r),
                 "blocked": sum(1 for r in results if "blocked" in r)}
 

@@ -35,6 +35,23 @@
   #chart { background: var(--panel); border: 1px solid var(--edge);
            border-radius: 8px; height: 420px; margin-bottom: 12px; }
 
+  #sys { display: grid; gap: 10px; margin-bottom: 12px;
+         grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .panel { background: var(--panel); border: 1px solid var(--edge);
+           border-radius: 8px; padding: 10px 14px; }
+  .panel h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px;
+              text-transform: uppercase; margin-bottom: 8px;
+              display: flex; align-items: center; gap: 6px; }
+  .kv { display: flex; justify-content: space-between; align-items: baseline;
+        padding: 3px 0; font-size: 12px; }
+  .kv > span { color: var(--dim); }
+  .kv > b { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .kv .unit { color: var(--dim); font-weight: 400; font-size: 10px; }
+  .warn { color: var(--amber); } .good { color: var(--green); }
+  .pill { font-size: 9px; padding: 1px 6px; border-radius: 4px; margin-left: 4px;
+          border: 1px solid var(--edge); color: var(--dim);
+          font-variant-numeric: tabular-nums; }
+
   #controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
   button { font-family: var(--mono); font-size: 15px; font-weight: 700;
            border-radius: 8px; padding: 12px 28px; cursor: pointer;
@@ -75,6 +92,41 @@
 </div>
 
 <div id="chart"></div>
+
+<div id="sys">
+  <div class="panel">
+    <h2>Wallet <span class="pill" id="wallet-src">testnet</span></h2>
+    <div class="kv"><span>Equity</span><b id="wallet-equity">—</b></div>
+    <div id="wallet-balances"></div>
+  </div>
+  <div class="panel">
+    <h2>OMS State <span class="dot" id="sys-dot"></span></h2>
+    <div class="kv"><span>Status</span><b id="sys-status">—</b></div>
+    <div class="kv"><span>Accepting cmds</span><b id="sys-accepting">—</b></div>
+    <div class="kv"><span>Queue depth</span><b id="sys-queue">—</b></div>
+    <div class="kv"><span>Reconciliations</span><b id="sys-recon">—</b></div>
+    <div class="kv"><span>Task failures</span><b id="sys-failures">—</b></div>
+    <div class="kv"><span>Feed age</span><b id="sys-feed">—</b></div>
+  </div>
+  <div class="panel">
+    <h2>Latency &amp; Throughput</h2>
+    <div class="kv"><span>Event apply</span>
+      <b id="lat-apply">—</b></div>
+    <div class="kv"><span>Order place</span>
+      <b id="lat-place">—</b></div>
+    <div class="kv"><span>Events applied</span><b id="thr-events">—</b></div>
+    <div class="kv"><span>Events / sec</span>
+      <b id="thr-eps">—</b></div>
+    <div class="kv"><span>Orders placed</span><b id="thr-placed">—</b></div>
+    <div class="kv"><span>Orders blocked</span><b id="thr-blocked">—</b></div>
+  </div>
+  <div class="panel">
+    <h2>Orders &amp; Fills</h2>
+    <div class="kv"><span>Total orders</span><b id="ord-total">—</b></div>
+    <div id="ord-states"></div>
+    <div class="kv"><span>Total fills</span><b id="ord-fills">—</b></div>
+  </div>
+</div>
 
 <div id="controls">
   <button id="buy" onclick="trade('BUY')">BUY <span id="qty-b"></span></button>
@@ -169,6 +221,85 @@ function render(s) {
   $("conn").innerHTML = s.halted
     ? '<span class="dot bad"></span> HALTED'
     : `<span class="dot ok"></span> live · feed ${s.price_age ?? "—"}s`;
+
+  renderSys(s);
+}
+
+const lat = (h) => h && h.p50 != null
+  ? `${h.p50}<span class="unit"> p50</span> · ${h.p95}<span class="unit"> p95</span> · ${h.p99 ?? "—"}<span class="unit"> p99</span> ms`
+  : "—";
+
+const fmtAmt = (v) => {
+  const n = parseFloat(v);
+  if (!isFinite(n)) return v;
+  const d = Math.abs(n) >= 1000 ? 2 : Math.abs(n) >= 1 ? 4 : 8;
+  return n.toLocaleString(undefined, { maximumFractionDigits: d });
+};
+
+function renderWallet(w) {
+  if (!w) return;
+  const eq = $("wallet-equity");
+  eq.textContent = w.equity != null
+    ? fmtAmt(w.equity) + " " + w.quote : "—";
+  const src = $("wallet-src");
+  src.textContent = w.error ? "stale · " + w.error : "testnet";
+  src.className = "pill" + (w.error ? " warn" : "");
+  const assets = Object.keys(w.balances || {});
+  $("wallet-balances").innerHTML = assets.length
+    ? assets.map(a =>
+        `<div class="kv"><span>${a}</span><b>${fmtAmt(w.balances[a])}</b></div>`
+      ).join("")
+    : '<div class="kv"><span class="dim">no balances</span><b></b></div>';
+}
+
+function renderSys(s) {
+  renderWallet(s.wallet);
+  const m = s.metrics || {};
+  const c = m.counters || {}, g = m.gauges || {}, r = m.rates || {}, L = m.latency || {};
+
+  // --- OMS state ---
+  const dot = $("sys-dot");
+  dot.className = "dot " + (s.halted ? "bad" : "ok");
+  $("sys-status").textContent = s.halted ? "HALTED" : "LIVE";
+  $("sys-status").className = s.halted ? "neg" : "good";
+  $("sys-accepting").textContent = s.accepting ? "yes" : "no";
+  $("sys-accepting").className = s.accepting ? "good" : "warn";
+
+  const q = g.queue_depth ?? 0;
+  $("sys-queue").textContent = q;
+  $("sys-queue").className = q > 0 ? "warn" : "";
+
+  $("sys-recon").textContent = c.reconciliations ?? 0;
+  const f = s.task_failures ?? 0;
+  $("sys-failures").textContent = f;
+  $("sys-failures").className = f > 0 ? "neg" : "good";
+  $("sys-feed").innerHTML = (s.price_age ?? "—") + '<span class="unit"> s</span>';
+
+  // --- latency & throughput ---
+  $("lat-apply").innerHTML = lat(L.event_apply_ms);
+  $("lat-place").innerHTML = lat(L.place_ms);
+  $("thr-events").textContent = c.events_applied ?? 0;
+  $("thr-eps").innerHTML = (r.events_applied ?? 0) + '<span class="unit"> /s</span>';
+  $("thr-placed").textContent = c.orders_placed ?? 0;
+  const blk = c.orders_blocked ?? 0;
+  $("thr-blocked").textContent = blk;
+  $("thr-blocked").className = blk > 0 ? "warn" : "";
+
+  // --- orders & fills ---
+  const ord = s.orders || {};
+  $("ord-total").textContent = ord.orders_total ?? 0;
+  $("ord-fills").textContent = ord.fills_total ?? 0;
+  const states = ord.states || {};
+  const order = ["CREATED", "SUBMITTING", "WORKING", "PARTIAL",
+                 "CANCEL_PENDING", "UNKNOWN", "RECONCILING",
+                 "FILLED", "CANCELED", "REJECTED"];
+  const keys = Object.keys(states).sort(
+    (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+  $("ord-states").innerHTML = keys.length
+    ? '<div class="kv" style="flex-wrap:wrap;gap:4px"><span>By state</span><span>' +
+      keys.map(k => `<span class="pill">${k} ${states[k]}</span>`).join(" ") +
+      '</span></div>'
+    : "";
 }
 
 async function trade(side) {

@@ -51,6 +51,10 @@ class SentinelApp:
     def accepting(self) -> bool:
         return self._accepting.is_set()
 
+    @property
+    def broker(self) -> BrokerAdapter:
+        return self._broker
+
     # ------------------------------------------------------------ lifecycle
 
     async def start(self, *, arm_protection: bool = True) -> RecoveryReport:

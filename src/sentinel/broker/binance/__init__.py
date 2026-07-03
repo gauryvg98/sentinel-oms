@@ -1,5 +1,5 @@
-"""Binance Spot (testnet-first) adapter — foundation, not yet wired."""
+"""Binance Spot (testnet-first) adapter."""
 
-from .adapter import BinanceSpotAdapter
+from .adapter import TESTNET_BASE, TESTNET_WS, BinanceSpotAdapter, parse_user_event
 
-__all__ = ["BinanceSpotAdapter"]
+__all__ = ["TESTNET_BASE", "TESTNET_WS", "BinanceSpotAdapter", "parse_user_event"]

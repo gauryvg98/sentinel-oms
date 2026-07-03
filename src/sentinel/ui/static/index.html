@@ -123,6 +123,7 @@
       <b id="thr-eps">—</b></div>
     <div class="kv"><span>Orders placed</span><b id="thr-placed">—</b></div>
     <div class="kv"><span>Orders blocked</span><b id="thr-blocked">—</b></div>
+    <div class="kv"><span>Broker rejected</span><b id="thr-rejected">—</b></div>
   </div>
   <div class="panel">
     <h2>Orders &amp; Fills</h2>
@@ -290,6 +291,9 @@ function renderSys(s) {
   const blk = c.orders_blocked ?? 0;
   $("thr-blocked").textContent = blk;
   $("thr-blocked").className = blk > 0 ? "warn" : "";
+  const rej = c.orders_rejected ?? 0;
+  $("thr-rejected").textContent = rej;
+  $("thr-rejected").className = rej > 0 ? "neg" : "";
 
   // --- orders & fills ---
   const ord = s.orders || {};
@@ -316,12 +320,15 @@ function showToast(msg, good = true) {
   setTimeout(() => toast.style.opacity = 0, 3500);
 }
 
+function outcomeToast(side, o) {
+  if (o.blocked)  return showToast(`${side} refused: ${o.reason}`, false);
+  if (o.rejected) return showToast(`${side} REJECTED by broker: ${o.reason}`, false);
+  if (o.pending)  return showToast(`${side} pending — ${o.note}`, false);
+  showToast(`${side} ${o.qty} filled/working (${o.placed}) — watch the chart`, true);
+}
+
 async function trade(side) {
-  const body = await (await fetch("/trade/" + side, { method: "POST" })).json();
-  showToast(
-    body.blocked ? `refused: ${body.reason}`
-                 : `${side} ${body.qty} placed (${body.placed}) — watch the chart`,
-    !body.blocked);
+  outcomeToast(side, await (await fetch("/trade/" + side, { method: "POST" })).json());
 }
 
 async function flatten() {
@@ -333,11 +340,12 @@ async function flatten() {
   } else {
     const f = body.flattened || [];
     const ok = f.filter(x => x.placed).map(x => `${x.instrument} ${x.qty}`);
-    const bad = f.filter(x => x.blocked);
+    const failed = f.filter(x => x.blocked || x.rejected);
     showToast(
       `dumped: ${ok.join(", ") || "none"}` +
-        (bad.length ? ` · blocked: ${bad.length}` : ""),
-      bad.length === 0);
+        (failed.length ? ` · failed: ${failed.map(x =>
+          x.reason || x.blocked).join("; ")}` : ""),
+      failed.length === 0);
   }
 }
 

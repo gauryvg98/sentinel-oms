@@ -17,7 +17,7 @@ from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from sentinel.domain import Authority, EconomicOrderIntent, Side
+from sentinel.domain import Authority, EconomicOrderIntent, OrderState, Side
 from sentinel.marks.pnl import compute_pnl
 from sentinel.oms import PlacementBlocked
 from sentinel.runtime import SentinelApp
@@ -118,6 +118,23 @@ class Terminal:
             quote_at_decision=mark.price if mark else None,
         )
 
+    async def _classify(self, stored) -> dict:
+        """A returned order is NOT proof of success — a broker rejection comes
+        back as a REJECTED order, not an exception. Report the outcome the
+        ledger actually recorded."""
+        state = stored.core.state
+        key = stored.core.client_order_id
+        if state is OrderState.REJECTED:
+            self.app.metrics.inc("orders_rejected")
+            reason = await self.app.store.order_reject_reason(key)
+            return {"rejected": key, "reason": reason or "broker rejected"}
+        if state is OrderState.UNKNOWN:
+            self.app.metrics.inc("orders_placed")
+            return {"pending": key, "state": state.value,
+                    "note": "submission unprovable — reconciling"}
+        self.app.metrics.inc("orders_placed")
+        return {"placed": key, "state": state.value, "qty": str(stored.core.qty)}
+
     async def trade(self, side: str) -> dict:
         """BUY opens/extends (ENTRY); SELL reduces (PROTECTIVE_EXIT, clamped
         by the never-over-exit guard — selling flat is refused, not shorted)."""
@@ -132,10 +149,7 @@ class Terminal:
                     stored = await self.app.gateway.place(
                         uuid4(), self._intent(Side.SELL, Authority.PROTECTIVE_EXIT)
                     )
-            self.app.metrics.inc("orders_placed")
-            return {"placed": stored.core.client_order_id,
-                    "state": stored.core.state.value,
-                    "qty": str(stored.core.qty)}
+            return await self._classify(stored)
         except PlacementBlocked as e:
             self.app.metrics.inc("orders_blocked")
             return {"blocked": type(e).__name__, "reason": str(e)}
@@ -161,10 +175,8 @@ class Terminal:
             )
             try:
                 stored = await self.app.gateway.place(uuid4(), intent)
-                self.app.metrics.inc("orders_placed")
                 results.append({"instrument": instrument,
-                                "placed": stored.core.client_order_id,
-                                "qty": str(stored.core.qty)})
+                                **await self._classify(stored)})
             except PlacementBlocked as e:
                 self.app.metrics.inc("orders_blocked")
                 results.append({"instrument": instrument, "blocked": str(e)})

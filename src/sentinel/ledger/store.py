@@ -433,6 +433,18 @@ class LedgerStore:
             for r in rows
         ]
 
+    async def order_reject_reason(self, client_order_id: str) -> str | None:
+        """The broker's stated reason for a rejected order — for honest UI."""
+        return await self._pool.fetchval(
+            """
+            SELECT e.payload->>'reason' FROM events e
+            JOIN orders o ON o.order_id = e.order_id
+            WHERE o.client_order_id = $1 AND e.kind = 'BROKER_REJECTED'
+            ORDER BY e.seq DESC LIMIT 1
+            """,
+            client_order_id,
+        )
+
     async def recent_fills(self, instrument: str, limit: int = 200
                            ) -> list[dict[str, Any]]:
         """Fills with side + wall time — the chart's trade markers."""

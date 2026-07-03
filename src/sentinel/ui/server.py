@@ -296,6 +296,7 @@ def build_ui(app: SentinelApp, market: MarketData,
             return {"error": "no strategy configured"}
         if action == "start":
             runner.start()
+            await runner.reconcile_now()   # act on the current stance now
         elif action == "stop":
             runner.stop()
         await app.changes.bump()

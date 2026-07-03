@@ -160,7 +160,7 @@
   <div class="panel" id="strat-panel">
     <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
     <div class="kv"><span>State</span><b id="strat-state">—</b></div>
-    <div class="kv"><span>Signal</span><b id="strat-signal">—</b></div>
+    <div class="kv"><span>Wants</span><b id="strat-signal">—</b></div>
     <div class="kv"><span>Fast / Slow</span><b id="strat-sma">—</b></div>
     <div class="kv"><span>Last action</span><b id="strat-action">—</b></div>
     <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
@@ -212,10 +212,10 @@ function renderStrategy(st) {
   $("strat-name").textContent = st.name;
   $("strat-state").textContent = st.running ? "RUNNING" : "paused";
   $("strat-state").className = st.running ? "good" : "warn";
-  const sig = st.signal || "—";
-  $("strat-signal").textContent = sig;
+  const stance = st.stance || (st.detail && st.detail.warming_up ? "warming" : "—");
+  $("strat-signal").textContent = stance;
   $("strat-signal").className =
-    sig === "ENTER" ? "good" : sig === "EXIT" ? "neg" : "";
+    stance === "LONG" ? "good" : stance === "FLAT" ? "warn" : "";
   $("strat-sma").textContent = st.detail && st.detail.fast
     ? `${st.detail.fast} / ${st.detail.slow}`
     : (st.detail && st.detail.warming_up

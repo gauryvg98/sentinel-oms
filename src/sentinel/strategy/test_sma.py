@@ -1,14 +1,14 @@
-"""SMA-cross tests: warm-up, edge-only signals, determinism, protocol shape."""
+"""SMA-cross tests: warm-up (no opinion), LONG/FLAT stance, determinism."""
 
 from decimal import Decimal
 
 import pytest
 
-from sentinel.strategy import Decision, SmaCross, Signal, Strategy
+from sentinel.strategy import Decision, SmaCross, Stance, Strategy
 
 
 def feed(strat, prices):
-    return [strat.on_bar(Decimal(str(p))).signal for p in prices]
+    return [strat.on_bar(Decimal(str(p))).stance for p in prices]
 
 
 def test_conforms_to_strategy_protocol():
@@ -20,30 +20,35 @@ def test_rejects_bad_periods():
         SmaCross(fast=5, slow=5)
 
 
-def test_holds_until_slow_window_is_full():
+def test_no_opinion_until_slow_window_is_full():
     s = SmaCross(fast=2, slow=4)
-    # first 3 bars: not enough for the slow window -> HOLD (warming up)
-    assert feed(s, [10, 11, 12]) == [Signal.HOLD, Signal.HOLD, Signal.HOLD]
+    # Not enough for the slow window -> stance None (runner does nothing).
+    assert feed(s, [10, 11, 12]) == [None, None, None]
 
 
-def test_golden_cross_enters_once_then_holds_the_trend():
+def test_wants_long_in_an_uptrend():
     s = SmaCross(fast=2, slow=4)
-    # Rising series: once warm, fast pulls above slow -> exactly one ENTER,
-    # then HOLD while the uptrend persists (no over-trading).
-    signals = feed(s, [10, 10, 10, 10, 11, 12, 13, 14, 15])
-    assert signals.count(Signal.ENTER) == 1
-    first_enter = signals.index(Signal.ENTER)
-    assert all(x is Signal.HOLD for x in signals[first_enter + 1:])
+    stances = feed(s, [10, 10, 10, 10, 11, 12, 13, 14])
+    # once warm and rising, the fast SMA sits above the slow -> LONG, and it
+    # STAYS long through the trend (target-position, not an edge).
+    assert stances[-1] is Stance.LONG
+    assert stances[-2] is Stance.LONG
 
 
-def test_death_cross_exits_after_entering():
+def test_wants_flat_in_a_downtrend():
     s = SmaCross(fast=2, slow=4)
-    # Up then down: expect an ENTER on the way up and an EXIT on the way down.
-    signals = feed(s, [10, 10, 10, 10, 12, 14, 16,   # up  -> ENTER
-                       14, 12, 10, 8])                # down -> EXIT
-    assert Signal.ENTER in signals
-    assert Signal.EXIT in signals
-    assert signals.index(Signal.ENTER) < signals.index(Signal.EXIT)
+    stances = feed(s, [20, 20, 20, 20, 18, 16, 14, 12])
+    assert stances[-1] is Stance.FLAT
+
+
+def test_flips_long_to_flat_across_a_reversal():
+    s = SmaCross(fast=2, slow=4)
+    stances = feed(s, [10, 10, 10, 10, 12, 14, 16,   # up   -> LONG
+                       14, 12, 10, 8])                # down -> FLAT
+    assert Stance.LONG in stances
+    last_long = len(stances) - 1 - stances[::-1].index(Stance.LONG)
+    # after the last LONG the reversal turns it FLAT
+    assert Stance.FLAT in stances[last_long + 1:]
 
 
 def test_is_deterministic():

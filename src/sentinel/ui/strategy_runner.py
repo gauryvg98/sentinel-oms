@@ -16,7 +16,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Awaitable, Callable
 
-from sentinel.strategy import Decision, Signal, Strategy
+from sentinel.strategy import Decision, Stance, Strategy
 
 
 class StrategyRunner:
@@ -50,14 +50,29 @@ class StrategyRunner:
     def stop(self) -> None:
         self.running = False
 
-    async def react(self, decision: Decision, position: Decimal) -> str | None:
-        """Pure-ish decision -> action. Only ENTER-when-flat and EXIT-when-long
-        do anything; every other case is a deliberate no-op."""
-        if not self.running or decision.signal is Signal.HOLD:
+    async def reconcile_now(self) -> str | None:
+        """Reconcile against the CURRENT stance immediately (used on start), so
+        the bot acts on existing position/state without waiting for the next
+        bar. Start it wanting LONG while flat -> it enters now; start it while
+        holding a position it wants FLAT -> it closes now."""
+        if self.last_decision is None:
             return None
-        if decision.signal is Signal.ENTER and position <= 0:
+        action = await self.react(self.last_decision, await self._position_fn())
+        if action is not None:
+            self.last_action = action
+            await self._on_change()
+        return action
+
+    async def react(self, decision: Decision, position: Decimal) -> str | None:
+        """Reconcile actual position -> desired stance. Acts only on a
+        mismatch; a matched stance (or no opinion / paused) is a no-op. This
+        is what makes it account for pre-existing positions: whatever you're
+        holding when the strategy warms up, the next bar brings it into line."""
+        if not self.running or decision.stance is None:
+            return None
+        if decision.stance is Stance.LONG and position <= 0:
             return f"ENTER {self._fmt(await self._enter_fn())}"
-        if decision.signal is Signal.EXIT and position > 0:
+        if decision.stance is Stance.FLAT and position > 0:
             return f"EXIT {self._fmt(await self._exit_fn())}"
         return None
 
@@ -75,8 +90,9 @@ class StrategyRunner:
         """Supervised task. Seed the strategy from history so it's warm, then
         act on each newly-closed bar."""
         for c in self.market.candles[:-1]:        # all but the forming bar
-            self.strategy.on_bar(Decimal(str(c["c"])))
-            self._last_closed_t = c["t"]
+            self.last_decision = self.strategy.on_bar(Decimal(str(c["c"])))
+            self._last_closed_t = c["t"]          # leaves a live stance for
+                                                  # reconcile_now() on start
 
         import asyncio
 
@@ -102,7 +118,7 @@ class StrategyRunner:
         return {
             "name": self.strategy.name,
             "running": self.running,
-            "signal": d.signal.value if d else None,
+            "stance": d.stance.value if d and d.stance else None,
             "detail": d.detail if d else {},
             "last_action": self.last_action,
         }

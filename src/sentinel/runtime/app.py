@@ -46,11 +46,6 @@ class SentinelApp:
         # memory; accepted events are never dropped, producers wait.
         self._events: asyncio.Queue = asyncio.Queue(maxsize=event_queue_size)
         self._accepting = asyncio.Event()
-        # Reconcile gate: normally open. Demo/story mode may close it to hold
-        # recovery for narration — pausing recovery NEVER pauses safety,
-        # because UNKNOWN keeps the instrument locked the whole time.
-        self.recon_gate = asyncio.Event()
-        self.recon_gate.set()
 
     @property
     def accepting(self) -> bool:
@@ -92,6 +87,5 @@ class SentinelApp:
     async def _reconcile_loop(self) -> None:
         while True:
             key = await self.engine.needs_reconcile.get()
-            await self.recon_gate.wait()
             await self.recon.reconcile_order(key)
             self.metrics.inc("reconciliations")

@@ -12,7 +12,6 @@ from uuid import uuid4
 
 import pytest
 
-pytest.importorskip("testcontainers.postgres", reason="testcontainers not installed")
 
 from sentinel.broker.sim import BrokerScript
 from sentinel.domain import Authority, OrderState, Side

@@ -1,4 +1,4 @@
-"""Ledger integration tests against a real PostgreSQL (testcontainers).
+"""Ledger integration tests against a real PostgreSQL (shared container).
 
 Fixtures (container, fresh-db pool, docker skip) come from sentinel/conftest.py.
 """
@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import pytest
 
-pytest.importorskip("testcontainers.postgres", reason="testcontainers not installed")
 
 from sentinel.domain import (
     Authority,

@@ -113,7 +113,6 @@ async def test_bounded_queue_drains_fully_before_shutdown():
 async def test_app_lifecycle_end_to_end(pool):
     """SentinelApp: recover -> re-arm -> consume live events through the
     supervised loops -> graceful stop with a drained queue."""
-    pytest.importorskip("testcontainers.postgres")
     from sentinel.broker.sim import BrokerScript, ScriptedBroker
     from sentinel.domain import Authority, EconomicOrderIntent, OrderState, Side
     from sentinel.runtime import SentinelApp

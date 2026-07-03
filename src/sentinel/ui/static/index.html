@@ -157,6 +157,15 @@
     <div id="ord-states"></div>
     <div class="kv"><span>Total fills</span><b id="ord-fills">—</b></div>
   </div>
+  <div class="panel" id="strat-panel">
+    <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
+    <div class="kv"><span>State</span><b id="strat-state">—</b></div>
+    <div class="kv"><span>Signal</span><b id="strat-signal">—</b></div>
+    <div class="kv"><span>Fast / Slow</span><b id="strat-sma">—</b></div>
+    <div class="kv"><span>Last action</span><b id="strat-action">—</b></div>
+    <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
+            onclick="toggleStrategy()">▶ start</button>
+  </div>
 </div>
 
 <div id="controls">
@@ -219,6 +228,31 @@ let usdtBal = 0, btcPos = 0;   // for % preset sizing
 
 async function setTf(interval) {
   await fetch("/timeframe/" + interval, { method: "POST" });
+}
+
+let stratRunning = false;
+async function toggleStrategy() {
+  await fetch("/strategy/" + (stratRunning ? "stop" : "start"), { method: "POST" });
+}
+
+function renderStrategy(st) {
+  if (!st) { $("strat-panel").style.display = "none"; return; }
+  stratRunning = st.running;
+  $("strat-name").textContent = st.name;
+  $("strat-state").textContent = st.running ? "RUNNING" : "paused";
+  $("strat-state").className = st.running ? "good" : "warn";
+  const sig = st.signal || "—";
+  $("strat-signal").textContent = sig;
+  $("strat-signal").className =
+    sig === "ENTER" ? "good" : sig === "EXIT" ? "neg" : "";
+  $("strat-sma").textContent = st.detail && st.detail.fast
+    ? `${st.detail.fast} / ${st.detail.slow}`
+    : (st.detail && st.detail.warming_up
+        ? `warming ${st.detail.have}/${st.detail.need}` : "—");
+  $("strat-action").textContent = st.last_action || "—";
+  const btn = $("strat-toggle");
+  btn.textContent = st.running ? "■ stop" : "▶ start";
+  btn.classList.toggle("active", st.running);
 }
 
 function render(s) {
@@ -306,6 +340,7 @@ function renderWallet(w) {
 
 function renderSys(s) {
   renderWallet(s.wallet);
+  renderStrategy(s.strategy);
   const m = s.metrics || {};
   const c = m.counters || {}, g = m.gauges || {}, r = m.rates || {}, L = m.latency || {};
 

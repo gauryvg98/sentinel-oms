@@ -52,9 +52,17 @@ async def _serve() -> None:
     # already owns this account/database.
     app = SentinelApp(pool, adapter, dsn=dsn)
     market = MarketData(SYMBOL)
+
+    from sentinel.strategy import SmaCross
+    strategy = SmaCross(
+        fast=int(os.environ.get("SENTINEL_SMA_FAST", "5")),
+        slow=int(os.environ.get("SENTINEL_SMA_SLOW", "20")),
+    )
     ui = build_ui(
         app, market,
         trade_qty=Decimal(os.environ.get("SENTINEL_TRADE_QTY", "0.0002")),
+        strategy=strategy,
+        strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

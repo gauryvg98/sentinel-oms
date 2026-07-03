@@ -24,6 +24,7 @@ from sentinel.oms import PlacementBlocked
 from sentinel.runtime import SentinelApp
 
 from .market import MarketData
+from .strategy_runner import StrategyRunner
 
 STATIC = Path(__file__).parent / "static"
 LOT_STEP = Decimal("0.00001")   # BTCUSDT lot step (round order qty down to this)
@@ -221,9 +222,23 @@ class Terminal:
 
 
 def build_ui(app: SentinelApp, market: MarketData,
-             trade_qty: Decimal = Decimal("0.0002")) -> FastAPI:
+             trade_qty: Decimal = Decimal("0.0002"),
+             strategy=None, strategy_usdt: Decimal = Decimal("15")) -> FastAPI:
     ui = FastAPI(title="sentinel-terminal")
     terminal = Terminal(app, market, trade_qty)
+
+    # The strategy is just another producer of signals into the same gateway.
+    # ENTER -> a BUY sized in USDT; EXIT -> close the whole position. It faces
+    # the identical guards a human does (single-writer, never-over-exit).
+    runner = None
+    if strategy is not None:
+        runner = StrategyRunner(
+            strategy, market,
+            position_fn=lambda: app.store.get_position(market.symbol),
+            enter_fn=lambda: terminal.trade("BUY", usdt=float(strategy_usdt)),
+            exit_fn=lambda: terminal.trade("SELL", pct=100),
+            on_change=app.changes.bump,
+        )
 
     @ui.on_event("startup")
     async def _startup() -> None:
@@ -239,34 +254,52 @@ def build_ui(app: SentinelApp, market: MarketData,
             os._exit(1)                              # clean, no traceback
         await market.load_history()
         app.supervisor.spawn("market-data", market.run, restart=True)
+        if runner is not None:
+            # Always-on task: keeps indicators warm; acts only when started.
+            app.supervisor.spawn("strategy", runner.run, restart=True)
 
     @ui.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
 
+    def _snap(with_candles: bool):
+        async def build():
+            snap = await terminal.snapshot(with_candles=with_candles)
+            if runner is not None:
+                snap["strategy"] = runner.snapshot()
+            return snap
+        return build()
+
     @ui.websocket("/ws")
     async def ws(websocket: WebSocket):
         """Event-driven: send full state once, then push only when the world
-        changes (fill, order update, balance, tick), with a 2s heartbeat so
-        price-age keeps ticking even in dead-quiet markets."""
+        changes (fill, order update, balance, tick, strategy), with a 2s
+        heartbeat so price-age keeps ticking even in dead-quiet markets."""
         await websocket.accept()
         seen = -1
         last_interval = None
         try:
-            # Initial frame carries the candle history; deltas don't — EXCEPT
-            # when the timeframe changed, which needs a full chart refresh.
-            await websocket.send_text(json.dumps(await terminal.snapshot()))
+            await websocket.send_text(json.dumps(await _snap(True)))
             seen = app.changes.revision
             last_interval = market.interval
             while True:
                 seen = await app.changes.wait_past(seen, timeout=2.0)
                 switched = market.interval != last_interval
-                await websocket.send_text(
-                    json.dumps(await terminal.snapshot(with_candles=switched))
-                )
+                await websocket.send_text(json.dumps(await _snap(switched)))
                 last_interval = market.interval
         except WebSocketDisconnect:
             pass
+
+    @ui.post("/strategy/{action}")
+    async def strategy_toggle(action: str):
+        if runner is None:
+            return {"error": "no strategy configured"}
+        if action == "start":
+            runner.start()
+        elif action == "stop":
+            runner.stop()
+        await app.changes.bump()
+        return runner.snapshot()
 
     @ui.post("/trade/{side}")
     async def trade(side: str, usdt: float | None = None,

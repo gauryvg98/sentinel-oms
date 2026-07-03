@@ -301,12 +301,9 @@ def build_ui(app: SentinelApp, market: MarketData,
         await app.changes.bump()
         return runner.snapshot()
 
-    @ui.post("/trade/{side}")
-    async def trade(side: str, usdt: float | None = None,
-                    btc: float | None = None, pct: float | None = None):
-        if side not in ("BUY", "SELL"):
-            return {"error": side}
-        return await terminal.trade(side, usdt=usdt, btc=btc, pct=pct)
+    # No manual /trade endpoint — this is a systematic terminal. The strategy
+    # runner drives Terminal.trade() directly; the human's only control is
+    # start/stop below.
 
     @ui.post("/timeframe/{interval}")
     async def timeframe(interval: str):

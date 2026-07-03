@@ -98,7 +98,7 @@
 <body>
 <header>
   <span class="brand">SENTINEL</span>
-  <span class="chip">PAPER · BINANCE TESTNET</span>
+  <span class="chip">SYSTEMATIC · PAPER · BINANCE TESTNET</span>
   <span id="price">—</span>
   <span class="dim" id="symbol"></span>
   <span class="spacer"></span>
@@ -168,34 +168,6 @@
   </div>
 </div>
 
-<div id="controls">
-  <div class="side">
-    <div class="sizerow">
-      <input id="buy-amt" type="number" step="any" placeholder="USDT to spend">
-      <span class="unit">USDT</span>
-    </div>
-    <div class="pcts">
-      <button class="pct" onclick="buyPct(5)">5%</button>
-      <button class="pct" onclick="buyPct(10)">10%</button>
-      <button class="pct" onclick="buyPct(25)">25%</button>
-      <button class="pct" onclick="buyPct(50)">50%</button>
-      <button class="pct" onclick="buyPct(100)">Max</button>
-    </div>
-    <button id="buy" onclick="buy()">BUY</button>
-  </div>
-  <div class="side">
-    <div class="sizerow">
-      <input id="sell-amt" type="number" step="any" placeholder="BTC to sell">
-      <span class="unit">BTC</span>
-    </div>
-    <div class="pcts">
-      <button class="pct" onclick="sellPct(25)">25%</button>
-      <button class="pct" onclick="sellPct(50)">50%</button>
-      <button class="pct" onclick="sellPct(100)">Close all</button>
-    </div>
-    <button id="sell" onclick="sell()">SELL</button>
-  </div>
-</div>
 
 <div id="activity">
   <h2>Activity</h2>
@@ -224,7 +196,6 @@ new ResizeObserver(() =>
 ).observe($("chart"));
 
 let lastPrice = null;
-let usdtBal = 0, btcPos = 0;   // for % preset sizing
 
 async function setTf(interval) {
   await fetch("/timeframe/" + interval, { method: "POST" });
@@ -270,8 +241,6 @@ function render(s) {
     `<span class="dot ${ok ? "ok" : "bad"}" title="${k}"></span>`).join(" ");
 
   $("position").textContent = s.position;
-  btcPos = parseFloat(s.position) || 0;
-  usdtBal = parseFloat((s.wallet.balances || {}).USDT || 0);
   $("avg").textContent = s.avg_cost ?? "—";
   const money = (el, v) => {
     if (v === null) { el.textContent = "—"; el.className = ""; return; }
@@ -390,41 +359,6 @@ function renderSys(s) {
       keys.map(k => `<span class="pill">${k} ${states[k]}</span>`).join(" ") +
       '</span></div>'
     : "";
-}
-
-function showToast(msg, good = true) {
-  const toast = $("toast");
-  toast.style.borderColor = good ? "#22e07b" : "#f87171";
-  toast.textContent = msg;
-  toast.style.opacity = 1;
-  setTimeout(() => toast.style.opacity = 0, 3500);
-}
-
-function outcomeToast(side, o) {
-  if (o.blocked)  return showToast(`${side} refused: ${o.reason}`, false);
-  if (o.rejected) return showToast(`${side} REJECTED by broker: ${o.reason}`, false);
-  if (o.pending)  return showToast(`${side} pending — ${o.note}`, false);
-  showToast(`${side} ${o.qty} filled/working (${o.placed}) — watch the chart`, true);
-}
-
-function buyPct(p)  { $("buy-amt").value = (usdtBal * p / 100).toFixed(2); }
-function sellPct(p) { $("sell-amt").value = (btcPos * p / 100).toFixed(5); }
-
-async function post(url) {
-  return (await fetch(url, { method: "POST" })).json();
-}
-
-async function buy() {
-  const usdt = parseFloat($("buy-amt").value);
-  if (!(usdt > 0)) return showToast("enter a USDT amount", false);
-  outcomeToast("BUY", await post(`/trade/BUY?usdt=${usdt}`));
-}
-
-async function sell() {
-  const btc = parseFloat($("sell-amt").value);
-  // empty SELL = close the whole position
-  const url = btc > 0 ? `/trade/SELL?btc=${btc}` : `/trade/SELL?pct=100`;
-  outcomeToast("SELL", await post(url));
 }
 
 function connect() {

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -76,8 +75,8 @@ async def order_stats(app: SentinelApp) -> dict:
 
 
 class Terminal:
-    # Balances come from a signed REST call — refresh on an interval instead
-    # of on every 1s snapshot so the wallet panel never rate-limits the feed.
+    # Balances refresh on this cadence — a signed weight-20 call, so never
+    # per-snapshot.
     WALLET_TTL_S = 5.0
 
     def __init__(self, app: SentinelApp, market: MarketData,
@@ -86,8 +85,24 @@ class Terminal:
         self.market = market
         self.trade_qty = trade_qty
         self._wallet: dict[str, Decimal] = {}
-        self._wallet_at = 0.0
         self._wallet_error: str | None = None
+
+    async def wallet_poller(self) -> None:
+        """Supervised background poller — the codebase's one pattern for live
+        I/O: the task owns the network, snapshot() only reads memory. Also
+        kills the multi-viewer thundering herd the read-through cache had
+        (two WS loops could both see the TTL expired mid-fetch)."""
+        while True:
+            try:
+                with self.app.metrics.timer("wallet_fetch_ms"):
+                    self._wallet = await self.app.broker.query_positions()
+                self._wallet_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — degrade panel, keep polling
+                self._wallet_error = type(e).__name__
+                self.app.metrics.inc("wallet_fetch_errors")
+            await asyncio.sleep(self.WALLET_TTL_S)
 
     def _intent(self, side: Side, authority: Authority) -> EconomicOrderIntent:
         mark = self.market.latest(self.market.symbol)
@@ -125,32 +140,12 @@ class Terminal:
             self.app.metrics.inc("orders_blocked")
             return {"blocked": type(e).__name__, "reason": str(e)}
 
-    async def _wallet_balances(self) -> dict[str, Decimal]:
-        """Cached non-zero asset balances from the broker account. On a fetch
-        failure keep the last known snapshot and record why, so a flaky signed
-        call degrades the wallet panel instead of stalling the whole feed."""
-        now = time.monotonic()
-        # TTL only — no "or empty" clause: a persistently failing endpoint
-        # must be retried on the TTL cadence, not hammered every snapshot.
-        # (_wallet_at starts at 0.0, so the first fetch is stale by construction.)
-        if now - self._wallet_at >= self.WALLET_TTL_S:
-            try:
-                self._wallet = await self.app.broker.query_positions()
-                self._wallet_error = None
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — surface, don't crash the feed
-                self._wallet_error = type(e).__name__
-            finally:
-                self._wallet_at = now
-        return self._wallet
-
     async def snapshot(self) -> dict:
         symbol = self.market.symbol
         pnl_all = await compute_pnl(self.app.store._pool, self.market)
         pnl = pnl_all.get(symbol)
         mark = self.market.latest(symbol)
-        balances = await self._wallet_balances()
+        balances = self._wallet  # poller-owned; this path never does network I/O
         working = [
             o for o in await self.app.store.recent_orders(20)
             if o["state"] not in ("FILLED", "CANCELED", "REJECTED")
@@ -209,6 +204,7 @@ def build_ui(app: SentinelApp, market: MarketData,
         # boot would flatten the position. Exits stay on the SELL button.
         await app.start(arm_protection=False)
         app.supervisor.spawn("market-data", market.run, restart=True)
+        app.supervisor.spawn("wallet-poller", terminal.wallet_poller, restart=True)
 
     @ui.get("/")
     async def index():

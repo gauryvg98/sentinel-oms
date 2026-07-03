@@ -36,6 +36,10 @@ class EconomicOrderIntent:
     limit_price: Decimal | None
     authority: Authority
     trace_id: UUID
+    # The market quote observed at decision time. Stamped here (not derived
+    # later) so slippage = fill price - quote_at_decision is honest — it
+    # measures the cost of everything between deciding and filling.
+    quote_at_decision: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.qty <= 0:

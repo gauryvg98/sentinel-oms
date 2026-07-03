@@ -17,6 +17,7 @@ import asyncpg
 
 from sentinel.broker import BrokerAdapter
 from sentinel.ledger import LedgerStore
+from sentinel.metrics import MetricsRegistry
 from sentinel.oms import CommandGateway, OrderEngine, WriterCoordinator
 from sentinel.protect import ProtectiveExitSupervisor
 from sentinel.recon import Reconciler, RecoveryReport
@@ -39,6 +40,7 @@ class SentinelApp:
         self.recon = Reconciler(self.store, broker, self.coordinator)
         self.protect = ProtectiveExitSupervisor(self.store, self.engine)
         self.supervisor = TaskSupervisor()
+        self.metrics = MetricsRegistry()
         self._broker = broker
         # Bounded: a fill storm exerts backpressure instead of ballooning
         # memory; accepted events are never dropped, producers wait.
@@ -74,8 +76,11 @@ class SentinelApp:
     async def _event_apply(self) -> None:
         while True:
             event = await self._events.get()
+            self.metrics.gauge("queue_depth", self._events.qsize())
             try:
-                await self.engine.on_broker_event(event)
+                with self.metrics.timer("event_apply_ms"):
+                    await self.engine.on_broker_event(event)
+                self.metrics.inc("events_applied")
             finally:
                 self._events.task_done()                  # drain-accounting
 
@@ -83,3 +88,4 @@ class SentinelApp:
         while True:
             key = await self.engine.needs_reconcile.get()
             await self.recon.reconcile_order(key)
+            self.metrics.inc("reconciliations")

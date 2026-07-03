@@ -63,7 +63,14 @@ class ProtectiveExitSupervisor:
                 trace_id=uuid4(),
             )
             try:
-                report.placed.append(await self._engine.place(intent))
+                placed = await self._engine.place(intent)
+                report.placed.append(placed)
+                await self._store.record_decision(
+                    intent.trace_id, instrument, "protection",
+                    "PROTECTION_ARMED",
+                    {"key": placed.core.client_order_id,
+                     "qty": str(placed.core.qty), "side": side.value},
+                )
             except NothingToExit:
                 # Raced a fill that closed the position between the read and
                 # the placement — coverage is moot; the next pass re-derives.

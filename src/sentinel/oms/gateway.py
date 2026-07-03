@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sentinel.domain import EconomicOrderIntent
+from sentinel.domain import EconomicOrderIntent, OrderState
 from sentinel.ledger import LedgerStore, StoredOrder
 
+from .errors import PlacementBlocked
 from .writer import OrderEngine
 
 
@@ -33,6 +34,8 @@ class CommandGateway:
                 "side": intent.side.value,
                 "qty": str(intent.qty),           # requested (pre-clamp) — audit
                 "authority": intent.authority.value,
+                "quote_at_decision": str(intent.quote_at_decision)
+                if intent.quote_at_decision is not None else None,
             },
         )
         if not fresh:
@@ -41,7 +44,28 @@ class CommandGateway:
                 return existing
             # Crash landed between command insert and order creation: the
             # intent pipeline is idempotent, so falling through is safe.
-        return await self._engine.place(intent)
+        try:
+            stored = await self._engine.place(intent)
+        except PlacementBlocked as e:
+            # The trades that DIDN'T happen are audit-worthy too.
+            await self._store.record_decision(
+                intent.trace_id, intent.instrument, "guards",
+                "PLACE_BLOCKED",
+                {"key": intent.idempotency_key, "reason": type(e).__name__,
+                 "message": str(e)},
+            )
+            raise
+        decision = (
+            "PARKED_UNKNOWN" if stored.core.state is OrderState.UNKNOWN
+            else f"{stored.authority}_PLACED"
+        )
+        detail = {"key": stored.core.client_order_id, "qty": str(stored.core.qty)}
+        if stored.core.qty != intent.qty:
+            detail["requested_qty"] = str(intent.qty)   # exit was clamped
+        await self._store.record_decision(
+            intent.trace_id, intent.instrument, "gateway", decision, detail
+        )
+        return stored
 
     async def cancel(
         self, command_id: UUID, client_order_id: str, trace_id: UUID

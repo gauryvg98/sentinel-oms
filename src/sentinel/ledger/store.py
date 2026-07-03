@@ -351,6 +351,88 @@ class LedgerStore:
             last_event_seq=seq,
         )
 
+    # ---------------------------------------------------------- decision log
+
+    async def record_decision(
+        self,
+        trace_id: UUID,
+        instrument: str,
+        actor: str,
+        decision: str,
+        detail: dict[str, Any],
+    ) -> None:
+        await self._pool.execute(
+            "INSERT INTO decision_log (trace_id, instrument, actor, decision, detail) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            trace_id,
+            instrument,
+            actor,
+            decision,
+            json.dumps(detail, default=str),
+        )
+
+    async def recent_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            "SELECT seq, trace_id, instrument, actor, decision, detail, occurred_at "
+            "FROM decision_log ORDER BY seq DESC LIMIT $1",
+            limit,
+        )
+        return [
+            {
+                "seq": r["seq"],
+                "trace_id": str(r["trace_id"]),
+                "instrument": r["instrument"],
+                "actor": r["actor"],
+                "decision": r["decision"],
+                "detail": json.loads(r["detail"]),
+                "at": r["occurred_at"].isoformat(),
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------ UI reads
+
+    async def recent_orders(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            "SELECT client_order_id, instrument, side, qty, filled_qty, state, "
+            "broker_order_id, authority, updated_at FROM orders "
+            "ORDER BY updated_at DESC LIMIT $1",
+            limit,
+        )
+        return [
+            {
+                "key": r["client_order_id"],
+                "instrument": r["instrument"],
+                "side": r["side"],
+                "qty": str(r["qty"]),
+                "filled": str(r["filled_qty"]),
+                "state": r["state"],
+                "broker_id": r["broker_order_id"],
+                "authority": r["authority"],
+            }
+            for r in rows
+        ]
+
+    async def recent_events(self, limit: int = 40) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            "SELECT e.seq, e.trace_id, e.kind, e.from_state, e.to_state, "
+            "o.client_order_id FROM events e "
+            "LEFT JOIN orders o ON o.order_id = e.order_id "
+            "ORDER BY e.seq DESC LIMIT $1",
+            limit,
+        )
+        return [
+            {
+                "seq": r["seq"],
+                "trace": str(r["trace_id"])[:8],
+                "kind": r["kind"],
+                "from": r["from_state"],
+                "to": r["to_state"],
+                "order": r["client_order_id"],
+            }
+            for r in rows
+        ]
+
     # ------------------------------------------------------------ guards API
 
     async def has_unresolved(self, instrument: str) -> bool:

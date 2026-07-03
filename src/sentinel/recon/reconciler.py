@@ -117,7 +117,7 @@ class Reconciler:
                     f"vs {view.filled_qty} broker after backfill"
                 )
 
-            return await self._store.apply_event(
+            resolved = await self._store.apply_event(
                 stored,
                 ReconcileResolved(
                     resolved_state=_STATE_MAP[view.state],
@@ -126,6 +126,13 @@ class Reconciler:
                 ),
                 trace,
             )
+            await self._store.record_decision(
+                trace, resolved.core.instrument, "reconciler",
+                "RECONCILE_RESOLVED",
+                {"key": client_order_id, "to": resolved.core.state.value,
+                 "filled": str(resolved.core.filled_qty)},
+            )
+            return resolved
 
     async def drain(self, queue: asyncio.Queue[str]) -> list[StoredOrder]:
         """Process every queued reconciliation request (test/scenario driver;

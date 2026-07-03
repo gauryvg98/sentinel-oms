@@ -42,14 +42,15 @@ async def _serve() -> None:
     key = os.environ["BINANCE_TESTNET_KEY"]
     secret = os.environ["BINANCE_TESTNET_SECRET"]
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", DEFAULT_DB), min_size=1, max_size=6
-    )
+    dsn = os.environ.get("DATABASE_URL", DEFAULT_DB)
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=6)
     async with pool.acquire() as conn:
         await apply_migrations(conn)
 
     adapter = BinanceSpotAdapter(key, secret, symbols=(SYMBOL,))
-    app = SentinelApp(pool, adapter)
+    # dsn -> single-writer enforcement: refuse to boot if another process
+    # already owns this account/database.
+    app = SentinelApp(pool, adapter, dsn=dsn)
     market = MarketData(SYMBOL)
     ui = build_ui(
         app, market,

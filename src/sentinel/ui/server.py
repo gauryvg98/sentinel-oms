@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from decimal import Decimal
+import os
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from sentinel.runtime import SentinelApp
 from .market import MarketData
 
 STATIC = Path(__file__).parent / "static"
+LOT_STEP = Decimal("0.00001")   # BTCUSDT lot step (round order qty down to this)
 
 
 async def check_invariants(app: SentinelApp) -> dict[str, bool]:
@@ -81,14 +83,15 @@ class Terminal:
         self.market = market
         self.trade_qty = trade_qty
 
-    def _intent(self, side: Side, authority: Authority) -> EconomicOrderIntent:
+    def _intent(self, side: Side, authority: Authority,
+                qty: Decimal) -> EconomicOrderIntent:
         mark = self.market.latest(self.market.symbol)
         return EconomicOrderIntent(
             intent_id=uuid4(),
             idempotency_key=f"UI-{uuid4().hex[:12]}",
             instrument=self.market.symbol,
             side=side,
-            qty=self.trade_qty,
+            qty=qty,
             limit_price=None,                 # market order: instant feedback
             authority=authority,
             trace_id=uuid4(),
@@ -112,52 +115,50 @@ class Terminal:
         self.app.metrics.inc("orders_placed")
         return {"placed": key, "state": state.value, "qty": str(stored.core.qty)}
 
-    async def trade(self, side: str) -> dict:
+    async def _size(self, side: str, usdt, btc, pct) -> Decimal:
+        """Resolve the order quantity (in BTC) from whatever sizing the UI sent:
+          BUY  — usdt amount, or pct of USDT balance -> qty = spend / price
+          SELL — btc amount, or pct of position     -> qty = fraction of position
+        Rounded down to the lot step. The guards still clamp SELL to what you
+        actually hold, so this can only ever undershoot."""
+        mark = self.market.latest(self.market.symbol)
+        if mark is None:
+            return Decimal(0)
+        if side == "BUY":
+            if usdt is not None:
+                spend = Decimal(str(usdt))
+            elif pct is not None:
+                bal = self.app.latest_balances.get("USDT", Decimal(0))
+                spend = bal * Decimal(str(pct)) / 100
+            else:
+                spend = self.trade_qty * mark.price
+            qty = spend / mark.price
+        else:  # SELL
+            if btc is not None:
+                qty = Decimal(str(btc))
+            else:
+                pos = await self.app.store.get_position(self.market.symbol)
+                frac = Decimal(str(pct)) / 100 if pct is not None else Decimal(1)
+                qty = pos * frac
+        return qty.quantize(LOT_STEP, rounding=ROUND_DOWN)
+
+    async def trade(self, side: str, *, usdt=None, btc=None, pct=None) -> dict:
         """BUY opens/extends (ENTRY); SELL reduces (PROTECTIVE_EXIT, clamped
         by the never-over-exit guard — selling flat is refused, not shorted)."""
+        qty = await self._size(side, usdt, btc, pct)
+        if qty <= 0:
+            return {"blocked": "ZeroSize",
+                    "reason": "nothing to trade at that size"}
+        authority = Authority.ENTRY if side == "BUY" else Authority.PROTECTIVE_EXIT
         try:
-            # Round-trip through gateway -> guards -> ledger -> exchange ack.
             with self.app.metrics.timer("place_ms"):
-                if side == "BUY":
-                    stored = await self.app.gateway.place(
-                        uuid4(), self._intent(Side.BUY, Authority.ENTRY)
-                    )
-                else:
-                    stored = await self.app.gateway.place(
-                        uuid4(), self._intent(Side.SELL, Authority.PROTECTIVE_EXIT)
-                    )
+                stored = await self.app.gateway.place(
+                    uuid4(), self._intent(Side(side), authority, qty)
+                )
             return await self._classify(stored)
         except PlacementBlocked as e:
             self.app.metrics.inc("orders_blocked")
             return {"blocked": type(e).__name__, "reason": str(e)}
-
-    async def flatten_all(self) -> dict:
-        """Dump every open position to flat with market exits. Each is a
-        PROTECTIVE_EXIT for the full |position|, so the never-over-exit guard
-        bounds it to reconciled holdings — a dump can undershoot (a fill
-        raced it) but can NEVER oversell or flip us short."""
-        results = []
-        for instrument, qty in (await self.app.store.load_positions()).items():
-            if qty == 0:
-                continue
-            side = Side.SELL if qty > 0 else Side.BUY
-            mark = self.market.latest(instrument)
-            intent = EconomicOrderIntent(
-                intent_id=uuid4(),
-                idempotency_key=f"DUMP-{uuid4().hex[:12]}",
-                instrument=instrument, side=side, qty=abs(qty),
-                limit_price=None,                 # market: flatten now
-                authority=Authority.PROTECTIVE_EXIT, trace_id=uuid4(),
-                quote_at_decision=mark.price if mark else None,
-            )
-            try:
-                stored = await self.app.gateway.place(uuid4(), intent)
-                results.append({"instrument": instrument,
-                                **await self._classify(stored)})
-            except PlacementBlocked as e:
-                self.app.metrics.inc("orders_blocked")
-                results.append({"instrument": instrument, "blocked": str(e)})
-        return {"flattened": results} if results else {"flat": "nothing to dump"}
 
     async def snapshot(self, *, with_candles: bool = True) -> dict:
         """The UI state. with_candles=False omits the ~180-bar history (sent
@@ -226,11 +227,17 @@ def build_ui(app: SentinelApp, market: MarketData,
 
     @ui.on_event("startup")
     async def _startup() -> None:
-        await market.load_history()
+        from sentinel.runtime import AnotherWriterActive
+
         market.on_change = app.changes.bump          # ticks push to the UI
         # Manual terminal: no auto-arm — a market-style protective exit on
         # boot would flatten the position. Exits stay on the SELL button.
-        await app.start(arm_protection=False)
+        try:
+            await app.start(arm_protection=False)    # claims the account lock
+        except AnotherWriterActive as e:
+            print(f"\n  REFUSING TO START: {e}\n", flush=True)
+            os._exit(1)                              # clean, no traceback
+        await market.load_history()
         app.supervisor.spawn("market-data", market.run, restart=True)
 
     @ui.get("/")
@@ -262,14 +269,11 @@ def build_ui(app: SentinelApp, market: MarketData,
             pass
 
     @ui.post("/trade/{side}")
-    async def trade(side: str):
+    async def trade(side: str, usdt: float | None = None,
+                    btc: float | None = None, pct: float | None = None):
         if side not in ("BUY", "SELL"):
             return {"error": side}
-        return await terminal.trade(side)
-
-    @ui.post("/flatten")
-    async def flatten():
-        return await terminal.flatten_all()
+        return await terminal.trade(side, usdt=usdt, btc=btc, pct=pct)
 
     @ui.post("/timeframe/{interval}")
     async def timeframe(interval: str):

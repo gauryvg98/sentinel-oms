@@ -23,6 +23,7 @@ from sentinel.oms import CommandGateway, OrderEngine, WriterCoordinator
 from sentinel.protect import ProtectiveExitSupervisor
 from sentinel.recon import Reconciler, RecoveryReport
 
+from .single_writer import SingleWriterLock
 from .supervisor import TaskSupervisor
 
 
@@ -59,7 +60,12 @@ class SentinelApp:
         broker: BrokerAdapter,
         *,
         event_queue_size: int = 1024,
+        dsn: str | None = None,
+        account: str = "sentinel",
     ) -> None:
+        # dsn set -> enforce single-writer: this process must win an
+        # account-scoped advisory lock at start() or refuse to boot.
+        self._writer_lock = SingleWriterLock(dsn, account) if dsn else None
         self.store = LedgerStore(pool)
         self.coordinator = WriterCoordinator()
         self.engine = OrderEngine(self.store, broker, self.coordinator)
@@ -89,7 +95,16 @@ class SentinelApp:
     # ------------------------------------------------------------ lifecycle
 
     async def start(self, *, arm_protection: bool = True) -> RecoveryReport:
-        # Consumers FIRST: anything recovery or re-arming submits must have
+        # FIRST of all: claim exclusive ownership of the account. If another
+        # process holds it, raise AnotherWriterActive and boot nothing — the
+        # two-writer interleave that HALTED us before can't even begin.
+        if self._writer_lock is not None:
+            await self._writer_lock.acquire()
+            self.supervisor.spawn(
+                "writer-lock", self._writer_lock.guard, restart=False
+            )  # losing the lock is fatal: halt, don't retry
+
+        # Consumers next: anything recovery or re-arming submits must have
         # its execution reports heard — a fill that lands before the stream
         # subscribes is a silent divergence (found live against Binance).
         self.supervisor.spawn("broker-intake", self._broker_intake)
@@ -114,6 +129,8 @@ class SentinelApp:
         self._accepting.clear()                           # stop intake first
         await self._events.join()                         # drain accepted events
         await self.supervisor.shutdown()                  # cancel + await cleanup
+        if self._writer_lock is not None:
+            await self._writer_lock.release()             # free the account
 
     # ------------------------------------------------------------ consumers
 

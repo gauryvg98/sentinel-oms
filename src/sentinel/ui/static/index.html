@@ -59,7 +59,22 @@
           border: 1px solid var(--edge); color: var(--dim);
           font-variant-numeric: tabular-nums; }
 
-  #controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  #controls { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+              margin-bottom: 12px; }
+  .side { display: flex; flex-direction: column; gap: 8px;
+          background: var(--panel); border: 1px solid var(--edge);
+          border-radius: 8px; padding: 12px; }
+  .sizerow { display: flex; align-items: center; gap: 6px; }
+  .sizerow input { flex: 1; background: var(--bg); border: 1px solid var(--edge);
+                   border-radius: 6px; color: var(--ink); font-family: var(--mono);
+                   font-size: 15px; padding: 10px 12px; }
+  .sizerow input:focus { outline: none; border-color: var(--dim); }
+  .sizerow .unit { color: var(--dim); font-size: 12px; }
+  .pcts { display: flex; gap: 6px; }
+  .pct { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--dim);
+         background: var(--bg); border: 1px solid var(--edge); border-radius: 6px;
+         padding: 6px 0; cursor: pointer; }
+  .pct:hover { color: var(--ink); border-color: var(--dim); }
   button { font-family: var(--mono); font-size: 15px; font-weight: 700;
            border-radius: 8px; padding: 12px 28px; cursor: pointer;
            background: transparent; }
@@ -67,10 +82,6 @@
   #buy:hover  { background: rgba(34,224,123,.12); }
   #sell { color: var(--red); border: 2px solid var(--red); }
   #sell:hover { background: rgba(248,113,113,.12); }
-  #flatten { color: var(--amber); border: 2px solid var(--amber);
-             margin-left: auto; }
-  #flatten:hover { background: rgba(251,191,36,.12); }
-  #flatten:disabled { opacity: .35; cursor: not-allowed; }
 
   #activity { background: var(--panel); border: 1px solid var(--edge);
               border-radius: 8px; padding: 10px 14px; min-height: 90px; }
@@ -149,10 +160,32 @@
 </div>
 
 <div id="controls">
-  <button id="buy" onclick="trade('BUY')">BUY <span id="qty-b"></span></button>
-  <button id="sell" onclick="trade('SELL')">SELL <span id="qty-s"></span></button>
-  <span class="dim" id="working"></span>
-  <button id="flatten" onclick="flatten()">⚑ DUMP ALL</button>
+  <div class="side">
+    <div class="sizerow">
+      <input id="buy-amt" type="number" step="any" placeholder="USDT to spend">
+      <span class="unit">USDT</span>
+    </div>
+    <div class="pcts">
+      <button class="pct" onclick="buyPct(5)">5%</button>
+      <button class="pct" onclick="buyPct(10)">10%</button>
+      <button class="pct" onclick="buyPct(25)">25%</button>
+      <button class="pct" onclick="buyPct(50)">50%</button>
+      <button class="pct" onclick="buyPct(100)">Max</button>
+    </div>
+    <button id="buy" onclick="buy()">BUY</button>
+  </div>
+  <div class="side">
+    <div class="sizerow">
+      <input id="sell-amt" type="number" step="any" placeholder="BTC to sell">
+      <span class="unit">BTC</span>
+    </div>
+    <div class="pcts">
+      <button class="pct" onclick="sellPct(25)">25%</button>
+      <button class="pct" onclick="sellPct(50)">50%</button>
+      <button class="pct" onclick="sellPct(100)">Close all</button>
+    </div>
+    <button id="sell" onclick="sell()">SELL</button>
+  </div>
 </div>
 
 <div id="activity">
@@ -182,6 +215,7 @@ new ResizeObserver(() =>
 ).observe($("chart"));
 
 let lastPrice = null;
+let usdtBal = 0, btcPos = 0;   // for % preset sizing
 
 async function setTf(interval) {
   await fetch("/timeframe/" + interval, { method: "POST" });
@@ -202,7 +236,8 @@ function render(s) {
     `<span class="dot ${ok ? "ok" : "bad"}" title="${k}"></span>`).join(" ");
 
   $("position").textContent = s.position;
-  $("flatten").disabled = parseFloat(s.position) === 0;
+  btcPos = parseFloat(s.position) || 0;
+  usdtBal = parseFloat((s.wallet.balances || {}).USDT || 0);
   $("avg").textContent = s.avg_cost ?? "—";
   const money = (el, v) => {
     if (v === null) { el.textContent = "—"; el.className = ""; return; }
@@ -229,11 +264,6 @@ function render(s) {
     text: m.side === "BUY" ? "B" : "S",
   })));
 
-  $("qty-b").textContent = s.trade_qty;
-  $("qty-s").textContent = s.trade_qty;
-  $("working").textContent = s.working.length
-    ? "working: " + s.working.map(o => `${o.key} ${o.state}`).join(" · ")
-    : "";
 
   $("decisions").innerHTML = s.decisions.map(d => {
     const cls = d.decision.includes("BLOCKED") ? "blocked" : "";
@@ -342,26 +372,24 @@ function outcomeToast(side, o) {
   showToast(`${side} ${o.qty} filled/working (${o.placed}) — watch the chart`, true);
 }
 
-async function trade(side) {
-  outcomeToast(side, await (await fetch("/trade/" + side, { method: "POST" })).json());
+function buyPct(p)  { $("buy-amt").value = (usdtBal * p / 100).toFixed(2); }
+function sellPct(p) { $("sell-amt").value = (btcPos * p / 100).toFixed(5); }
+
+async function post(url) {
+  return (await fetch(url, { method: "POST" })).json();
 }
 
-async function flatten() {
-  const btn = $("flatten");
-  btn.disabled = true;
-  const body = await (await fetch("/flatten", { method: "POST" })).json();
-  if (body.flat) {
-    showToast("already flat — nothing to dump");
-  } else {
-    const f = body.flattened || [];
-    const ok = f.filter(x => x.placed).map(x => `${x.instrument} ${x.qty}`);
-    const failed = f.filter(x => x.blocked || x.rejected);
-    showToast(
-      `dumped: ${ok.join(", ") || "none"}` +
-        (failed.length ? ` · failed: ${failed.map(x =>
-          x.reason || x.blocked).join("; ")}` : ""),
-      failed.length === 0);
-  }
+async function buy() {
+  const usdt = parseFloat($("buy-amt").value);
+  if (!(usdt > 0)) return showToast("enter a USDT amount", false);
+  outcomeToast("BUY", await post(`/trade/BUY?usdt=${usdt}`));
+}
+
+async function sell() {
+  const btc = parseFloat($("sell-amt").value);
+  // empty SELL = close the whole position
+  const url = btc > 0 ? `/trade/SELL?btc=${btc}` : `/trade/SELL?pct=100`;
+  outcomeToast("SELL", await post(url));
 }
 
 function connect() {

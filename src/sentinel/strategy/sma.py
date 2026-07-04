@@ -29,6 +29,23 @@ class SmaCross:
         self._slow_n = slow
         self._prices: deque[Decimal] = deque(maxlen=slow)
 
+    def view_spec(self) -> dict:
+        """How the terminal should render this strategy: which detail values
+        matter in the panel, and what to draw on the chart. The UI is generic;
+        the strategy owns its own presentation."""
+        return {
+            "rows": [
+                {"label": "Fast SMA", "key": "fast", "kind": "price"},
+                {"label": "Slow SMA", "key": "slow", "kind": "price"},
+            ],
+            "overlays": [
+                {"kind": "line", "key": "fast",
+                 "label": f"SMA {self.fast_period}", "color": "#fbbf24"},
+                {"kind": "line", "key": "slow",
+                 "label": f"SMA {self.slow_period}", "color": "#a78bfa"},
+            ],
+        }
+
     def reset(self) -> None:
         """Drop all accumulated bars — the indicator must forget when the
         underlying timeframe changes, else the SMA blends two timeframes'

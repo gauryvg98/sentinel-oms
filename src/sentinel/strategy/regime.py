@@ -131,6 +131,24 @@ class RegimeTrendMR:
         self._in_position = False          # the strategy's OWN intended stance,
         #                                    NOT the broker position (design doc §3)
 
+    def view_spec(self) -> dict:
+        """How the terminal renders this strategy: the panel shows the regime,
+        trend strength, stretch and sizing conviction; the chart draws the
+        Donchian channel it breaks out of."""
+        return {
+            "rows": [
+                {"label": "Regime", "key": "regime", "kind": "regime"},
+                {"label": "Trend (ADX)", "key": "trend_strength", "kind": "number"},
+                {"label": "z-score", "key": "z", "kind": "signed"},
+                {"label": "Target wt", "key": "target_weight", "kind": "weight"},
+            ],
+            "overlays": [
+                {"kind": "band", "upper": "upper", "lower": "lower",
+                 "label": f"Donchian {self.p.donchian_entry}/{self.p.donchian_exit}",
+                 "color": "#6b7280"},
+            ],
+        }
+
     # ------------------------------------------------------------------ #
     # Protocol entry points                                              #
     # ------------------------------------------------------------------ #

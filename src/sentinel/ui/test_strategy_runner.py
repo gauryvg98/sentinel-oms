@@ -275,6 +275,19 @@ async def test_reseed_forgets_the_old_timeframes_bars():
     assert r._last_closed_t == market.candles[-2]["t"]
 
 
+def test_snapshot_carries_view_and_bar_aligned_series():
+    market = SimpleNamespace(candles=_bars([100, 101, 102, 103, 104, 105]),
+                             interval="1m")
+    r = _sma_runner(market, running=False)          # SmaCross(2/3)
+    r._seed_from_history()
+    snap = r.snapshot()
+    assert snap["interval"] == "1m"
+    keys = {row["key"] for row in snap["view"]["rows"]}
+    assert {"fast", "slow"} <= keys                 # strategy declares its rows
+    pts = snap["series"]["fast"]                     # strategy-authored series
+    assert pts and all("t" in p and "v" in p for p in pts)  # bar-aligned
+
+
 async def test_reseed_while_running_acts_on_the_fresh_stance():
     placed = []
 

@@ -36,6 +36,7 @@ _RESTING = ("WORKING", "PARTIAL")
 _DEFAULT_REPRICE_FRAC = Decimal("0.0005")     # 5 bps: re-peg once the touch drifts
 _DEFAULT_REBALANCE_FRAC = Decimal("0.20")     # no-trade band around target (anti-churn)
 _DEFAULT_LOT_STEP = Decimal("0.00001")        # BTCUSDT lot step
+_HISTORY_CAP = 400                            # bars of indicator series kept for the chart
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,10 @@ class StrategyRunner:
         self.last_decision: Decision | None = None
         self.last_action: str | None = None
         self._last_closed_t: int | None = None
+        # Per-bar indicator history {t, detail} for strategy-authored chart
+        # overlays — the strategy is the single source of its own indicators;
+        # the chart plots what it emits rather than re-deriving anything.
+        self._history: list[dict] = []
 
     def start(self) -> None:
         self.running = True
@@ -197,9 +202,12 @@ class StrategyRunner:
             reset()
         self.last_decision = None
         self._last_closed_t = None
+        self._history = []
         for c in self._bars.candles[:-1]:
             self.last_decision = self._feed(c)
             self._last_closed_t = c["t"]
+            self._history.append({"t": c["t"], "detail": self.last_decision.detail})
+        del self._history[:-_HISTORY_CAP]
 
     async def reseed(self) -> None:
         """Reset + re-warm the strategy from the current bar history, then (if
@@ -282,8 +290,36 @@ class StrategyRunner:
             self._last_closed_t = closed["t"]
 
             self.last_decision = self._feed(closed)
+            self._history.append({"t": closed["t"], "detail": self.last_decision.detail})
+            del self._history[:-_HISTORY_CAP]
             await self.reconcile_now()
             await self._on_change()               # always push the fresh decision
+
+    def _view_spec(self) -> dict:
+        vs = getattr(self.strategy, "view_spec", None)
+        return vs() if callable(vs) else {"rows": [], "overlays": []}
+
+    def _series(self, view: dict) -> dict:
+        """Bar-aligned history of just the values the overlays reference — the
+        chart plots these directly (the strategy's own numbers), so it can never
+        disagree with the decision. Keys absent on a bar (warm-up) are skipped."""
+        keys: set[str] = set()
+        for ov in view.get("overlays", []):
+            if ov["kind"] == "line":
+                keys.add(ov["key"])
+            elif ov["kind"] == "band":
+                keys.update((ov["upper"], ov["lower"]))
+        out: dict[str, list] = {k: [] for k in keys}
+        for h in self._history:
+            for k in keys:
+                v = h["detail"].get(k)
+                if v is None:
+                    continue
+                try:
+                    out[k].append({"t": h["t"], "v": float(v)})
+                except (ValueError, TypeError):
+                    pass
+        return out
 
     def snapshot(self) -> dict:
         d = self.last_decision
@@ -295,7 +331,8 @@ class StrategyRunner:
             "last_action": self.last_action,
             # Conviction actually applied (1.0 if the strategy expresses none).
             "weight": str(self._weight(d)) if d and d.stance is Stance.LONG else None,
-            # Periods for the chart overlay (None if the strategy isn't SMA).
-            "fast_period": getattr(self.strategy, "fast_period", None),
-            "slow_period": getattr(self.strategy, "slow_period", None),
+            # The strategy's own presentation, chart series, and fixed interval.
+            "view": (view := self._view_spec()),
+            "series": self._series(view),
+            "interval": getattr(self._bars, "interval", None),
         }

@@ -46,6 +46,12 @@ def test_conforms_to_strategy_protocol():
     assert isinstance(RegimeTrendMR(P()), Strategy)
 
 
+def test_view_spec_declares_regime_rows_and_a_donchian_band():
+    vs = RegimeTrendMR(P()).view_spec()
+    assert {"regime", "trend_strength", "target_weight"} <= {r["key"] for r in vs["rows"]}
+    assert any(o["kind"] == "band" and o["upper"] == "upper" for o in vs["overlays"])
+
+
 @pytest.mark.parametrize("bad", [
     dict(donchian_entry=5, donchian_exit=5),     # exit not shorter than entry
     dict(adx_trend=20.0, adx_range=25.0),        # range band above trend

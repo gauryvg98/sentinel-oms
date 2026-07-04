@@ -164,7 +164,7 @@
     <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
     <div class="kv"><span>State</span><b id="strat-state">—</b></div>
     <div class="kv"><span>Wants</span><b id="strat-signal">—</b></div>
-    <div class="kv"><span>Fast / Slow</span><b id="strat-sma">—</b></div>
+    <div id="strat-rows"></div>
     <div class="kv"><span>Last action</span><b id="strat-action">—</b></div>
     <div class="kv"><span>Entry size</span>
       <span style="display:flex;gap:4px;align-items:center">
@@ -202,13 +202,18 @@ const series = chart.addCandlestickSeries({
   wickUpColor: "#22e07b", wickDownColor: "#f87171",
   borderVisible: false,
 });
-// SMA overlay lines — fast (amber) reacts quickly, slow (violet) is smoother.
-// Their crossover is the strategy's LONG/FLAT decision, drawn on the chart.
-const FAST_COLOR = "#fbbf24", SLOW_COLOR = "#a78bfa";
-const fastLine = chart.addLineSeries({ color: FAST_COLOR, lineWidth: 1.5,
-  priceLineVisible: false, lastValueVisible: false });
-const slowLine = chart.addLineSeries({ color: SLOW_COLOR, lineWidth: 1.5,
-  priceLineVisible: false, lastValueVisible: false });
+// Strategy overlays are dynamic: the strategy DECLARES them (view.overlays) and
+// SHIPS their values (series) computed on its own bars — the chart just plots
+// them, so it can never disagree with the decision (no client-side indicator
+// math). Line series are created lazily per key and reused.
+const overlaySeries = {};
+function overlayLine(key, color) {
+  if (!overlaySeries[key]) {
+    overlaySeries[key] = chart.addLineSeries({ color, lineWidth: 1.5,
+      priceLineVisible: false, lastValueVisible: false });
+  }
+  return overlaySeries[key];
+}
 
 new ResizeObserver(() =>
   chart.applyOptions({ width: $("chart").clientWidth,
@@ -216,8 +221,8 @@ new ResizeObserver(() =>
 ).observe($("chart"));
 
 let lastPrice = null;
-let candleData = [];        // maintained bar array, for computing SMAs client-side
-let fastN = null, slowN = null;
+let lastInterval = null;    // chart timeframe (for overlay alignment)
+let candleData = [];        // maintained bar array (chart timeframe)
 
 // Hover tooltip for consolidated markers: candle time -> { BUY, SELL } each a
 // server-consolidated bucket (n, qty, price, detail[]). Hovering a bar with
@@ -256,23 +261,34 @@ chart.subscribeCrosshairMove(p => {
   mtip.style.top = Math.max(p.point.y - 8, 4) + "px";
 });
 
-function sma(closes, n) {
-  // Simple moving average, aligned to bar times; null until the window fills —
-  // matches exactly what the strategy computes on the same closes.
-  const out = [];
-  let sum = 0;
-  for (let i = 0; i < closes.length; i++) {
-    sum += closes[i].c;
-    if (i >= n) sum -= closes[i - n].c;
-    if (i >= n - 1) out.push({ time: closes[i].t, value: sum / n });
+function renderOverlays(st) {
+  // Draw the strategy's declared overlays from the series IT shipped. Only when
+  // the chart timeframe matches the strategy's decision interval — otherwise the
+  // series times wouldn't align, so we hide them and say where they live.
+  const legend = $("sma-legend");
+  const aligned = st && st.view && st.series && st.interval === lastInterval;
+  if (!aligned) {
+    for (const k in overlaySeries) overlaySeries[k].setData([]);
+    legend.innerHTML = (st && st.interval && st.interval !== lastInterval)
+      ? `<span style="color:#7c8aa0">overlays on ${st.interval}</span>` : "";
+    return;
   }
-  return out;
-}
-
-function redrawSmaLines() {
-  if (!fastN || !slowN || candleData.length === 0) return;
-  fastLine.setData(sma(candleData, fastN));
-  slowLine.setData(sma(candleData, slowN));
+  const t0 = candleData.length ? candleData[0].t : 0;
+  const data = arr => (arr || [])
+    .filter(p => p.t >= t0)                     // keep the chart from extending left
+    .map(p => ({ time: p.t, value: p.v }));
+  const legendParts = [];
+  for (const ov of st.view.overlays) {
+    if (ov.kind === "line") {
+      overlayLine(ov.key, ov.color).setData(data(st.series[ov.key]));
+      legendParts.push(`<span style="color:${ov.color}">━ ${ov.label}</span>`);
+    } else if (ov.kind === "band") {
+      overlayLine("band:" + ov.upper, ov.color).setData(data(st.series[ov.upper]));
+      overlayLine("band:" + ov.lower, ov.color).setData(data(st.series[ov.lower]));
+      legendParts.push(`<span style="color:${ov.color}">╌ ${ov.label}</span>`);
+    }
+  }
+  legend.innerHTML = legendParts.join(" ");
 }
 
 async function setTf(interval) {
@@ -289,16 +305,22 @@ async function setSize() {
   await fetch("/strategy/size/" + encodeURIComponent(v), { method: "POST" });
 }
 
+function fmtRow(kind, val) {
+  if (val == null) return { text: "—", cls: "" };
+  if (kind === "regime")
+    return { text: val, cls: val === "TREND" ? "good" : "warn" };
+  if (kind === "signed") {
+    const n = parseFloat(val);
+    return { text: val, cls: n < 0 ? "neg" : n > 0 ? "pos" : "" };
+  }
+  if (kind === "weight")
+    return { text: Math.round(parseFloat(val) * 100) + "%", cls: "" };
+  return { text: val, cls: "" };
+}
+
 function renderStrategy(st) {
   if (!st) { $("strat-panel").style.display = "none"; return; }
   stratRunning = st.running;
-  if (st.fast_period && (fastN !== st.fast_period || slowN !== st.slow_period)) {
-    fastN = st.fast_period; slowN = st.slow_period;  // periods for the overlay
-    $("sma-legend").innerHTML =
-      `<span style="color:${FAST_COLOR}">━ SMA ${fastN}</span>` +
-      `<span style="color:${SLOW_COLOR}">━ SMA ${slowN}</span>`;
-    redrawSmaLines();
-  }
   $("strat-name").textContent = st.name;
   $("strat-state").textContent = st.running ? "RUNNING" : "paused";
   $("strat-state").className = st.running ? "good" : "warn";
@@ -306,10 +328,21 @@ function renderStrategy(st) {
   $("strat-signal").textContent = stance;
   $("strat-signal").className =
     stance === "LONG" ? "good" : stance === "FLAT" ? "warn" : "";
-  $("strat-sma").textContent = st.detail && st.detail.fast
-    ? `${st.detail.fast} / ${st.detail.slow}`
-    : (st.detail && st.detail.warming_up
-        ? `warming ${st.detail.have}/${st.detail.need}` : "—");
+
+  // Strategy-specific rows: the strategy DECLARES them (view.rows); we pull the
+  // values from detail. Warm-up shows progress instead.
+  const rows = $("strat-rows");
+  if (st.detail && st.detail.warming_up) {
+    rows.innerHTML = `<div class="kv"><span>Warming up</span>` +
+      `<b class="warn">${st.detail.have}/${st.detail.need}</b></div>`;
+  } else {
+    rows.innerHTML = ((st.view && st.view.rows) || []).map(r => {
+      const f = fmtRow(r.kind, st.detail ? st.detail[r.key] : null);
+      return `<div class="kv"><span>${r.label}</span>` +
+        `<b class="${f.cls}">${f.text}</b></div>`;
+    }).join("");
+  }
+
   $("strat-action").textContent = st.last_action || "—";
   const sizeEl = $("strat-size");
   if (st.entry_usdt != null && document.activeElement !== sizeEl)
@@ -321,6 +354,7 @@ function renderStrategy(st) {
 
 function render(s) {
   $("symbol").textContent = s.symbol + " · " + s.interval;
+  lastInterval = s.interval;
   if (s.price) {
     const p = parseFloat(s.price);
     $("price").textContent = p.toLocaleString(undefined,
@@ -354,7 +388,7 @@ function render(s) {
     else candleData.push(s.candle);
     series.update(toBar(s.candle));
   }
-  redrawSmaLines();                          // keep the SMA overlay in step
+  renderOverlays(s.strategy);                // strategy-authored overlays
   document.querySelectorAll(".tf").forEach(b =>
     b.classList.toggle("active", b.textContent === s.interval));
   // Markers arrive already consolidated to one bucket per (candle, side) and

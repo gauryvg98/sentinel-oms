@@ -1,8 +1,11 @@
-"""Live market data for the terminal: candles + last price, one symbol.
+"""Live market data for the terminal: candles + best bid/ask, one symbol.
 
-Public testnet endpoints (no auth): REST klines for history, the kline_1m
-stream for the forming candle. Doubles as the MarkFeed for P&L — the same
-price the chart shows is the price the unrealized P&L marks against.
+Public testnet endpoints (no auth): REST klines for history, then ONE combined
+socket carrying @kline (the forming candle) and @bookTicker (best bid/ask,
+pushed continuously — not just on trades). bookTicker keeps the mark fresh
+between sparse testnet trades (no "feed age 30s" freeze) and gives the
+peg-to-touch strategy a real bid to rest a maker order on. Doubles as the
+MarkFeed for P&L — the same price the chart shows is the mark P&L uses.
 """
 
 from __future__ import annotations
@@ -41,9 +44,13 @@ class MarketData:
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
         self._price: Decimal | None = None
         self._price_ts: float = 0.0
+        self._bid: Decimal | None = None       # best bid/ask from @bookTicker
+        self._ask: Decimal | None = None
+        self._book_ts: float = 0.0
+        self._last_bump: float = 0.0           # UI-push throttle (book is chatty)
         self._ws = None                        # live stream, closed on tf switch
-        # Async callback fired on every price/candle tick, so the UI pushes
-        # in real time instead of on a timer. Wired to app.changes.bump.
+        # Async callback fired on price/candle tick, so the UI pushes in real
+        # time instead of on a timer. Wired to app.changes.bump.
         self.on_change = None
 
     # ------------------------------------------------------------- MarkFeed
@@ -54,6 +61,18 @@ class MarketData:
         if time.time() - self._price_ts > MAX_MARK_AGE_S:
             return None   # stale: don't let dead price drive unrealized P&L
         return Mark(instrument=instrument, price=self._price, ts=self._price_ts)
+
+    def best_bid(self) -> Decimal | None:
+        """Best bid, or None if the book feed is stale. A maker BUY rests HERE
+        (join the bid) so it doesn't cross and take."""
+        if self._bid is None or time.time() - self._book_ts > MAX_MARK_AGE_S:
+            return None
+        return self._bid
+
+    def best_ask(self) -> Decimal | None:
+        if self._ask is None or time.time() - self._book_ts > MAX_MARK_AGE_S:
+            return None
+        return self._ask
 
     @property
     def price_age_s(self) -> float | None:
@@ -94,39 +113,70 @@ class MarketData:
             self._price = Decimal(str(self.candles[-1]["c"]))
             self._price_ts = time.time()
 
+    def _ingest_book(self, d: dict) -> None:
+        """@bookTicker: best bid/ask. Drives a continuous MID mark, so the
+        price stays live between trades."""
+        try:
+            self._bid, self._ask = Decimal(d["b"]), Decimal(d["a"])
+        except (KeyError, TypeError):
+            return
+        self._book_ts = time.time()
+        self._price = (self._bid + self._ask) / 2
+        self._price_ts = self._book_ts
+
+    def _ingest_kline(self, k: dict | None) -> None:
+        """@kline: the forming candle. Also keeps the mark alive from trades in
+        case the book feed is ever unavailable."""
+        if not k:
+            return
+        candle = {"t": k["t"] // 1000, "o": float(k["o"]), "h": float(k["h"]),
+                  "l": float(k["l"]), "c": float(k["c"])}
+        if self.candles and self.candles[-1]["t"] == candle["t"]:
+            self.candles[-1] = candle
+        else:
+            self.candles.append(candle)
+            del self.candles[:-HISTORY]
+        self._price = Decimal(k["c"])
+        self._price_ts = time.time()
+
+    async def _bump_throttled(self) -> None:
+        """bookTicker can fire many times a second; coalesce UI pushes to a few
+        per second (trading reads bid/ask directly, not via the push)."""
+        now = time.time()
+        if now - self._last_bump >= 0.25 and self.on_change is not None:
+            self._last_bump = now
+            await self.on_change()
+
     async def run(self) -> None:
-        """Supervised task: stream the forming candle, reconnect forever.
-        Reads self.interval each connection, so a timeframe switch (which
-        closes the socket) simply reconnects on the new interval."""
+        """Supervised task: one combined socket for @kline + @bookTicker,
+        reconnect forever. Reads self.interval each connection, so a timeframe
+        switch (which closes the socket) simply reconnects on the new interval;
+        @bookTicker is interval-independent and rides along unchanged."""
         import websockets
 
         backoff = 1.0
         while True:
             interval = self.interval
-            url = f"{self._stream}/ws/{self.symbol.lower()}@kline_{interval}"
+            sym = self.symbol.lower()
+            url = (f"{self._stream}/stream?streams="
+                   f"{sym}@kline_{interval}/{sym}@bookTicker")
             try:
                 async with websockets.connect(url) as ws:
                     self._ws = ws
-                    log.info("market stream: %s %s", self.symbol, interval)
+                    log.info("market stream: %s %s + bookTicker", self.symbol, interval)
                     backoff = 1.0
                     async for raw in ws:
                         if self.interval != interval:
                             break              # switched — stale frames ignored
-                        k = json.loads(raw).get("k")
-                        if not k:
-                            continue
-                        candle = {"t": k["t"] // 1000, "o": float(k["o"]),
-                                  "h": float(k["h"]), "l": float(k["l"]),
-                                  "c": float(k["c"])}
-                        if self.candles and self.candles[-1]["t"] == candle["t"]:
-                            self.candles[-1] = candle
+                        msg = json.loads(raw)
+                        stream, data = msg.get("stream", ""), msg.get("data", {})
+                        if stream.endswith("@bookTicker"):
+                            self._ingest_book(data)
+                        elif "@kline" in stream:
+                            self._ingest_kline(data.get("k"))
                         else:
-                            self.candles.append(candle)
-                            del self.candles[:-HISTORY]
-                        self._price = Decimal(k["c"])
-                        self._price_ts = time.time()
-                        if self.on_change is not None:
-                            await self.on_change()
+                            continue
+                        await self._bump_throttled()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

@@ -269,6 +269,8 @@ class Terminal:
             "interval": self.market.interval,
             "price": str(mark.price) if mark else None,
             "price_age": self.market.price_age_s,
+            "bid": str(b) if (b := self.market.best_bid()) is not None else None,
+            "ask": str(a) if (a := self.market.best_ask()) is not None else None,
             "candle": self.market.candles[-1] if self.market.candles else None,
             "accepting": self.app.accepting,
             "halted": self.app.supervisor.halted.is_set(),
@@ -324,6 +326,11 @@ def build_ui(app: SentinelApp, market: MarketData,
     size = {"usdt": strategy_usdt}
 
     def _touch() -> Decimal | None:
+        # A maker BUY rests at the bid so it doesn't cross. Fall back to the
+        # last price if the book feed is unavailable (then it may take).
+        bid = market.best_bid()
+        if bid is not None:
+            return bid
         m = market.latest(market.symbol)
         return m.price if m else None
 

@@ -23,6 +23,12 @@ REST_BASE = "https://testnet.binance.vision"
 STREAM_BASE = "wss://stream.testnet.binance.vision"
 HISTORY = 200  # candles kept, any interval
 VALID_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
+# Beyond this, the last price is treated as DEAD — latest() returns None so
+# unrealized P&L is not marked against a stale quote (which would show a phantom
+# gain/loss during a feed outage). Generous because testnet's @kline_1m only
+# ticks on trades: 30-60s gaps are normal liquidity, not an outage. A real
+# continuous feed (@bookTicker) would let this drop to a few seconds.
+MAX_MARK_AGE_S = 180.0
 
 
 class MarketData:
@@ -45,6 +51,8 @@ class MarketData:
     def latest(self, instrument: str) -> Mark | None:
         if instrument != self.symbol or self._price is None:
             return None
+        if time.time() - self._price_ts > MAX_MARK_AGE_S:
+            return None   # stale: don't let dead price drive unrealized P&L
         return Mark(instrument=instrument, price=self._price, ts=self._price_ts)
 
     @property

@@ -29,6 +29,12 @@ class SmaCross:
         self._slow_n = slow
         self._prices: deque[Decimal] = deque(maxlen=slow)
 
+    def reset(self) -> None:
+        """Drop all accumulated bars — the indicator must forget when the
+        underlying timeframe changes, else the SMA blends two timeframes'
+        closes into a meaningless average."""
+        self._prices.clear()
+
     def on_bar(self, close: Decimal) -> Decision:
         self._prices.append(close)
         if len(self._prices) < self._slow_n:

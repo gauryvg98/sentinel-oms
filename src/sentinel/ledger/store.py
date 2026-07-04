@@ -394,9 +394,15 @@ class LedgerStore:
 
     async def recent_orders(self, limit: int = 30) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
+            # Order by last_event_seq (the authoritative per-order sequence),
+            # NOT updated_at: updated_at has DEFAULT now() and is reset for
+            # every row by rebuild_projections()'s TRUNCATE+re-insert, so after
+            # a recovery it collapses to ~one instant and this LIMIT window
+            # would return an arbitrary slice — silently dropping live working
+            # orders from the panel. last_event_seq is reproduced from the log.
             "SELECT client_order_id, instrument, side, qty, filled_qty, state, "
             "broker_order_id, authority, updated_at FROM orders "
-            "ORDER BY updated_at DESC LIMIT $1",
+            "ORDER BY last_event_seq DESC LIMIT $1",
             limit,
         )
         return [

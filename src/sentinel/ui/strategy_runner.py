@@ -50,6 +50,32 @@ class StrategyRunner:
     def stop(self) -> None:
         self.running = False
 
+    def _seed_from_history(self) -> None:
+        """Warm the strategy from closed history (all but the forming bar),
+        leaving last_decision + the bar cursor set to the latest CLOSED bar.
+        Pure/synchronous — no awaits — so it is atomic w.r.t. the run() loop."""
+        reset = getattr(self.strategy, "reset", None)
+        if callable(reset):
+            reset()
+        self.last_decision = None
+        self._last_closed_t = None
+        for c in self.market.candles[:-1]:
+            self.last_decision = self.strategy.on_bar(Decimal(str(c["c"])))
+            self._last_closed_t = c["t"]
+
+    async def reseed(self) -> None:
+        """The chart timeframe changed under us: market.candles are now a
+        DIFFERENT interval's bars, but the strategy's indicator state and our
+        bar cursor were built on the old one. Left alone, the runner would (a)
+        feed the new interval's closes into an indicator still holding the old
+        interval's — a mixed-timeframe garbage signal — and (b) stall (the new
+        closed bar's open-time can be < the old cursor, so it wouldn't act for
+        up to a full interval). Reset and re-warm from the new history; if
+        running, bring the position into line with the fresh stance now."""
+        self._seed_from_history()
+        if self.running:
+            await self.reconcile_now()
+
     async def reconcile_now(self) -> str | None:
         """Reconcile against the CURRENT stance immediately (used on start), so
         the bot acts on existing position/state without waiting for the next
@@ -89,9 +115,7 @@ class StrategyRunner:
     async def run(self) -> None:
         """Supervised task. Seed the strategy from history so it's warm, then
         act on each newly-closed bar."""
-        for c in self.market.candles[:-1]:        # all but the forming bar
-            self.last_decision = self.strategy.on_bar(Decimal(str(c["c"])))
-            self._last_closed_t = c["t"]          # leaves a live stance for
+        self._seed_from_history()                 # leaves a live stance for
                                                   # reconcile_now() on start
 
         import asyncio

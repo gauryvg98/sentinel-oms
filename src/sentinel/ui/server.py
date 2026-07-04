@@ -388,6 +388,11 @@ def build_ui(app: SentinelApp, market: MarketData,
     @ui.post("/timeframe/{interval}")
     async def timeframe(interval: str):
         await market.set_interval(interval)
+        if runner is not None:
+            # The strategy's indicators + bar cursor were built on the old
+            # interval; reset and re-warm on the new one (else mixed-timeframe
+            # signal / stalled acting).
+            await runner.reseed()
         return {"interval": market.interval}
 
     return ui

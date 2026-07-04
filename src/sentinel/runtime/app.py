@@ -21,10 +21,16 @@ from sentinel.ledger import LedgerStore
 from sentinel.metrics import MetricsRegistry
 from sentinel.oms import CommandGateway, OrderEngine, WriterCoordinator
 from sentinel.protect import ProtectiveExitSupervisor
-from sentinel.recon import Reconciler, RecoveryReport
+from sentinel.recon import Reconciler, ReconciliationDivergence, RecoveryReport
 
 from .single_writer import SingleWriterLock
 from .supervisor import TaskSupervisor
+
+# Reconcile retry policy: a transient broker/network error must NOT strand the
+# order (which would hold the instrument forever). Re-enqueue with backoff up
+# to a cap; beyond the cap the failure is treated as fatal, not transient.
+_RECON_BACKOFF_S = 2.0
+_RECON_MAX_RETRIES = 5
 
 
 class ChangeSignal:
@@ -109,7 +115,11 @@ class SentinelApp:
         # subscribes is a silent divergence (found live against Binance).
         self.supervisor.spawn("broker-intake", self._broker_intake)
         self.supervisor.spawn("event-apply", self._event_apply)
-        self.supervisor.spawn("reconcile", self._reconcile_loop, restart=True)
+        # restart=False: this loop is integrity-critical. It handles its OWN
+        # transient retries internally (see _reconcile_loop); the only thing
+        # that exits it is a ReconciliationDivergence or an exhausted retry —
+        # both of which SHOULD halt the account, not silently respawn.
+        self.supervisor.spawn("reconcile", self._reconcile_loop, restart=False)
         report = await self.recon.startup_recovery()      # 1. recover
         if arm_protection:
             # NOTE: with market-style exits, auto-arm means flatten-on-boot
@@ -157,8 +167,33 @@ class SentinelApp:
                 self._events.task_done()                  # drain-accounting
 
     async def _reconcile_loop(self) -> None:
+        """Single recovery mechanism. Two failure modes, handled distinctly:
+
+        - ReconciliationDivergence: the broker and the ledger disagree on
+          exposure. This is the designated halt-and-scream condition ("halt,
+          do not absorb"). Let it propagate — spawned restart=False, so the
+          supervisor halts. NEVER swallow it.
+        - Transient (network blip, broker 5xx): re-enqueue the key and back
+          off, so the order is not stranded in RECONCILING (which would hold
+          the instrument forever via has_unresolved). reconcile_order is
+          idempotent (exec_id dedup), so retry is safe. Past the retry cap the
+          failure is escalated to fatal rather than looped on forever."""
+        attempts: dict[str, int] = {}
         while True:
             key = await self.engine.needs_reconcile.get()
-            await self.recon.reconcile_order(key)
+            try:
+                await self.recon.reconcile_order(key)
+            except ReconciliationDivergence:
+                raise  # integrity-critical: propagate -> supervisor halts
+            except Exception:  # noqa: BLE001 — transient; do not strand
+                n = attempts.get(key, 0) + 1
+                if n > _RECON_MAX_RETRIES:
+                    raise  # persistent failure: halt loudly, don't loop silently
+                attempts[key] = n
+                self.metrics.inc("reconcile_retries")
+                await asyncio.sleep(_RECON_BACKOFF_S)
+                await self.engine.needs_reconcile.put(key)
+                continue
+            attempts.pop(key, None)
             self.metrics.inc("reconciliations")
             await self.changes.bump()

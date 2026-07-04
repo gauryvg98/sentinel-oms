@@ -183,6 +183,29 @@ async def test_rebuild_reproduces_projections_exactly(pool):
     assert await pool.fetchval("SELECT count(*) FROM fills") == 3
 
 
+async def test_recent_orders_ordered_by_seq_not_reset_prone_updated_at(pool):
+    """recent_orders must rank by last_event_seq (authoritative, reproduced on
+    rebuild), NOT updated_at (DEFAULT now(), reset by rebuild's TRUNCATE). Else
+    a recovery collapses every updated_at to one instant and the working-list
+    LIMIT window returns an arbitrary slice, dropping live orders."""
+    store = LedgerStore(pool)
+    a = await store.create_order(intent(key="A"))
+    b = await store.create_order(intent(key="B"))
+    b = await store.apply_event(b, SubmissionStarted(), TRACE)   # B: higher seq
+
+    # Poison time so A LOOKS most-recent-by-clock; seq ordering must ignore it.
+    await pool.execute(
+        "UPDATE orders SET updated_at = now() + interval '1 day' "
+        "WHERE client_order_id = 'A'"
+    )
+    keys = [o["key"] for o in await store.recent_orders(10)]
+    assert keys.index("B") < keys.index("A")        # B (higher seq) still first
+
+    await store.rebuild_projections()                # collapses every updated_at
+    keys2 = [o["key"] for o in await store.recent_orders(10)]
+    assert keys2.index("B") < keys2.index("A")       # stable across recovery
+
+
 async def test_marker_time_is_event_time_and_survives_rebuild(pool):
     """recent_fills must place markers by the append-only event log's time,
     not the fills projection's occurred_at. The projection is TRUNCATEd and

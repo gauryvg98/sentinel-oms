@@ -8,7 +8,10 @@ from decimal import Decimal
 
 import pytest
 
+from types import SimpleNamespace
+
 from sentinel.strategy import Decision, Stance
+from sentinel.strategy.sma import SmaCross
 from sentinel.ui.strategy_runner import StrategyRunner
 
 
@@ -126,3 +129,61 @@ async def test_reconcile_now_noop_without_a_decision():
     r, _ = make()
     r.last_decision = None
     assert await r.reconcile_now() is None
+
+
+def _bars(closes):
+    return [{"t": i, "c": str(c)} for i, c in enumerate(closes, start=1)]
+
+
+async def test_reseed_forgets_the_old_timeframes_bars():
+    """After a timeframe switch, the stance must be computed PURELY from the
+    new interval's bars — the old interval's closes must not linger in the SMA,
+    and the bar cursor must point at the new interval's last closed bar."""
+    strat = SmaCross(fast=2, slow=3)
+    market = SimpleNamespace(candles=[])
+
+    async def zero():
+        return Decimal(0)
+
+    async def noop():
+        return None
+
+    r = StrategyRunner(strat, market, position_fn=zero,
+                       enter_fn=noop, exit_fn=noop, on_change=noop)
+    r.running = False                                  # seed only, no trading
+
+    # New timeframe #1: a downtrend -> FLAT. (closes on bars 1..4 = 100..97)
+    market.candles = _bars([100, 99, 98, 97, 96])
+    await r.reseed()
+    assert r.last_decision.stance is Stance.FLAT
+
+    # New timeframe #2: an uptrend. If the down closes still lingered in the
+    # deque the average would be muddied; a clean reset yields LONG.
+    market.candles = _bars([100, 101, 102, 103, 104])
+    await r.reseed()
+    assert r.last_decision.stance is Stance.LONG
+    assert r._last_closed_t == market.candles[-2]["t"]   # cursor on new tf
+
+
+async def test_reseed_while_running_reconciles_to_fresh_stance():
+    """Switching timeframe while running shouldn't stall: it acts on the new
+    stance immediately instead of waiting up to a full interval."""
+    calls = {"enter": 0}
+
+    async def flat():
+        return Decimal(0)
+
+    async def enter():
+        calls["enter"] += 1
+        return {"placed": "K1", "qty": "0.001"}
+
+    async def noop():
+        return None
+
+    strat = SmaCross(fast=2, slow=3)
+    market = SimpleNamespace(candles=_bars([100, 101, 102, 103, 104]))  # uptrend
+    r = StrategyRunner(strat, market, position_fn=flat,
+                       enter_fn=enter, exit_fn=noop, on_change=noop)
+    r.running = True
+    await r.reseed()
+    assert r.last_decision.stance is Stance.LONG and calls["enter"] == 1

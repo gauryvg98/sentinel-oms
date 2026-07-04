@@ -32,7 +32,8 @@
   .stat b { font-size: 24px; font-weight: 700; }
   .pos { color: var(--green); } .neg { color: var(--red); }
 
-  #tfbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  #tfbar { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
+  #sma-legend { margin-left: auto; display: flex; gap: 14px; font-size: 11px; }
   .tf { font-family: var(--mono); font-size: 12px; color: var(--dim);
         background: var(--panel); border: 1px solid var(--edge);
         border-radius: 6px; padding: 4px 12px; cursor: pointer; }
@@ -120,6 +121,7 @@
   <button class="tf" onclick="setTf('1h')">1h</button>
   <button class="tf" onclick="setTf('4h')">4h</button>
   <button class="tf" onclick="setTf('1d')">1d</button>
+  <span id="sma-legend"></span>
 </div>
 <div id="chart"></div>
 
@@ -190,12 +192,41 @@ const series = chart.addCandlestickSeries({
   wickUpColor: "#22e07b", wickDownColor: "#f87171",
   borderVisible: false,
 });
+// SMA overlay lines — fast (amber) reacts quickly, slow (violet) is smoother.
+// Their crossover is the strategy's LONG/FLAT decision, drawn on the chart.
+const FAST_COLOR = "#fbbf24", SLOW_COLOR = "#a78bfa";
+const fastLine = chart.addLineSeries({ color: FAST_COLOR, lineWidth: 1.5,
+  priceLineVisible: false, lastValueVisible: false });
+const slowLine = chart.addLineSeries({ color: SLOW_COLOR, lineWidth: 1.5,
+  priceLineVisible: false, lastValueVisible: false });
+
 new ResizeObserver(() =>
   chart.applyOptions({ width: $("chart").clientWidth,
                        height: $("chart").clientHeight })
 ).observe($("chart"));
 
 let lastPrice = null;
+let candleData = [];        // maintained bar array, for computing SMAs client-side
+let fastN = null, slowN = null;
+
+function sma(closes, n) {
+  // Simple moving average, aligned to bar times; null until the window fills —
+  // matches exactly what the strategy computes on the same closes.
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i].c;
+    if (i >= n) sum -= closes[i - n].c;
+    if (i >= n - 1) out.push({ time: closes[i].t, value: sum / n });
+  }
+  return out;
+}
+
+function redrawSmaLines() {
+  if (!fastN || !slowN || candleData.length === 0) return;
+  fastLine.setData(sma(candleData, fastN));
+  slowLine.setData(sma(candleData, slowN));
+}
 
 async function setTf(interval) {
   await fetch("/timeframe/" + interval, { method: "POST" });
@@ -209,6 +240,13 @@ async function toggleStrategy() {
 function renderStrategy(st) {
   if (!st) { $("strat-panel").style.display = "none"; return; }
   stratRunning = st.running;
+  if (st.fast_period && (fastN !== st.fast_period || slowN !== st.slow_period)) {
+    fastN = st.fast_period; slowN = st.slow_period;  // periods for the overlay
+    $("sma-legend").innerHTML =
+      `<span style="color:${FAST_COLOR}">━ SMA ${fastN}</span>` +
+      `<span style="color:${SLOW_COLOR}">━ SMA ${slowN}</span>`;
+    redrawSmaLines();
+  }
   $("strat-name").textContent = st.name;
   $("strat-state").textContent = st.running ? "RUNNING" : "paused";
   $("strat-state").className = st.running ? "good" : "warn";
@@ -253,10 +291,15 @@ function render(s) {
 
   const toBar = c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c });
   if (s.candles) {                          // full history: initial OR tf switch
+    candleData = s.candles.slice();
     series.setData(s.candles.map(toBar));
   } else if (s.candle) {                    // delta frames: the forming bar only
+    const last = candleData[candleData.length - 1];
+    if (last && last.t === s.candle.t) candleData[candleData.length - 1] = s.candle;
+    else candleData.push(s.candle);
     series.update(toBar(s.candle));
   }
+  redrawSmaLines();                          // keep the SMA overlay in step
   document.querySelectorAll(".tf").forEach(b =>
     b.classList.toggle("active", b.textContent === s.interval));
   series.setMarkers(s.markers.slice().reverse().map(m => ({

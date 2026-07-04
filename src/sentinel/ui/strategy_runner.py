@@ -121,4 +121,7 @@ class StrategyRunner:
             "stance": d.stance.value if d and d.stance else None,
             "detail": d.detail if d else {},
             "last_action": self.last_action,
+            # Periods for the chart overlay (None if the strategy isn't SMA).
+            "fast_period": getattr(self.strategy, "fast_period", None),
+            "slow_period": getattr(self.strategy, "slow_period", None),
         }

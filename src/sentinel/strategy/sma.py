@@ -23,6 +23,8 @@ class SmaCross:
         if fast >= slow:
             raise ValueError("fast period must be shorter than slow")
         self.name = f"sma-cross({fast}/{slow})"
+        self.fast_period = fast     # public: the chart overlays these windows
+        self.slow_period = slow
         self._fast_n = fast
         self._slow_n = slow
         self._prices: deque[Decimal] = deque(maxlen=slow)

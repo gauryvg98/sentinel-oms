@@ -187,7 +187,7 @@ class StrategyRunner:
             return None
         if plan.kind == "place":
             r = await self._place_entry_fn(plan.qty, plan.price)
-            return f"PEG {self._fmt(r)} @ {plan.price}"
+            return f"PEG {self._fmt(r)} @ {format(plan.price.normalize(), 'f')}"
         if plan.kind == "cancel":
             await self._cancel_fn(plan.cancel_key)
             return f"CANCEL {plan.cancel_key} — {plan.reason}"

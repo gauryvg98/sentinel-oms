@@ -158,6 +158,7 @@
     <div class="kv"><span>Total orders</span><b id="ord-total">—</b></div>
     <div id="ord-states"></div>
     <div class="kv"><span>Total fills</span><b id="ord-fills">—</b></div>
+    <div id="ord-working"></div>
   </div>
   <div class="panel" id="strat-panel">
     <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
@@ -472,6 +473,28 @@ function renderSys(s) {
       keys.map(k => `<span class="pill">${k} ${states[k]}</span>`).join(" ") +
       '</span></div>'
     : "";
+
+  // Resting orders: the strategy's live maker entries (and anything else
+  // working). Show price + progress + a cancel control.
+  const working = s.working || [];
+  $("ord-working").innerHTML = working.length
+    ? '<div style="margin-top:6px;color:#7c8aa0;font-size:11px">RESTING</div>' +
+      working.map(o => {
+        const px = o.limit_price != null ? "@ " + o.limit_price : "mkt";
+        const prog = parseFloat(o.filled) > 0 ? ` · ${o.filled}/${o.qty}` : "";
+        const cancelable = ["WORKING", "PARTIAL"].includes(o.state);
+        return `<div class="kv" style="gap:6px">
+          <span>${o.side} ${o.qty} ${px}<span style="color:#7c8aa0"> ${o.state}${prog}</span></span>
+          ${cancelable
+            ? `<button class="tf" style="padding:1px 7px"
+                 onclick="cancelOrder('${o.key}')">cancel</button>`
+            : ""}</div>`;
+      }).join("")
+    : "";
+}
+
+async function cancelOrder(key) {
+  await fetch("/cancel/" + encodeURIComponent(key), { method: "POST" });
 }
 
 function connect() {

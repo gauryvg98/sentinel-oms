@@ -408,6 +408,15 @@ def build_ui(app: SentinelApp, market: MarketData,
     # runner drives Terminal.trade() directly; the human's only control is
     # start/stop below.
 
+    @ui.post("/cancel/{client_order_id}")
+    async def cancel_order(client_order_id: str):
+        """Cancel a working order (e.g. a strategy's resting maker entry). A
+        legit ops control — canceling a systematic order, not discretionary
+        trading."""
+        result = await terminal.cancel(client_order_id)
+        await app.changes.bump()
+        return result
+
     @ui.post("/strategy/size/{usdt}")
     async def strategy_size(usdt: str):
         """Set the strategy's per-entry size in USDT (live, no restart)."""

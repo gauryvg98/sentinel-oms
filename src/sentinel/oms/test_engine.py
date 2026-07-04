@@ -162,6 +162,32 @@ async def test_cancel_race_full_lifecycle(pool):
     assert await store.get_position("IDX-OPT") == 3
 
 
+async def test_limit_order_rests_persists_price_partials_then_cancels(pool):
+    """End-to-end limit lifecycle through the real stack: a resting limit
+    order keeps its price durably (open_entry sees it), partially fills over
+    time (staying live), and cancels cleanly — the machinery peg-to-touch
+    drives."""
+    script = BrokerScript()
+    script.fill("K1", qty="1", price="4.20", at_step=1)   # partial: 1 of 4
+    script.on_cancel("K1", confirm_after_steps=1)
+    store, sim, engine, gateway = rig(pool, script)
+
+    stored = await gateway.place(uuid4(), intent())        # limit @ 4.20, qty 4
+    assert stored.core.state is OrderState.WORKING
+
+    oe = await store.open_entry("IDX-OPT")                 # price is durable
+    assert oe["key"] == "K1" and oe["limit_price"] == Decimal("4.20")
+
+    await pump(sim, engine, steps=1)                        # one partial fill
+    resting = await store.open_entry("IDX-OPT")
+    assert resting["state"] == "PARTIAL" and resting["filled"] == Decimal("1")
+
+    await gateway.cancel(uuid4(), "K1", uuid4())            # peg would do this to re-price
+    await pump(sim, engine, steps=1)                        # confirm
+    assert (await store.load_order("K1")).core.state is OrderState.CANCELED
+    assert await store.open_entry("IDX-OPT") is None        # no live entry -> guard clears
+
+
 async def test_late_fill_reopens_via_reconciliation(pool):
     """R1.7: a fill delivered after CANCELED moves the order to RECONCILING
     and queues it — never applied blind, never dropped."""

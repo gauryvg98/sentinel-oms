@@ -29,6 +29,56 @@ from .strategy_runner import StrategyRunner
 STATIC = Path(__file__).parent / "static"
 LOT_STEP = Decimal("0.00001")   # BTCUSDT lot step (round order qty down to this)
 
+_UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def interval_seconds(interval: str) -> int:
+    """Binance interval string ('1m','4h','1d') -> seconds. Defaults to 1m."""
+    try:
+        return int(interval[:-1]) * _UNIT_S[interval[-1]]
+    except (KeyError, ValueError):
+        return 60
+
+
+def consolidate_markers(fills: list[dict], interval_s: int) -> list[dict]:
+    """Collapse raw fills into ONE marker per (candle, side).
+
+    Many fills land inside a single bar — especially on coarse timeframes,
+    where a whole session of trades falls in one 4h candle. Rather than stack
+    arrows (or drop all but one), we bucket by the candle each fill belongs to
+    and emit a single consolidated marker carrying the aggregate (count, total
+    qty, VWAP) plus the individual fills for the hover tooltip. Snapping to the
+    candle start is also what keeps markers ON real bars — fill wall-times are
+    arbitrary seconds, candle times are interval-aligned."""
+    buckets: dict[tuple[int, str], dict] = {}
+    for f in fills:
+        ct = (f["t"] // interval_s) * interval_s        # containing candle
+        side = f["side"]
+        b = buckets.get((ct, side))
+        qty, price = Decimal(f["qty"]), Decimal(f["price"])
+        if b is None:
+            b = buckets[(ct, side)] = {
+                "t": ct, "side": side, "n": 0,
+                "_qty": Decimal(0), "_notional": Decimal(0), "detail": [],
+            }
+        b["n"] += 1
+        b["_qty"] += qty
+        b["_notional"] += qty * price
+        if len(b["detail"]) < 25:                       # cap hover list
+            b["detail"].append({"t": f["t"], "side": side,
+                                 "qty": f["qty"], "price": f["price"]})
+    out = []
+    for b in buckets.values():
+        vwap = (b["_notional"] / b["_qty"]) if b["_qty"] else Decimal(0)
+        out.append({
+            "t": b["t"], "side": b["side"], "n": b["n"],
+            "qty": format(b["_qty"].normalize(), "f"),
+            "price": format(vwap.quantize(Decimal("0.01")), "f"),
+            "detail": sorted(b["detail"], key=lambda d: d["t"]),
+        })
+    out.sort(key=lambda m: m["t"])
+    return out
+
 
 async def check_invariants(app: SentinelApp) -> dict[str, bool]:
     pool = app.store._pool
@@ -198,9 +248,18 @@ class Terminal:
             "metrics": self.app.metrics.snapshot(),
             "orders": await order_stats(self.app),
             "invariants": await check_invariants(self.app),
-            # Chart markers: only the recent window — older fills scroll off
-            # the visible chart, and shipping hundreds bloats every delta.
-            "markers": await self.app.store.recent_fills(symbol, limit=60),
+            # Chart markers: fills bucketed to one arrow per (candle, side),
+            # covering the visible window. Consolidation bounds the payload to
+            # the number of bars no matter how many fills there are, and each
+            # marker carries its constituent fills for the hover tooltip.
+            "markers": consolidate_markers(
+                await self.app.store.recent_fills(
+                    symbol, limit=1000,
+                    since=(self.market.candles[0]["t"]
+                           if self.market.candles else None),
+                ),
+                interval_seconds(self.market.interval),
+            ),
             "position": format(pnl.position.normalize(), "f") if pnl else "0",
             "avg_cost": quantize(pnl.avg_cost) if pnl else None,
             "realized": quantize(pnl.realized) if pnl else "0.00",
@@ -230,12 +289,18 @@ def build_ui(app: SentinelApp, market: MarketData,
     # The strategy is just another producer of signals into the same gateway.
     # ENTER -> a BUY sized in USDT; EXIT -> close the whole position. It faces
     # the identical guards a human does (single-writer, never-over-exit).
+    # Entry size lives in a mutable holder so it can be tuned from the UI
+    # without a restart. This is the ONLY position-size knob: the strategy
+    # targets a single long/flat position, so "trade bigger" = bigger entry,
+    # not more concurrent buys.
+    size = {"usdt": strategy_usdt}
+
     runner = None
     if strategy is not None:
         runner = StrategyRunner(
             strategy, market,
             position_fn=lambda: app.store.get_position(market.symbol),
-            enter_fn=lambda: terminal.trade("BUY", usdt=float(strategy_usdt)),
+            enter_fn=lambda: terminal.trade("BUY", usdt=float(size["usdt"])),
             exit_fn=lambda: terminal.trade("SELL", pct=100),
             on_change=app.changes.bump,
         )
@@ -267,6 +332,7 @@ def build_ui(app: SentinelApp, market: MarketData,
             snap = await terminal.snapshot(with_candles=with_candles)
             if runner is not None:
                 snap["strategy"] = runner.snapshot()
+                snap["strategy"]["entry_usdt"] = format(size["usdt"], "f")
             return snap
         return build()
 
@@ -305,6 +371,19 @@ def build_ui(app: SentinelApp, market: MarketData,
     # No manual /trade endpoint — this is a systematic terminal. The strategy
     # runner drives Terminal.trade() directly; the human's only control is
     # start/stop below.
+
+    @ui.post("/strategy/size/{usdt}")
+    async def strategy_size(usdt: str):
+        """Set the strategy's per-entry size in USDT (live, no restart)."""
+        try:
+            v = Decimal(usdt)
+        except Exception:
+            return {"error": "invalid amount"}
+        if v <= 0:
+            return {"error": "must be positive"}
+        size["usdt"] = v
+        await app.changes.bump()
+        return {"entry_usdt": format(v, "f")}
 
     @ui.post("/timeframe/{interval}")
     async def timeframe(interval: str):

@@ -445,19 +445,36 @@ class LedgerStore:
             client_order_id,
         )
 
-    async def recent_fills(self, instrument: str, limit: int = 200
+    async def recent_fills(self, instrument: str, limit: int = 200,
+                           since: int | None = None
                            ) -> list[dict[str, Any]]:
-        """Fills with side + wall time — the chart's trade markers."""
-        rows = await self._pool.fetch(
-            """
-            SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
-            FROM fills f JOIN orders o ON o.order_id = f.order_id
-            WHERE o.instrument = $1
-            ORDER BY f.event_seq DESC LIMIT $2
-            """,
-            instrument,
-            limit,
-        )
+        """Fills with side + wall time — the chart's trade markers. `since`
+        (unix seconds) bounds the set to the visible chart window so a long
+        history doesn't ship hundreds of off-screen fills every frame."""
+        if since is not None:
+            from datetime import datetime, timezone
+            rows = await self._pool.fetch(
+                """
+                SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
+                FROM fills f JOIN orders o ON o.order_id = f.order_id
+                WHERE o.instrument = $1 AND f.occurred_at >= $2
+                ORDER BY f.event_seq DESC LIMIT $3
+                """,
+                instrument,
+                datetime.fromtimestamp(since, tz=timezone.utc),
+                limit,
+            )
+        else:
+            rows = await self._pool.fetch(
+                """
+                SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
+                FROM fills f JOIN orders o ON o.order_id = f.order_id
+                WHERE o.instrument = $1
+                ORDER BY f.event_seq DESC LIMIT $2
+                """,
+                instrument,
+                limit,
+            )
         return [
             {
                 "t": int(r["occurred_at"].timestamp()),

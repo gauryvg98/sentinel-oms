@@ -165,6 +165,15 @@
     <div class="kv"><span>Wants</span><b id="strat-signal">—</b></div>
     <div class="kv"><span>Fast / Slow</span><b id="strat-sma">—</b></div>
     <div class="kv"><span>Last action</span><b id="strat-action">—</b></div>
+    <div class="kv"><span>Entry size</span>
+      <span style="display:flex;gap:4px;align-items:center">
+        <input id="strat-size" type="number" min="1" step="1"
+               style="width:64px;background:#0b0f17;border:1px solid #223;
+                      color:#dbe4f0;border-radius:4px;padding:2px 4px;
+                      font:inherit;text-align:right">
+        <span style="color:#7c8aa0">USDT</span>
+        <button class="tf" style="padding:2px 8px" onclick="setSize()">set</button>
+      </span></div>
     <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
             onclick="toggleStrategy()">▶ start</button>
   </div>
@@ -209,6 +218,43 @@ let lastPrice = null;
 let candleData = [];        // maintained bar array, for computing SMAs client-side
 let fastN = null, slowN = null;
 
+// Hover tooltip for consolidated markers: candle time -> { BUY, SELL } each a
+// server-consolidated bucket (n, qty, price, detail[]). Hovering a bar with
+// trades expands the single arrow into its individual entries/exits.
+const markerDetail = new Map();
+const chartEl = $("chart");
+chartEl.style.position = "relative";
+const mtip = document.createElement("div");
+mtip.style.cssText =
+  "position:absolute;z-index:20;pointer-events:none;display:none;" +
+  "background:#0b0f17ee;border:1px solid #223;border-radius:6px;" +
+  "padding:6px 8px;font:11px/1.5 ui-monospace,monospace;color:#dbe4f0;" +
+  "box-shadow:0 4px 14px #000a;max-width:240px";
+chartEl.appendChild(mtip);
+
+chart.subscribeCrosshairMove(p => {
+  const bucket = p.time != null ? markerDetail.get(p.time) : null;
+  if (!bucket || !p.point) { mtip.style.display = "none"; return; }
+  const rows = [];
+  for (const side of ["BUY", "SELL"]) {
+    const b = bucket[side];
+    if (!b) continue;
+    const col = side === "BUY" ? "#22e07b" : "#f87171";
+    rows.push(`<div style="color:${col};font-weight:600">${side} ` +
+      `${b.n}× · ${b.qty} @ ${b.price}</div>`);
+    for (const f of b.detail) {
+      const hm = new Date(f.t * 1000).toLocaleTimeString(
+        undefined, { hour: "2-digit", minute: "2-digit" });
+      rows.push(`<div style="color:#7c8aa0">· ${hm} ${f.qty} @ ${f.price}</div>`);
+    }
+  }
+  mtip.innerHTML = rows.join("");
+  mtip.style.display = "block";
+  const w = chartEl.clientWidth;
+  mtip.style.left = Math.min(p.point.x + 12, w - 248) + "px";
+  mtip.style.top = Math.max(p.point.y - 8, 4) + "px";
+});
+
 function sma(closes, n) {
   // Simple moving average, aligned to bar times; null until the window fills —
   // matches exactly what the strategy computes on the same closes.
@@ -236,6 +282,11 @@ let stratRunning = false;
 async function toggleStrategy() {
   await fetch("/strategy/" + (stratRunning ? "stop" : "start"), { method: "POST" });
 }
+async function setSize() {
+  const v = $("strat-size").value.trim();
+  if (!v || parseFloat(v) <= 0) return;
+  await fetch("/strategy/size/" + encodeURIComponent(v), { method: "POST" });
+}
 
 function renderStrategy(st) {
   if (!st) { $("strat-panel").style.display = "none"; return; }
@@ -259,6 +310,9 @@ function renderStrategy(st) {
     : (st.detail && st.detail.warming_up
         ? `warming ${st.detail.have}/${st.detail.need}` : "—");
   $("strat-action").textContent = st.last_action || "—";
+  const sizeEl = $("strat-size");
+  if (st.entry_usdt != null && document.activeElement !== sizeEl)
+    sizeEl.value = parseFloat(st.entry_usdt);   // don't clobber mid-type
   const btn = $("strat-toggle");
   btn.textContent = st.running ? "■ stop" : "▶ start";
   btn.classList.toggle("active", st.running);
@@ -302,27 +356,24 @@ function render(s) {
   redrawSmaLines();                          // keep the SMA overlay in step
   document.querySelectorAll(".tf").forEach(b =>
     b.classList.toggle("active", b.textContent === s.interval));
-  // Snap each fill to the candle it belongs to and drop any outside the
-  // visible range. Fill timestamps are arbitrary seconds; candle times are
-  // interval-aligned — without snapping, lightweight-charts clamps stray
-  // markers onto the last bar (a garbage vertical stack). One marker per
-  // candle+side keeps it readable.
-  if (candleData.length >= 2) {
-    const interval = candleData[1].t - candleData[0].t;
+  // Markers arrive already consolidated to one bucket per (candle, side) and
+  // aligned to candle-open times. We just render an arrow per bucket (its `n`
+  // shown when >1) and index the buckets by time so the crosshair handler can
+  // expand them into individual fills on hover. Buckets whose candle isn't in
+  // the current window are skipped — they'd clamp onto the last bar otherwise.
+  if (s.markers && candleData.length) {
     const times = new Set(candleData.map(c => c.t));
-    const seen = new Set();
+    markerDetail.clear();
     const markers = [];
     for (const m of s.markers) {
-      const t = Math.floor(m.t / interval) * interval;   // containing candle
-      const key = t + ":" + m.side;
-      if (!times.has(t) || seen.has(key)) continue;       // out of range / dup
-      seen.add(key);
+      if (!times.has(m.t)) continue;                       // outside window
+      (markerDetail.get(m.t) || markerDetail.set(m.t, {}).get(m.t))[m.side] = m;
       markers.push({
-        time: t,
+        time: m.t,
         position: m.side === "BUY" ? "belowBar" : "aboveBar",
         color: m.side === "BUY" ? "#22e07b" : "#f87171",
         shape: m.side === "BUY" ? "arrowUp" : "arrowDown",
-        text: m.side === "BUY" ? "B" : "S",
+        text: (m.side === "BUY" ? "B" : "S") + (m.n > 1 ? "×" + m.n : ""),
       });
     }
     markers.sort((a, b) => a.time - b.time);               // required ascending

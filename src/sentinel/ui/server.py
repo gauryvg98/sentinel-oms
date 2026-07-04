@@ -134,8 +134,8 @@ class Terminal:
         self.market = market
         self.trade_qty = trade_qty
 
-    def _intent(self, side: Side, authority: Authority,
-                qty: Decimal) -> EconomicOrderIntent:
+    def _intent(self, side: Side, authority: Authority, qty: Decimal,
+                limit_price: Decimal | None = None) -> EconomicOrderIntent:
         mark = self.market.latest(self.market.symbol)
         return EconomicOrderIntent(
             intent_id=uuid4(),
@@ -143,11 +143,39 @@ class Terminal:
             instrument=self.market.symbol,
             side=side,
             qty=qty,
-            limit_price=None,                 # market order: instant feedback
+            limit_price=limit_price,          # None -> market (instant feedback)
             authority=authority,
             trace_id=uuid4(),
             quote_at_decision=mark.price if mark else None,
         )
+
+    async def place_limit(self, side: str, qty: Decimal, price: Decimal,
+                          authority: Authority = Authority.ENTRY) -> dict:
+        """Place a resting LIMIT order (maker). Same guarded path as a market
+        order — only the order type differs."""
+        qty = qty.quantize(LOT_STEP, rounding=ROUND_DOWN)
+        if qty <= 0:
+            return {"blocked": "ZeroSize", "reason": "nothing to trade"}
+        try:
+            with self.app.metrics.timer("place_ms"):
+                stored = await self.app.gateway.place(
+                    uuid4(), self._intent(Side(side), authority, qty, price)
+                )
+            return await self._classify(stored)
+        except PlacementBlocked as e:
+            self.app.metrics.inc("orders_blocked")
+            return {"blocked": type(e).__name__, "reason": str(e)}
+
+    async def cancel(self, client_order_id: str) -> dict:
+        """Request cancellation of a working order (confirmation arrives on the
+        broker stream). Idempotent through the gateway."""
+        try:
+            stored = await self.app.gateway.cancel(
+                uuid4(), client_order_id, uuid4()
+            )
+            return {"canceling": client_order_id, "state": stored.core.state.value}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
 
     async def _classify(self, stored) -> dict:
         """A returned order is NOT proof of success — a broker rejection comes
@@ -295,13 +323,21 @@ def build_ui(app: SentinelApp, market: MarketData,
     # not more concurrent buys.
     size = {"usdt": strategy_usdt}
 
+    def _touch() -> Decimal | None:
+        m = market.latest(market.symbol)
+        return m.price if m else None
+
     runner = None
     if strategy is not None:
         runner = StrategyRunner(
             strategy, market,
             position_fn=lambda: app.store.get_position(market.symbol),
-            enter_fn=lambda: terminal.trade("BUY", usdt=float(size["usdt"])),
-            exit_fn=lambda: terminal.trade("SELL", pct=100),
+            open_entry_fn=lambda: app.store.open_entry(market.symbol),
+            place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
+            cancel_fn=lambda key: terminal.cancel(key),
+            exit_fn=lambda: terminal.trade("SELL", pct=100),   # exits stay market
+            touch_fn=_touch,
+            budget_fn=lambda: size["usdt"],
             on_change=app.changes.bump,
         )
 

@@ -1,189 +1,230 @@
-"""StrategyRunner.react tests — the reconcile-to-stance rule with fake order
-callables (no DB, no broker). Proves it brings actual position into line with
-the desired stance, including PRE-EXISTING positions, and never acts paused."""
+"""Peg-to-touch runner tests.
+
+Two layers: the PURE `plan_action` (every place/cancel/reprice/exit case, no
+I/O) and a few `reconcile_now` integration checks with fake order callables
+(proving the plan is executed and the guards' shape is respected)."""
 
 from __future__ import annotations
 
 from decimal import Decimal
-
-import pytest
-
 from types import SimpleNamespace
 
 from sentinel.strategy import Decision, Stance
 from sentinel.strategy.sma import SmaCross
-from sentinel.ui.strategy_runner import StrategyRunner
+from sentinel.ui.strategy_runner import StrategyRunner, plan_action
 
+B = Decimal("15")            # budget (USDT)
+T = Decimal("100")           # touch -> target = 15/100 = 0.15 BTC
+
+
+def entry(state="WORKING", price="100", key="K1"):
+    return {"key": key, "qty": Decimal("0.15"), "filled": Decimal(0),
+            "state": state, "limit_price": Decimal(price) if price else None}
+
+
+# ------------------------------------------------------------ plan_action (pure)
+
+def test_no_opinion_is_noop():
+    assert plan_action(None, Decimal(0), T, None, B).kind == "noop"
+
+
+def test_flat_with_position_exits():
+    assert plan_action(Stance.FLAT, Decimal("0.15"), T, None, B).kind == "exit"
+
+
+def test_flat_with_unfilled_entry_cancels_it():
+    p = plan_action(Stance.FLAT, Decimal(0), T, entry(), B)
+    assert p.kind == "cancel" and p.cancel_key == "K1"
+
+
+def test_flat_and_flat_is_noop():
+    assert plan_action(Stance.FLAT, Decimal(0), T, None, B).kind == "noop"
+
+
+def test_long_without_a_touch_cannot_peg():
+    assert plan_action(Stance.LONG, Decimal(0), None, None, B).kind == "noop"
+
+
+def test_long_flat_no_entry_places_at_touch():
+    p = plan_action(Stance.LONG, Decimal(0), T, None, B)
+    assert p.kind == "place" and p.price == T and p.qty == Decimal("0.15")
+
+
+def test_long_places_only_the_remaining_after_a_partial():
+    p = plan_action(Stance.LONG, Decimal("0.075"), T, None, B)   # half already filled
+    assert p.kind == "place" and p.qty == Decimal("0.075")
+
+
+def test_long_at_target_is_noop():
+    assert plan_action(Stance.LONG, Decimal("0.15"), T, None, B).kind == "noop"
+
+
+def test_long_at_target_cancels_a_leftover_resting_entry():
+    p = plan_action(Stance.LONG, Decimal("0.15"), T, entry(), B)
+    assert p.kind == "cancel"
+
+
+def test_pegged_entry_within_band_is_left_alone():
+    p = plan_action(Stance.LONG, Decimal(0), T, entry(price="99.99"), B)  # ~1bp
+    assert p.kind == "noop"
+
+
+def test_drifted_entry_is_cancelled_to_reprice():
+    p = plan_action(Stance.LONG, Decimal(0), T, entry(price="99"), B)     # 100bp
+    assert p.kind == "cancel" and p.reason == "re-peg to touch"
+
+
+def test_entry_in_flight_is_never_touched():
+    for st in ("SUBMITTING", "CANCEL_PENDING", "UNKNOWN", "RECONCILING"):
+        assert plan_action(Stance.LONG, Decimal(0), T, entry(state=st, price="99"),
+                           B).kind == "noop"
+
+
+def test_orphan_entry_without_a_price_is_left_alone():
+    p = plan_action(Stance.LONG, Decimal(0), T, entry(price=None), B)
+    assert p.kind == "noop"
+
+
+# --------------------------------------------------------- reconcile (with fakes)
 
 class _Strat:
     name = "fake"
 
+    def __init__(self, stance):
+        self._stance = stance
+
     def on_bar(self, close):
-        return Decision(Stance.FLAT)
+        return Decision(self._stance)
 
 
-def make(running: bool = True):
-    calls = {"enter": 0, "exit": 0}
+def make(*, stance=Stance.LONG, position="0", touch=T, entry_=None,
+         budget=B, running=True):
+    calls = {"place": [], "cancel": [], "exit": 0}
 
-    async def enter():
-        calls["enter"] += 1
-        return {"placed": "K1", "qty": "0.001"}
+    async def position_fn():
+        return Decimal(position)
 
-    async def exit_():
+    async def open_entry_fn():
+        return entry_
+
+    async def place_entry_fn(qty, price):
+        calls["place"].append((qty, price))
+        return {"placed": "K1", "qty": str(qty)}
+
+    async def cancel_fn(key):
+        calls["cancel"].append(key)
+        return {"canceling": key}
+
+    async def exit_fn():
         calls["exit"] += 1
-        return {"placed": "X1", "qty": "0.001"}
+        return {"placed": "X1", "qty": "0.15"}
 
-    async def noop():
+    async def on_change():
         return None
 
     r = StrategyRunner(
-        _Strat(), market=None,
-        position_fn=noop, enter_fn=enter, exit_fn=exit_, on_change=noop,
+        _Strat(stance), market=SimpleNamespace(candles=[]),
+        position_fn=position_fn, open_entry_fn=open_entry_fn,
+        place_entry_fn=place_entry_fn, cancel_fn=cancel_fn, exit_fn=exit_fn,
+        touch_fn=lambda: touch, budget_fn=lambda: budget, on_change=on_change,
     )
     r.running = running
+    r.last_decision = Decision(stance) if stance is not None else None
     return r, calls
 
 
-async def test_wants_long_while_flat_enters():
-    r, calls = make()
-    action = await r.react(Decision(Stance.LONG), Decimal(0))
-    assert calls == {"enter": 1, "exit": 0}
-    assert action.startswith("ENTER")
+async def test_reconcile_places_a_maker_entry_when_long_and_flat():
+    r, calls = make(stance=Stance.LONG, position="0")
+    action = await r.reconcile_now()
+    assert calls["place"] == [(Decimal("0.15"), T)]
+    assert action.startswith("PEG") and r.last_action == action
 
 
-async def test_wants_long_while_already_long_is_a_noop():
-    """Pre-existing position that matches the stance: leave it alone."""
-    r, calls = make()
-    assert await r.react(Decision(Stance.LONG), Decimal("0.002")) is None
-    assert calls["enter"] == 0
-
-
-async def test_wants_flat_while_long_closes_a_preexisting_position():
-    """The key case: you're holding when the strategy wants flat -> it closes,
-    without needing an edge/crossover."""
-    r, calls = make()
-    action = await r.react(Decision(Stance.FLAT), Decimal("0.002"))
-    assert calls == {"enter": 0, "exit": 1}
+async def test_reconcile_exits_at_market_and_cancels_any_resting_entry():
+    r, calls = make(stance=Stance.FLAT, position="0.15", entry_=entry())
+    action = await r.reconcile_now()
+    assert calls["exit"] == 1 and calls["cancel"] == ["K1"]   # cancel then flatten
     assert action.startswith("EXIT")
 
 
-async def test_wants_flat_while_flat_is_a_noop():
-    r, calls = make()
-    assert await r.react(Decision(Stance.FLAT), Decimal(0)) is None
-    assert calls == {"enter": 0, "exit": 0}
+async def test_reconcile_reprices_a_drifted_entry():
+    r, calls = make(stance=Stance.LONG, position="0", entry_=entry(price="99"))
+    await r.reconcile_now()
+    assert calls["cancel"] == ["K1"] and calls["place"] == []
 
 
-async def test_no_opinion_never_acts_even_holding():
-    """Warming up (stance None) must NOT flatten an existing position."""
-    r, calls = make()
-    assert await r.react(Decision(None), Decimal("0.002")) is None
-    assert await r.react(Decision(None), Decimal(0)) is None
-    assert calls == {"enter": 0, "exit": 0}
-
-
-async def test_paused_runner_ignores_stance():
-    r, calls = make(running=False)
-    assert await r.react(Decision(Stance.LONG), Decimal(0)) is None
-    assert await r.react(Decision(Stance.FLAT), Decimal("0.002")) is None
-    assert calls == {"enter": 0, "exit": 0}
-
-
-async def test_action_string_reports_rejection():
-    r, _ = make()
-
-    async def rejected():
-        return {"rejected": "K1", "reason": "insufficient balance"}
-
-    r._enter_fn = rejected  # noqa: SLF001
-    action = await r.react(Decision(Stance.LONG), Decimal(0))
-    assert "rejected" in action and "insufficient" in action
-
-
-async def test_reconcile_now_acts_on_current_stance():
-    """On start, reconcile_now brings position into line immediately."""
-    calls = {"enter": 0}
-
-    async def enter():
-        calls["enter"] += 1
-        return {"placed": "K1", "qty": "0.001"}
-
-    async def exit_():
-        return {}
-
-    async def flat():
-        return Decimal(0)
-
-    async def noop():
-        return None
-
-    r = StrategyRunner(_Strat(), market=None, position_fn=flat,
-                       enter_fn=enter, exit_fn=exit_, on_change=noop)
-    r.running = True
-    r.last_decision = Decision(Stance.LONG)
-    action = await r.reconcile_now()
-    assert action.startswith("ENTER") and calls["enter"] == 1
-    assert r.last_action == action
-
-
-async def test_reconcile_now_noop_without_a_decision():
-    r, _ = make()
-    r.last_decision = None
+async def test_paused_runner_does_nothing():
+    r, calls = make(stance=Stance.LONG, position="0", running=False)
     assert await r.reconcile_now() is None
+    assert calls["place"] == [] and calls["exit"] == 0
 
+
+# ---------------------------------------------------------------- reseed (SMA)
 
 def _bars(closes):
     return [{"t": i, "c": str(c)} for i, c in enumerate(closes, start=1)]
 
 
+def _sma_runner(market, *, running):
+    async def zero():
+        return Decimal(0)
+
+    async def none_():
+        return None
+
+    async def noop(*a):
+        return None
+
+    async def place(qty, price):
+        return {"placed": "K1", "qty": str(qty)}
+
+    r = StrategyRunner(
+        SmaCross(fast=2, slow=3), market,
+        position_fn=zero, open_entry_fn=none_, place_entry_fn=place,
+        cancel_fn=noop, exit_fn=noop, touch_fn=lambda: Decimal("100"),
+        budget_fn=lambda: B, on_change=noop,
+    )
+    r.running = running
+    return r
+
+
 async def test_reseed_forgets_the_old_timeframes_bars():
-    """After a timeframe switch, the stance must be computed PURELY from the
-    new interval's bars — the old interval's closes must not linger in the SMA,
-    and the bar cursor must point at the new interval's last closed bar."""
-    strat = SmaCross(fast=2, slow=3)
     market = SimpleNamespace(candles=[])
+    r = _sma_runner(market, running=False)          # seed only, no trading
+
+    market.candles = _bars([100, 99, 98, 97, 96])   # downtrend -> FLAT
+    await r.reseed()
+    assert r.last_decision.stance is Stance.FLAT
+
+    market.candles = _bars([100, 101, 102, 103, 104])   # uptrend -> LONG if clean
+    await r.reseed()
+    assert r.last_decision.stance is Stance.LONG
+    assert r._last_closed_t == market.candles[-2]["t"]
+
+
+async def test_reseed_while_running_acts_on_the_fresh_stance():
+    placed = []
+
+    async def place(qty, price):
+        placed.append((qty, price))
+        return {"placed": "K1", "qty": str(qty)}
 
     async def zero():
         return Decimal(0)
 
-    async def noop():
+    async def none_():
         return None
 
-    r = StrategyRunner(strat, market, position_fn=zero,
-                       enter_fn=noop, exit_fn=noop, on_change=noop)
-    r.running = False                                  # seed only, no trading
-
-    # New timeframe #1: a downtrend -> FLAT. (closes on bars 1..4 = 100..97)
-    market.candles = _bars([100, 99, 98, 97, 96])
-    await r.reseed()
-    assert r.last_decision.stance is Stance.FLAT
-
-    # New timeframe #2: an uptrend. If the down closes still lingered in the
-    # deque the average would be muddied; a clean reset yields LONG.
-    market.candles = _bars([100, 101, 102, 103, 104])
-    await r.reseed()
-    assert r.last_decision.stance is Stance.LONG
-    assert r._last_closed_t == market.candles[-2]["t"]   # cursor on new tf
-
-
-async def test_reseed_while_running_reconciles_to_fresh_stance():
-    """Switching timeframe while running shouldn't stall: it acts on the new
-    stance immediately instead of waiting up to a full interval."""
-    calls = {"enter": 0}
-
-    async def flat():
-        return Decimal(0)
-
-    async def enter():
-        calls["enter"] += 1
-        return {"placed": "K1", "qty": "0.001"}
-
-    async def noop():
+    async def noop(*a):
         return None
 
-    strat = SmaCross(fast=2, slow=3)
     market = SimpleNamespace(candles=_bars([100, 101, 102, 103, 104]))  # uptrend
-    r = StrategyRunner(strat, market, position_fn=flat,
-                       enter_fn=enter, exit_fn=noop, on_change=noop)
+    r = StrategyRunner(
+        SmaCross(fast=2, slow=3), market,
+        position_fn=zero, open_entry_fn=none_, place_entry_fn=place,
+        cancel_fn=noop, exit_fn=noop, touch_fn=lambda: Decimal("100"),
+        budget_fn=lambda: B, on_change=noop,
+    )
     r.running = True
     await r.reseed()
-    assert r.last_decision.stance is Stance.LONG and calls["enter"] == 1
+    assert r.last_decision.stance is Stance.LONG and len(placed) == 1

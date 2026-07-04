@@ -2,21 +2,97 @@
 
 It runs as a supervised task, ALWAYS feeding every closed bar to the strategy
 (so the indicators stay warm even while paused), but only ACTING when started.
-Actions go through injected buy/sell callables that hit the normal
-CommandGateway — so the strategy faces the exact same guards a human does:
-single-writer, never-over-exit, duplicate-entry. A bad strategy trades badly;
-it cannot bypass the safety layer or corrupt state.
+Actions go through injected callables that hit the normal CommandGateway — so
+the strategy faces the exact same guards a human does: single-writer,
+never-over-exit, duplicate-entry. A bad strategy trades badly; it cannot bypass
+the safety layer or corrupt state.
 
-The decision->action rule (`react`) is pulled out pure and testable; the run
-loop is just "detect a newly-closed bar, feed it, react."
+Execution is PEG-TO-TOUCH maker entries: the entry is a resting LIMIT order
+pegged to the touch and re-priced as the touch drifts, so the strategy pays the
+maker side instead of the spread. The EXIT stays a market order — when you want
+out you want certainty, not a price. The place/cancel/reprice decision is pulled
+out as a PURE function (`plan_action`) so every case is testable without a
+broker; the run loop is just "detect a newly-closed bar, feed it, reconcile."
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
+from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal
 from typing import Awaitable, Callable
 
 from sentinel.strategy import Decision, Stance, Strategy
+
+# A working entry is safe to re-price only when it is cleanly resting. In any
+# in-flight state (SUBMITTING / CANCEL_PENDING / UNKNOWN / RECONCILING) we wait:
+# touching it would race the broker or the duplicate-entry guard.
+_RESTING = ("WORKING", "PARTIAL")
+
+_DEFAULT_REPRICE_FRAC = Decimal("0.0005")   # 5 bps: re-peg once the touch drifts
+_DEFAULT_LOT_STEP = Decimal("0.00001")      # BTCUSDT lot step
+
+
+@dataclass(frozen=True, slots=True)
+class Plan:
+    """What the runner should do this bar. One primary action; the executor
+    handles any incidental cleanup (e.g. cancelling a resting entry on exit)."""
+    kind: str                       # "place" | "cancel" | "exit" | "noop"
+    qty: Decimal | None = None
+    price: Decimal | None = None
+    cancel_key: str | None = None
+    reason: str = ""
+
+
+def plan_action(
+    stance: Stance | None,
+    position: Decimal,
+    touch: Decimal | None,
+    entry: dict | None,             # store.open_entry(): key/qty/filled/state/limit_price
+    budget: Decimal,                # entry size in quote (USDT)
+    *,
+    reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
+    lot_step: Decimal = _DEFAULT_LOT_STEP,
+) -> Plan:
+    """Pure peg-to-touch reconciliation: actual position + resting entry ->
+    the one thing to do this bar. No I/O, no clock — trivially testable."""
+    if stance is None:
+        return Plan("noop", reason="no opinion")
+
+    if stance is Stance.FLAT:
+        if position > 0:
+            return Plan("exit", reason="flat: close position")
+        if entry is not None:
+            return Plan("cancel", cancel_key=entry["key"],
+                        reason="flat: abandon unfilled entry")
+        return Plan("noop", reason="flat")
+
+    # stance LONG: hold `budget` worth via a maker limit pegged to the touch.
+    if touch is None or touch <= 0:
+        return Plan("noop", reason="no touch price to peg to")
+
+    target = (budget / touch).quantize(lot_step, rounding=ROUND_DOWN)
+    remaining = (target - position).quantize(lot_step, rounding=ROUND_DOWN)
+    if remaining <= 0:                                   # at target (within a lot)
+        if entry is not None and entry["state"] in _RESTING:
+            return Plan("cancel", cancel_key=entry["key"],
+                        reason="target reached: cancel remainder")
+        return Plan("noop", reason="at target")
+
+    if entry is None:
+        return Plan("place", qty=remaining, price=touch,
+                    reason="place maker entry at touch")
+
+    # A working entry exists — re-peg it or wait.
+    if entry["state"] not in _RESTING:
+        return Plan("noop", reason=f"entry in flight ({entry['state']})")
+    resting = entry["limit_price"]
+    if resting is None:                                  # orphan / not our maker
+        return Plan("noop", reason="entry has no limit price, leaving it")
+    if abs(touch - resting) / touch > reprice_frac:
+        # Cancel now; the replace lands next bar once the cancel is confirmed
+        # and the duplicate-entry guard clears. See the module docstring.
+        return Plan("cancel", cancel_key=entry["key"], reason="re-peg to touch")
+    return Plan("noop", reason="pegged")
 
 
 class StrategyRunner:
@@ -26,18 +102,30 @@ class StrategyRunner:
         market,                                   # ui.market.MarketData
         *,
         position_fn: Callable[[], Awaitable[Decimal]],
-        enter_fn: Callable[[], Awaitable[dict]],  # place a BUY (open/add)
-        exit_fn: Callable[[], Awaitable[dict]],   # place a SELL (close)
+        open_entry_fn: Callable[[], Awaitable[dict | None]],
+        place_entry_fn: Callable[[Decimal, Decimal], Awaitable[dict]],  # (qty, price)
+        cancel_fn: Callable[[str], Awaitable[dict]],
+        exit_fn: Callable[[], Awaitable[dict]],   # market close
+        touch_fn: Callable[[], Decimal | None],
+        budget_fn: Callable[[], Decimal],         # entry size in USDT
         on_change: Callable[[], Awaitable[None]],
         poll_s: float = 2.0,
+        reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
+        lot_step: Decimal = _DEFAULT_LOT_STEP,
     ) -> None:
         self.strategy = strategy
         self.market = market
         self._position_fn = position_fn
-        self._enter_fn = enter_fn
+        self._open_entry_fn = open_entry_fn
+        self._place_entry_fn = place_entry_fn
+        self._cancel_fn = cancel_fn
         self._exit_fn = exit_fn
+        self._touch_fn = touch_fn
+        self._budget_fn = budget_fn
         self._on_change = on_change
         self._poll_s = poll_s
+        self._reprice_frac = reprice_frac
+        self._lot_step = lot_step
 
         self.running = False
         self.last_decision: Decision | None = None
@@ -66,39 +154,48 @@ class StrategyRunner:
     async def reseed(self) -> None:
         """The chart timeframe changed under us: market.candles are now a
         DIFFERENT interval's bars, but the strategy's indicator state and our
-        bar cursor were built on the old one. Left alone, the runner would (a)
-        feed the new interval's closes into an indicator still holding the old
-        interval's — a mixed-timeframe garbage signal — and (b) stall (the new
-        closed bar's open-time can be < the old cursor, so it wouldn't act for
-        up to a full interval). Reset and re-warm from the new history; if
-        running, bring the position into line with the fresh stance now."""
+        bar cursor were built on the old one. Reset and re-warm from the new
+        history; if running, bring the position into line with the fresh stance
+        now (else it stalls for up to a full interval / trades a mixed signal)."""
         self._seed_from_history()
         if self.running:
             await self.reconcile_now()
 
     async def reconcile_now(self) -> str | None:
-        """Reconcile against the CURRENT stance immediately (used on start), so
-        the bot acts on existing position/state without waiting for the next
-        bar. Start it wanting LONG while flat -> it enters now; start it while
-        holding a position it wants FLAT -> it closes now."""
-        if self.last_decision is None:
+        """Bring broker state into line with the current stance via a
+        peg-to-touch maker entry (market exit). Pulls its own inputs, so the
+        run loop and the /strategy/start path share one code path."""
+        if not self.running or self.last_decision is None:
             return None
-        action = await self.react(self.last_decision, await self._position_fn())
+        plan = plan_action(
+            self.last_decision.stance,
+            await self._position_fn(),
+            self._touch_fn(),
+            await self._open_entry_fn(),
+            self._budget_fn(),
+            reprice_frac=self._reprice_frac,
+            lot_step=self._lot_step,
+        )
+        action = await self._execute(plan)
         if action is not None:
             self.last_action = action
             await self._on_change()
         return action
 
-    async def react(self, decision: Decision, position: Decimal) -> str | None:
-        """Reconcile actual position -> desired stance. Acts only on a
-        mismatch; a matched stance (or no opinion / paused) is a no-op. This
-        is what makes it account for pre-existing positions: whatever you're
-        holding when the strategy warms up, the next bar brings it into line."""
-        if not self.running or decision.stance is None:
+    async def _execute(self, plan: Plan) -> str | None:
+        if plan.kind == "noop":
             return None
-        if decision.stance is Stance.LONG and position <= 0:
-            return f"ENTER {self._fmt(await self._enter_fn())}"
-        if decision.stance is Stance.FLAT and position > 0:
+        if plan.kind == "place":
+            r = await self._place_entry_fn(plan.qty, plan.price)
+            return f"PEG {self._fmt(r)} @ {plan.price}"
+        if plan.kind == "cancel":
+            await self._cancel_fn(plan.cancel_key)
+            return f"CANCEL {plan.cancel_key} — {plan.reason}"
+        if plan.kind == "exit":
+            # Don't leave a maker order live after deciding to be flat.
+            entry = await self._open_entry_fn()
+            if entry is not None:
+                await self._cancel_fn(entry["key"])
             return f"EXIT {self._fmt(await self._exit_fn())}"
         return None
 
@@ -106,17 +203,20 @@ class StrategyRunner:
     def _fmt(result: dict) -> str:
         if "placed" in result:
             return f"placed {result.get('qty', '')}".strip()
+        if "pending" in result:
+            return "pending (reconciling)"
         if "rejected" in result:
             return f"rejected ({result['reason']})"
         if "blocked" in result:
             return f"blocked ({result.get('reason', result['blocked'])})"
+        if "error" in result:
+            return f"error ({result['error']})"
         return str(result)
 
     async def run(self) -> None:
         """Supervised task. Seed the strategy from history so it's warm, then
-        act on each newly-closed bar."""
-        self._seed_from_history()                 # leaves a live stance for
-                                                  # reconcile_now() on start
+        reconcile on each newly-closed bar."""
+        self._seed_from_history()
 
         import asyncio
 
@@ -130,12 +230,9 @@ class StrategyRunner:
                 continue
             self._last_closed_t = closed["t"]
 
-            decision = self.strategy.on_bar(Decimal(str(closed["c"])))
-            self.last_decision = decision
-            action = await self.react(decision, await self._position_fn())
-            if action is not None:
-                self.last_action = action
-            await self._on_change()
+            self.last_decision = self.strategy.on_bar(Decimal(str(closed["c"])))
+            await self.reconcile_now()
+            await self._on_change()               # always push the fresh decision
 
     def snapshot(self) -> dict:
         d = self.last_decision

@@ -448,30 +448,35 @@ class LedgerStore:
     async def recent_fills(self, instrument: str, limit: int = 200,
                            since: int | None = None
                            ) -> list[dict[str, Any]]:
-        """Fills with side + wall time — the chart's trade markers. `since`
-        (unix seconds) bounds the set to the visible chart window so a long
-        history doesn't ship hundreds of off-screen fills every frame."""
+        """Fills with side + REAL market time — the chart's trade markers.
+
+        The time comes from the append-only event log (the FILL_APPLIED
+        event's occurred_at), NOT the fills projection's own occurred_at.
+        The projection is TRUNCATEd and re-inserted on every
+        rebuild_projections(), so its occurred_at defaults to now() and every
+        marker would stack on the latest candle. The event log is never
+        truncated, so its timestamp is the true moment the fill was processed.
+        Joined via fills.event_seq -> events.seq. `since` (unix seconds) bounds
+        the set to the visible window so a long history doesn't ship hundreds
+        of off-screen fills every frame."""
+        base = """
+            SELECT f.exec_id, f.qty, f.price, e.occurred_at, o.side
+            FROM fills f
+            JOIN events e ON e.seq = f.event_seq AND e.kind = 'FILL_APPLIED'
+            JOIN orders o ON o.order_id = f.order_id
+            WHERE o.instrument = $1
+        """
         if since is not None:
             from datetime import datetime, timezone
             rows = await self._pool.fetch(
-                """
-                SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
-                FROM fills f JOIN orders o ON o.order_id = f.order_id
-                WHERE o.instrument = $1 AND f.occurred_at >= $2
-                ORDER BY f.event_seq DESC LIMIT $3
-                """,
+                base + " AND e.occurred_at >= $2 ORDER BY e.occurred_at DESC LIMIT $3",
                 instrument,
                 datetime.fromtimestamp(since, tz=timezone.utc),
                 limit,
             )
         else:
             rows = await self._pool.fetch(
-                """
-                SELECT f.exec_id, f.qty, f.price, f.occurred_at, o.side
-                FROM fills f JOIN orders o ON o.order_id = f.order_id
-                WHERE o.instrument = $1
-                ORDER BY f.event_seq DESC LIMIT $2
-                """,
+                base + " ORDER BY e.occurred_at DESC LIMIT $2",
                 instrument,
                 limit,
             )

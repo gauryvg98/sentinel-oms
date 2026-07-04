@@ -183,6 +183,45 @@ async def test_rebuild_reproduces_projections_exactly(pool):
     assert await pool.fetchval("SELECT count(*) FROM fills") == 3
 
 
+async def test_marker_time_is_event_time_and_survives_rebuild(pool):
+    """recent_fills must place markers by the append-only event log's time,
+    not the fills projection's occurred_at. The projection is TRUNCATEd and
+    re-inserted on every rebuild (occurred_at -> now()), so if markers used it,
+    every fill would jump to 'now' after a reboot and stack on one candle."""
+    store = LedgerStore(pool)
+    o = await store.create_order(intent())
+    o = await store.apply_event(o, SubmissionStarted(), TRACE)
+    o = await store.apply_event(o, BrokerAcked(broker_order_id="B1"), TRACE)
+    o = await store.apply_event(o, fill("2", "EXEC-1"), TRACE)
+
+    before = await store.recent_fills("IDX-OPT")
+    assert len(before) == 1 and before[0]["side"] == "BUY"
+    t_before = before[0]["t"]
+
+    # The projection's own occurred_at is the reset-prone one — prove the
+    # marker time does NOT track it by moving it far into the future.
+    await pool.execute("UPDATE fills SET occurred_at = now() + interval '5 days'")
+    after_poison = await store.recent_fills("IDX-OPT")
+    assert after_poison[0]["t"] == t_before          # unaffected: uses event time
+
+    # And it survives a full rebuild (which truncates + re-inserts fills).
+    await store.rebuild_projections()
+    after_rebuild = await store.recent_fills("IDX-OPT")
+    assert after_rebuild[0]["t"] == t_before          # stable across reboot
+
+
+async def test_recent_fills_since_bounds_by_event_time(pool):
+    store = LedgerStore(pool)
+    o = await store.create_order(intent())
+    o = await store.apply_event(o, SubmissionStarted(), TRACE)
+    o = await store.apply_event(o, BrokerAcked(broker_order_id="B1"), TRACE)
+    o = await store.apply_event(o, fill("2", "EXEC-1"), TRACE)
+
+    t = (await store.recent_fills("IDX-OPT"))[0]["t"]
+    assert len(await store.recent_fills("IDX-OPT", since=t - 60)) == 1   # in window
+    assert len(await store.recent_fills("IDX-OPT", since=t + 60)) == 0   # after it
+
+
 async def test_rebuild_is_deterministic(pool):
     store = LedgerStore(pool)
     o = await store.create_order(intent(qty="2"))

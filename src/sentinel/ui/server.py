@@ -312,7 +312,12 @@ class Terminal:
 
 def build_ui(app: SentinelApp, market: MarketData,
              trade_qty: Decimal = Decimal("0.0002"),
-             strategy=None, strategy_usdt: Decimal = Decimal("15")) -> FastAPI:
+             strategy=None, strategy_usdt: Decimal = Decimal("15"),
+             strategy_bars=None) -> FastAPI:
+    # The strategy decides on its OWN bar feed (a fixed interval) when one is
+    # given, so flipping the chart timeframe never disturbs it; the chart's
+    # MarketData is only its live touch/mark. Falls back to the chart bars.
+    bars = strategy_bars if strategy_bars is not None else market
     ui = FastAPI(title="sentinel-terminal")
     terminal = Terminal(app, market, trade_qty)
 
@@ -337,7 +342,7 @@ def build_ui(app: SentinelApp, market: MarketData,
     runner = None
     if strategy is not None:
         runner = StrategyRunner(
-            strategy, market,
+            strategy, bars,
             position_fn=lambda: app.store.get_position(market.symbol),
             open_entry_fn=lambda: app.store.open_entry(market.symbol),
             place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
@@ -363,6 +368,11 @@ def build_ui(app: SentinelApp, market: MarketData,
             os._exit(1)                              # clean, no traceback
         await market.load_history()
         app.supervisor.spawn("market-data", market.run, restart=True)
+        if strategy_bars is not None:
+            # The strategy's own fixed-interval clock — warm it before the
+            # runner seeds off it.
+            await strategy_bars.load_history()
+            app.supervisor.spawn("strategy-bars", strategy_bars.run, restart=True)
         if runner is not None:
             # Always-on task: keeps indicators warm; acts only when started.
             app.supervisor.spawn("strategy", runner.run, restart=True)
@@ -440,12 +450,9 @@ def build_ui(app: SentinelApp, market: MarketData,
 
     @ui.post("/timeframe/{interval}")
     async def timeframe(interval: str):
+        # Chart-only: the strategy runs on its own BarFeed, so flipping the
+        # chart timeframe is a pure viewing change and never disturbs it.
         await market.set_interval(interval)
-        if runner is not None:
-            # The strategy's indicators + bar cursor were built on the old
-            # interval; reset and re-warm on the new one (else mixed-timeframe
-            # signal / stalled acting).
-            await runner.reseed()
         return {"interval": market.interval}
 
     return ui

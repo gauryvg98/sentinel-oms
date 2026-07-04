@@ -187,7 +187,7 @@ def make(*, stance=Stance.LONG, detail=None, position="0", entry_=None,
         return None
 
     r = StrategyRunner(
-        _Strat(stance, detail), market=SimpleNamespace(candles=[]),
+        _Strat(stance, detail), bars=SimpleNamespace(candles=[]),
         position_fn=position_fn, open_entry_fn=open_entry_fn,
         place_entry_fn=place_entry_fn, trim_fn=trim_fn, cancel_fn=cancel_fn,
         exit_fn=exit_fn, touch_fn=lambda: T, budget_fn=lambda: B,

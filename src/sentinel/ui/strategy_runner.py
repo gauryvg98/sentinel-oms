@@ -109,7 +109,7 @@ class StrategyRunner:
     def __init__(
         self,
         strategy: Strategy,
-        market,                                   # ui.market.MarketData
+        bars,                                     # bar source (.candles); BarFeed
         *,
         position_fn: Callable[[], Awaitable[Decimal]],
         open_entry_fn: Callable[[], Awaitable[dict | None]],
@@ -126,7 +126,7 @@ class StrategyRunner:
         lot_step: Decimal = _DEFAULT_LOT_STEP,
     ) -> None:
         self.strategy = strategy
-        self.market = market
+        self._bars = bars
         self._position_fn = position_fn
         self._open_entry_fn = open_entry_fn
         self._place_entry_fn = place_entry_fn
@@ -197,14 +197,16 @@ class StrategyRunner:
             reset()
         self.last_decision = None
         self._last_closed_t = None
-        for c in self.market.candles[:-1]:
+        for c in self._bars.candles[:-1]:
             self.last_decision = self._feed(c)
             self._last_closed_t = c["t"]
 
     async def reseed(self) -> None:
-        """The chart timeframe changed under us: reset + re-warm the strategy on
-        the new interval's bars, then (if running) reconcile to the fresh stance
-        now — else it stalls for up to a full interval / trades a mixed signal."""
+        """Reset + re-warm the strategy from the current bar history, then (if
+        running) reconcile to the fresh stance immediately. The hook for a
+        strategy-interval change: after the bar source's clock changes, this
+        forgets old-interval indicator state so the signal isn't a mix of two
+        timeframes and the runner doesn't stall for a full interval."""
         self._seed_from_history()
         if self.running:
             await self.reconcile_now()
@@ -271,7 +273,7 @@ class StrategyRunner:
 
         while True:
             await asyncio.sleep(self._poll_s)
-            candles = self.market.candles
+            candles = self._bars.candles
             if len(candles) < 2:
                 continue
             closed = candles[-2]                  # most recently completed bar

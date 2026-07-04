@@ -74,11 +74,17 @@ async def _serve() -> None:
     market = MarketData(SYMBOL)
 
     strategy = _build_strategy(os.environ.get("SENTINEL_STRATEGY", "sma"))
+    # The strategy decides on its OWN fixed interval (its windows are calibrated
+    # to one), independent of the chart timeframe the operator flips around.
+    from sentinel.ui.bars import BarFeed
+    strategy_bars = BarFeed(
+        SYMBOL, os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m"))
     ui = build_ui(
         app, market,
         trade_qty=Decimal(os.environ.get("SENTINEL_TRADE_QTY", "0.0002")),
         strategy=strategy,
         strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
+        strategy_bars=strategy_bars,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

@@ -302,13 +302,32 @@ function render(s) {
   redrawSmaLines();                          // keep the SMA overlay in step
   document.querySelectorAll(".tf").forEach(b =>
     b.classList.toggle("active", b.textContent === s.interval));
-  series.setMarkers(s.markers.slice().reverse().map(m => ({
-    time: m.t,
-    position: m.side === "BUY" ? "belowBar" : "aboveBar",
-    color: m.side === "BUY" ? "#22e07b" : "#f87171",
-    shape: m.side === "BUY" ? "arrowUp" : "arrowDown",
-    text: m.side === "BUY" ? "B" : "S",
-  })));
+  // Snap each fill to the candle it belongs to and drop any outside the
+  // visible range. Fill timestamps are arbitrary seconds; candle times are
+  // interval-aligned — without snapping, lightweight-charts clamps stray
+  // markers onto the last bar (a garbage vertical stack). One marker per
+  // candle+side keeps it readable.
+  if (candleData.length >= 2) {
+    const interval = candleData[1].t - candleData[0].t;
+    const times = new Set(candleData.map(c => c.t));
+    const seen = new Set();
+    const markers = [];
+    for (const m of s.markers) {
+      const t = Math.floor(m.t / interval) * interval;   // containing candle
+      const key = t + ":" + m.side;
+      if (!times.has(t) || seen.has(key)) continue;       // out of range / dup
+      seen.add(key);
+      markers.push({
+        time: t,
+        position: m.side === "BUY" ? "belowBar" : "aboveBar",
+        color: m.side === "BUY" ? "#22e07b" : "#f87171",
+        shape: m.side === "BUY" ? "arrowUp" : "arrowDown",
+        text: m.side === "BUY" ? "B" : "S",
+      });
+    }
+    markers.sort((a, b) => a.time - b.time);               // required ascending
+    series.setMarkers(markers);
+  }
 
 
   $("decisions").innerHTML = s.decisions.map(d => {

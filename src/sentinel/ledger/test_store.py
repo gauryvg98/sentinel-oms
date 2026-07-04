@@ -183,6 +183,33 @@ async def test_rebuild_reproduces_projections_exactly(pool):
     assert await pool.fetchval("SELECT count(*) FROM fills") == 3
 
 
+async def test_limit_price_is_persisted_surfaced_and_survives_rebuild(pool):
+    """A limit order's price is durable metadata: readable via recent_orders /
+    open_entry and reproduced from the event log on rebuild (it rides in the
+    INTENT_PERSISTED payload, not through transition())."""
+    store = LedgerStore(pool)
+    lim = intent(key="LIM")  # intent() sets limit_price = 4.20
+    await store.create_order(lim)
+    mkt = EconomicOrderIntent(
+        intent_id=uuid4(), idempotency_key="MKT", instrument="OTHER-OPT",
+        side=Side.BUY, qty=Decimal("1"), limit_price=None,
+        authority=Authority.ENTRY, trace_id=uuid4(),
+    )
+    await store.create_order(mkt)
+
+    by_key = {o["key"]: o for o in await store.recent_orders(10)}
+    assert by_key["LIM"]["limit_price"] == "4.2"
+    assert by_key["MKT"]["limit_price"] is None       # market carries no price
+
+    assert (await store.open_entry("IDX-OPT"))["limit_price"] == Decimal("4.20")
+    assert (await store.open_entry("OTHER-OPT"))["limit_price"] is None
+
+    await store.rebuild_projections()                  # re-derive from the log
+    after = {o["key"]: o for o in await store.recent_orders(10)}
+    assert after["LIM"]["limit_price"] == "4.2"        # restored from payload
+    assert after["MKT"]["limit_price"] is None
+
+
 async def test_recent_orders_ordered_by_seq_not_reset_prone_updated_at(pool):
     """recent_orders must rank by last_event_seq (authoritative, reproduced on
     rebuild), NOT updated_at (DEFAULT now(), reset by rebuild's TRUNCATE). Else

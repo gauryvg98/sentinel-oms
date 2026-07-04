@@ -217,14 +217,17 @@ class LedgerStore:
                         "side": intent.side.value,
                         "qty": str(intent.qty),
                         "authority": intent.authority.value,
+                        "limit_price": str(intent.limit_price)
+                        if intent.limit_price is not None else None,
                     }
                 ),
             )
             row = await conn.fetchrow(
                 """
                 INSERT INTO orders (order_id, client_order_id, instrument, side,
-                                    qty, filled_qty, state, authority, last_event_seq)
-                VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
+                                    qty, filled_qty, state, authority,
+                                    last_event_seq, limit_price)
+                VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9)
                 RETURNING *
                 """,
                 order_id,
@@ -235,6 +238,7 @@ class LedgerStore:
                 OrderState.CREATED.value,
                 intent.authority.value,
                 seq,
+                intent.limit_price,
             )
             return _row_to_stored(row)
 
@@ -401,7 +405,7 @@ class LedgerStore:
             # would return an arbitrary slice — silently dropping live working
             # orders from the panel. last_event_seq is reproduced from the log.
             "SELECT client_order_id, instrument, side, qty, filled_qty, state, "
-            "broker_order_id, authority, updated_at FROM orders "
+            "broker_order_id, authority, limit_price, updated_at FROM orders "
             "ORDER BY last_event_seq DESC LIMIT $1",
             limit,
         )
@@ -415,9 +419,33 @@ class LedgerStore:
                 "state": r["state"],
                 "broker_id": r["broker_order_id"],
                 "authority": r["authority"],
+                "limit_price": format(r["limit_price"].normalize(), "f")
+                if r["limit_price"] is not None else None,
             }
             for r in rows
         ]
+
+    async def open_entry(self, instrument: str) -> dict[str, Any] | None:
+        """The live (non-terminal) ENTRY order on an instrument, if any, with
+        its resting price and progress. Peg-to-touch execution uses this to
+        decide whether the working limit needs re-pricing or is already filling.
+        There is at most one (the R1.9 duplicate-entry guard)."""
+        r = await self._pool.fetchrow(
+            "SELECT client_order_id, qty, filled_qty, state, limit_price "
+            "FROM orders WHERE instrument = $1 AND authority = 'ENTRY' "
+            "AND state NOT IN ('FILLED','CANCELED','REJECTED') "
+            "ORDER BY last_event_seq DESC LIMIT 1",
+            instrument,
+        )
+        if r is None:
+            return None
+        return {
+            "key": r["client_order_id"],
+            "qty": r["qty"],
+            "filled": r["filled_qty"],
+            "state": r["state"],
+            "limit_price": r["limit_price"],
+        }
 
     async def recent_events(self, limit: int = 40) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
@@ -573,6 +601,7 @@ class LedgerStore:
                         ),
                         "side": payload["side"],
                         "authority": payload["authority"],
+                        "limit_price": payload.get("limit_price"),
                         "seq": r["seq"],
                     }
                     continue
@@ -602,8 +631,8 @@ class LedgerStore:
                     """
                     INSERT INTO orders (order_id, client_order_id, instrument, side,
                                         qty, filled_qty, state, broker_order_id,
-                                        authority, last_event_seq)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                                        authority, last_event_seq, limit_price)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                     """,
                     UUID(oid),
                     c.client_order_id,
@@ -615,6 +644,7 @@ class LedgerStore:
                     c.broker_order_id,
                     e["authority"],
                     e["seq"],
+                    Decimal(e["limit_price"]) if e["limit_price"] else None,
                 )
             for exec_id, f in fills.items():
                 await conn.execute(

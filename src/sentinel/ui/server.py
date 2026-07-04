@@ -341,10 +341,11 @@ def build_ui(app: SentinelApp, market: MarketData,
             position_fn=lambda: app.store.get_position(market.symbol),
             open_entry_fn=lambda: app.store.open_entry(market.symbol),
             place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
+            trim_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # reduce to size
             cancel_fn=lambda key: terminal.cancel(key),
             exit_fn=lambda: terminal.trade("SELL", pct=100),   # exits stay market
             touch_fn=_touch,
-            budget_fn=lambda: size["usdt"],
+            budget_fn=lambda: size["usdt"],                    # risk budget (100% conviction)
             on_change=app.changes.bump,
         )
 

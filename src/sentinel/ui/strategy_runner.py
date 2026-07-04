@@ -7,36 +7,42 @@ the strategy faces the exact same guards a human does: single-writer,
 never-over-exit, duplicate-entry. A bad strategy trades badly; it cannot bypass
 the safety layer or corrupt state.
 
-Execution is PEG-TO-TOUCH maker entries: the entry is a resting LIMIT order
-pegged to the touch and re-priced as the touch drifts, so the strategy pays the
-maker side instead of the spread. The EXIT stays a market order — when you want
-out you want certainty, not a price. The place/cancel/reprice decision is pulled
-out as a PURE function (`plan_action`) so every case is testable without a
-broker; the run loop is just "detect a newly-closed bar, feed it, reconcile."
+SIZED TARGET-POSITION model. The strategy states a desired STANCE and an
+optional CONVICTION (`detail["target_weight"]` in [0,1]); the runner turns that
+into a target quantity — `weight * budget / touch` — and reconciles the actual
+position toward it:
+  - under target : peg a resting maker BUY (join the bid, re-price on drift)
+  - over  target : trim the excess at market
+  - flat / weight 0 : close the position
+A no-trade band around the target absorbs small drift so conviction jitter (and
+price drift) doesn't churn. Entries are makers; reductions are market (when
+you want less risk you want it now, not a price). The place/trim/cancel decision
+is a PURE function (`plan_action`), so every case is tested without a broker.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Awaitable, Callable
 
 from sentinel.strategy import Decision, Stance, Strategy
 
-# A working entry is safe to re-price only when it is cleanly resting. In any
-# in-flight state (SUBMITTING / CANCEL_PENDING / UNKNOWN / RECONCILING) we wait:
-# touching it would race the broker or the duplicate-entry guard.
+# A working entry is safe to re-price only when cleanly resting. In any in-flight
+# state (SUBMITTING / CANCEL_PENDING / UNKNOWN / RECONCILING) we wait: touching
+# it would race the broker or the duplicate-entry guard.
 _RESTING = ("WORKING", "PARTIAL")
 
-_DEFAULT_REPRICE_FRAC = Decimal("0.0005")   # 5 bps: re-peg once the touch drifts
-_DEFAULT_LOT_STEP = Decimal("0.00001")      # BTCUSDT lot step
+_DEFAULT_REPRICE_FRAC = Decimal("0.0005")     # 5 bps: re-peg once the touch drifts
+_DEFAULT_REBALANCE_FRAC = Decimal("0.20")     # no-trade band around target (anti-churn)
+_DEFAULT_LOT_STEP = Decimal("0.00001")        # BTCUSDT lot step
 
 
 @dataclass(frozen=True, slots=True)
 class Plan:
     """What the runner should do this bar. One primary action; the executor
     handles any incidental cleanup (e.g. cancelling a resting entry on exit)."""
-    kind: str                       # "place" | "cancel" | "exit" | "noop"
+    kind: str                       # "place" | "trim" | "cancel" | "exit" | "noop"
     qty: Decimal | None = None
     price: Decimal | None = None
     cancel_key: str | None = None
@@ -44,55 +50,59 @@ class Plan:
 
 
 def plan_action(
-    stance: Stance | None,
     position: Decimal,
     touch: Decimal | None,
     entry: dict | None,             # store.open_entry(): key/qty/filled/state/limit_price
-    budget: Decimal,                # entry size in quote (USDT)
+    target: Decimal | None,         # desired position qty (0 = flat, None = no opinion)
     *,
     reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
+    rebalance_frac: Decimal = _DEFAULT_REBALANCE_FRAC,
     lot_step: Decimal = _DEFAULT_LOT_STEP,
 ) -> Plan:
-    """Pure peg-to-touch reconciliation: actual position + resting entry ->
-    the one thing to do this bar. No I/O, no clock — trivially testable."""
-    if stance is None:
+    """Pure reconciliation of actual position -> target. No I/O, no clock."""
+    if target is None:
         return Plan("noop", reason="no opinion")
 
-    if stance is Stance.FLAT:
+    # Flatten entirely.
+    if target <= 0:
         if position > 0:
-            return Plan("exit", reason="flat: close position")
+            return Plan("exit", reason="target flat: close position")
         if entry is not None:
-            return Plan("cancel", cancel_key=entry["key"],
-                        reason="flat: abandon unfilled entry")
+            return Plan("cancel", cancel_key=entry["key"], reason="target flat: drop entry")
         return Plan("noop", reason="flat")
 
-    # stance LONG: hold `budget` worth via a maker limit pegged to the touch.
-    if touch is None or touch <= 0:
-        return Plan("noop", reason="no touch price to peg to")
+    gap = target - position                     # >0 need more, <0 hold too much
+    band = target * rebalance_frac              # ignore drift smaller than this
 
-    target = (budget / touch).quantize(lot_step, rounding=ROUND_DOWN)
-    remaining = (target - position).quantize(lot_step, rounding=ROUND_DOWN)
-    if remaining <= 0:                                   # at target (within a lot)
-        if entry is not None and entry["state"] in _RESTING:
-            return Plan("cancel", cancel_key=entry["key"],
-                        reason="target reached: cancel remainder")
-        return Plan("noop", reason="at target")
+    # Over target beyond the band: trim the excess at market.
+    if -gap > band:
+        excess = (-gap).quantize(lot_step, rounding=ROUND_DOWN)
+        if excess > 0:
+            return Plan("trim", qty=excess, reason="over target: trim to size")
 
-    if entry is None:
-        return Plan("place", qty=remaining, price=touch,
-                    reason="place maker entry at touch")
+    # Under target beyond the band: peg a maker entry for the shortfall.
+    if gap > band:
+        if touch is None or touch <= 0:
+            return Plan("noop", reason="no touch price to peg to")
+        remaining = gap.quantize(lot_step, rounding=ROUND_DOWN)
+        if remaining <= 0:
+            return Plan("noop", reason="within a lot of target")
+        if entry is None:
+            return Plan("place", qty=remaining, price=touch,
+                        reason="place maker entry at touch")
+        if entry["state"] not in _RESTING:
+            return Plan("noop", reason=f"entry in flight ({entry['state']})")
+        resting = entry["limit_price"]
+        if resting is None:
+            return Plan("noop", reason="entry has no limit price, leaving it")
+        if abs(touch - resting) / touch > reprice_frac:
+            return Plan("cancel", cancel_key=entry["key"], reason="re-peg to touch")
+        return Plan("noop", reason="pegged")
 
-    # A working entry exists — re-peg it or wait.
-    if entry["state"] not in _RESTING:
-        return Plan("noop", reason=f"entry in flight ({entry['state']})")
-    resting = entry["limit_price"]
-    if resting is None:                                  # orphan / not our maker
-        return Plan("noop", reason="entry has no limit price, leaving it")
-    if abs(touch - resting) / touch > reprice_frac:
-        # Cancel now; the replace lands next bar once the cancel is confirmed
-        # and the duplicate-entry guard clears. See the module docstring.
-        return Plan("cancel", cancel_key=entry["key"], reason="re-peg to touch")
-    return Plan("noop", reason="pegged")
+    # Within the no-trade band: at target. Cancel any leftover resting entry.
+    if entry is not None and entry["state"] in _RESTING:
+        return Plan("cancel", cancel_key=entry["key"], reason="at target: cancel remainder")
+    return Plan("noop", reason="at target")
 
 
 class StrategyRunner:
@@ -104,13 +114,15 @@ class StrategyRunner:
         position_fn: Callable[[], Awaitable[Decimal]],
         open_entry_fn: Callable[[], Awaitable[dict | None]],
         place_entry_fn: Callable[[Decimal, Decimal], Awaitable[dict]],  # (qty, price)
+        trim_fn: Callable[[Decimal], Awaitable[dict]],                  # market sell qty
         cancel_fn: Callable[[str], Awaitable[dict]],
-        exit_fn: Callable[[], Awaitable[dict]],   # market close
+        exit_fn: Callable[[], Awaitable[dict]],   # market close (all)
         touch_fn: Callable[[], Decimal | None],
-        budget_fn: Callable[[], Decimal],         # entry size in USDT
+        budget_fn: Callable[[], Decimal],         # risk budget in USDT (100% conviction)
         on_change: Callable[[], Awaitable[None]],
         poll_s: float = 2.0,
         reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
+        rebalance_frac: Decimal = _DEFAULT_REBALANCE_FRAC,
         lot_step: Decimal = _DEFAULT_LOT_STEP,
     ) -> None:
         self.strategy = strategy
@@ -118,6 +130,7 @@ class StrategyRunner:
         self._position_fn = position_fn
         self._open_entry_fn = open_entry_fn
         self._place_entry_fn = place_entry_fn
+        self._trim_fn = trim_fn
         self._cancel_fn = cancel_fn
         self._exit_fn = exit_fn
         self._touch_fn = touch_fn
@@ -125,6 +138,7 @@ class StrategyRunner:
         self._on_change = on_change
         self._poll_s = poll_s
         self._reprice_frac = reprice_frac
+        self._rebalance_frac = rebalance_frac
         self._lot_step = lot_step
 
         self.running = False
@@ -137,6 +151,31 @@ class StrategyRunner:
 
     def stop(self) -> None:
         self.running = False
+
+    @staticmethod
+    def _weight(d: Decision) -> Decimal:
+        """Conviction in [0,1] from the decision detail; 1.0 (full budget) when
+        the strategy doesn't express one (e.g. plain SMA -> unchanged behavior)."""
+        try:
+            w = Decimal(str(d.detail.get("target_weight", "1")))
+        except (InvalidOperation, AttributeError, TypeError):
+            w = Decimal("1")
+        return max(Decimal(0), min(Decimal(1), w))
+
+    def _target(self, touch: Decimal | None) -> Decimal | None:
+        """Desired position qty from the current stance + conviction. None =
+        no opinion (leave everything alone). 0 = flat. LONG = weight*budget/touch
+        (needs a price to size); FLAT needs no price so exits never block on the
+        feed."""
+        d = self.last_decision
+        if d is None or d.stance is None:
+            return None
+        if d.stance is Stance.FLAT:
+            return Decimal(0)
+        if touch is None or touch <= 0:
+            return None
+        qty = self._weight(d) * self._budget_fn() / touch
+        return qty.quantize(self._lot_step, rounding=ROUND_DOWN)
 
     def _seed_from_history(self) -> None:
         """Warm the strategy from closed history (all but the forming bar),
@@ -152,28 +191,26 @@ class StrategyRunner:
             self._last_closed_t = c["t"]
 
     async def reseed(self) -> None:
-        """The chart timeframe changed under us: market.candles are now a
-        DIFFERENT interval's bars, but the strategy's indicator state and our
-        bar cursor were built on the old one. Reset and re-warm from the new
-        history; if running, bring the position into line with the fresh stance
-        now (else it stalls for up to a full interval / trades a mixed signal)."""
+        """The chart timeframe changed under us: reset + re-warm the strategy on
+        the new interval's bars, then (if running) reconcile to the fresh stance
+        now — else it stalls for up to a full interval / trades a mixed signal."""
         self._seed_from_history()
         if self.running:
             await self.reconcile_now()
 
     async def reconcile_now(self) -> str | None:
-        """Bring broker state into line with the current stance via a
-        peg-to-touch maker entry (market exit). Pulls its own inputs, so the
-        run loop and the /strategy/start path share one code path."""
+        """Bring the broker position into line with the sized target. Pulls its
+        own inputs, so the run loop and the /strategy/start path share it."""
         if not self.running or self.last_decision is None:
             return None
+        touch = self._touch_fn()
         plan = plan_action(
-            self.last_decision.stance,
             await self._position_fn(),
-            self._touch_fn(),
+            touch,
             await self._open_entry_fn(),
-            self._budget_fn(),
+            self._target(touch),
             reprice_frac=self._reprice_frac,
+            rebalance_frac=self._rebalance_frac,
             lot_step=self._lot_step,
         )
         action = await self._execute(plan)
@@ -188,12 +225,13 @@ class StrategyRunner:
         if plan.kind == "place":
             r = await self._place_entry_fn(plan.qty, plan.price)
             return f"PEG {self._fmt(r)} @ {format(plan.price.normalize(), 'f')}"
+        if plan.kind == "trim":
+            return f"TRIM {self._fmt(await self._trim_fn(plan.qty))}"
         if plan.kind == "cancel":
             await self._cancel_fn(plan.cancel_key)
             return f"CANCEL {plan.cancel_key} — {plan.reason}"
         if plan.kind == "exit":
-            # Don't leave a maker order live after deciding to be flat.
-            entry = await self._open_entry_fn()
+            entry = await self._open_entry_fn()      # don't leave a maker live
             if entry is not None:
                 await self._cancel_fn(entry["key"])
             return f"EXIT {self._fmt(await self._exit_fn())}"
@@ -242,6 +280,8 @@ class StrategyRunner:
             "stance": d.stance.value if d and d.stance else None,
             "detail": d.detail if d else {},
             "last_action": self.last_action,
+            # Conviction actually applied (1.0 if the strategy expresses none).
+            "weight": str(self._weight(d)) if d and d.stance is Stance.LONG else None,
             # Periods for the chart overlay (None if the strategy isn't SMA).
             "fast_period": getattr(self.strategy, "fast_period", None),
             "slow_period": getattr(self.strategy, "slow_period", None),

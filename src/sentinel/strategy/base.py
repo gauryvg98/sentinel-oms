@@ -28,6 +28,17 @@ class Stance(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Bar:
+    """One CLOSED OHLC bar — the richer input a strategy may prefer over a bare
+    close (true range for ATR/ADX, highs/lows for a Donchian channel). A
+    close-only strategy just ignores it; the runner feeds a Bar when the
+    strategy exposes on_bar_ohlcv, else the close."""
+    high: Decimal
+    low: Decimal
+    close: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class Decision:
     # None = no opinion yet (e.g. warming up): the runner does NOTHING, so a
     # warm-up period never flattens an existing position.
@@ -40,5 +51,8 @@ class Strategy(Protocol):
     name: str
 
     def on_bar(self, close: Decimal) -> Decision:
-        """Called once per CLOSED bar. Pure: same inputs -> same output."""
+        """Called once per CLOSED bar. Pure: same inputs -> same output.
+
+        A strategy MAY also expose ``on_bar_ohlcv(bar: Bar) -> Decision`` for the
+        full OHLC bar; the runner prefers it when present. Both must be pure."""
         ...

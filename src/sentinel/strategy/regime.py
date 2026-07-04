@@ -1,13 +1,6 @@
-"""PROPOSAL — Strategy v2: regime-gated Donchian trend + range MR overlay.
+"""Strategy v2: regime-gated Donchian trend + range MR overlay + vol sizing.
 
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  THIS IS A DESIGN PROPOSAL, NOT WIRED-IN CODE.                     │
-    │  - Leading underscore + `proposal` in the name on purpose.         │
-    │  - NOT exported from strategy/__init__.py.                         │
-    │  - The human drives the real build. See docs/strategy-v2-design.md │
-    └─────────────────────────────────────────────────────────────────┘
-
-Economic thesis (full rationale in the design doc):
+Economic thesis (full rationale in docs/strategy-v2-design.md):
   * Donchian breakout  -> trend/momentum engine (buy new N-bar highs).
   * ADX regime gate    -> only arm the trend engine when actually trending;
                           the single highest-value addition over plain SMA.
@@ -40,18 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from .base import Decision, Stance
-
-
-# --------------------------------------------------------------------------- #
-# Inputs                                                                       #
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True, slots=True)
-class Bar:
-    """One CLOSED OHLC bar. Volume is accepted but unused by this strategy."""
-    high: Decimal
-    low: Decimal
-    close: Decimal
+from .base import Bar, Decision, Stance
 
 
 class Regime(str, Enum):

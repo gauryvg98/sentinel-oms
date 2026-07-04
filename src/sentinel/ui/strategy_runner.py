@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Awaitable, Callable
 
-from sentinel.strategy import Decision, Stance, Strategy
+from sentinel.strategy import Bar, Decision, Stance, Strategy
 
 # A working entry is safe to re-price only when cleanly resting. In any in-flight
 # state (SUBMITTING / CANCEL_PENDING / UNKNOWN / RECONCILING) we wait: touching
@@ -177,6 +177,17 @@ class StrategyRunner:
         qty = self._weight(d) * self._budget_fn() / touch
         return qty.quantize(self._lot_step, rounding=ROUND_DOWN)
 
+    def _feed(self, c: dict) -> Decision:
+        """Feed one closed candle to the strategy, preferring the OHLC path
+        (true range for ATR/ADX, highs/lows for Donchian) when the strategy
+        exposes it, else the bare close. Both are pure."""
+        ohlcv = getattr(self.strategy, "on_bar_ohlcv", None)
+        if callable(ohlcv):
+            return ohlcv(Bar(high=Decimal(str(c["h"])),
+                             low=Decimal(str(c["l"])),
+                             close=Decimal(str(c["c"]))))
+        return self.strategy.on_bar(Decimal(str(c["c"])))
+
     def _seed_from_history(self) -> None:
         """Warm the strategy from closed history (all but the forming bar),
         leaving last_decision + the bar cursor set to the latest CLOSED bar.
@@ -187,7 +198,7 @@ class StrategyRunner:
         self.last_decision = None
         self._last_closed_t = None
         for c in self.market.candles[:-1]:
-            self.last_decision = self.strategy.on_bar(Decimal(str(c["c"])))
+            self.last_decision = self._feed(c)
             self._last_closed_t = c["t"]
 
     async def reseed(self) -> None:
@@ -268,7 +279,7 @@ class StrategyRunner:
                 continue
             self._last_closed_t = closed["t"]
 
-            self.last_decision = self.strategy.on_bar(Decimal(str(closed["c"])))
+            self.last_decision = self._feed(closed)
             await self.reconcile_now()
             await self._on_change()               # always push the fresh decision
 

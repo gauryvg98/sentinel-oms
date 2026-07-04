@@ -1,6 +1,8 @@
 """Sentinel strategy layer — pure, deterministic target-position rules."""
 
-from .base import Decision, Stance, Strategy
+from .base import Bar, Decision, Stance, Strategy
+from .regime import Params, RegimeTrendMR
 from .sma import SmaCross
 
-__all__ = ["Decision", "SmaCross", "Stance", "Strategy"]
+__all__ = ["Bar", "Decision", "Params", "RegimeTrendMR", "SmaCross",
+           "Stance", "Strategy"]

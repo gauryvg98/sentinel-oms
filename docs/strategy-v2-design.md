@@ -1,8 +1,9 @@
 # Strategy v2 — Regime-Gated Donchian Trend with Range Mean-Reversion Overlay
 
-**Status:** PROPOSAL / design doc. Not wired in. The pure skeleton lives at
-`src/sentinel/strategy/_proposal_v2.py` (leading-underscore, `proposal` in the name,
-NOT exported from `strategy/__init__.py`). The human drives the build.
+**Status:** WIRED IN. The strategy lives at `src/sentinel/strategy/regime.py`
+(`RegimeTrendMR`), is exported from `strategy/__init__.py`, and is selectable at
+runtime via `SENTINEL_STRATEGY=regime`. The runner feeds it OHLC bars
+(`on_bar_ohlcv`). Tests: `strategy/test_regime.py`. This doc is the rationale.
 
 **Scope reminder.** Sentinel's product is *execution integrity*, not alpha. This
 document is deliberately honest: it proposes a strategy that is *structurally more

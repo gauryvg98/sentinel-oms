@@ -32,6 +32,11 @@ VALID_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 # ticks on trades: 30-60s gaps are normal liquidity, not an outage. A real
 # continuous feed (@bookTicker) would let this drop to a few seconds.
 MAX_MARK_AGE_S = 180.0
+# The book (bid/ask) has its OWN, much tighter freshness gate: @bookTicker fires
+# many times a second in a live market, so if it goes quiet for even this long
+# the top of book is suspect — best_bid/ask return None and the peg falls back
+# to last price rather than resting a maker on a stale quote.
+MAX_BOOK_AGE_S = 15.0
 
 
 class MarketData:
@@ -65,12 +70,12 @@ class MarketData:
     def best_bid(self) -> Decimal | None:
         """Best bid, or None if the book feed is stale. A maker BUY rests HERE
         (join the bid) so it doesn't cross and take."""
-        if self._bid is None or time.time() - self._book_ts > MAX_MARK_AGE_S:
+        if self._bid is None or time.time() - self._book_ts > MAX_BOOK_AGE_S:
             return None
         return self._bid
 
     def best_ask(self) -> Decimal | None:
-        if self._ask is None or time.time() - self._book_ts > MAX_MARK_AGE_S:
+        if self._ask is None or time.time() - self._book_ts > MAX_BOOK_AGE_S:
             return None
         return self._ask
 

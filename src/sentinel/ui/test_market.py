@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
-from sentinel.ui.market import MAX_MARK_AGE_S, MarketData
+from sentinel.ui.market import MAX_BOOK_AGE_S, MAX_MARK_AGE_S, MarketData
 
 
 def _mkt(price="62500", age_s=0.0):
@@ -43,7 +43,7 @@ def test_book_sets_bid_ask_and_a_mid_mark():
 def test_stale_book_yields_no_bid_ask():
     m = MarketData("BTCUSDT")
     m._ingest_book({"b": "1", "a": "2"})                     # noqa: SLF001
-    m._book_ts = time.time() - MAX_MARK_AGE_S - 5            # noqa: SLF001
+    m._book_ts = time.time() - MAX_BOOK_AGE_S - 1            # noqa: SLF001
     assert m.best_bid() is None and m.best_ask() is None      # don't peg on a dead book
 
 

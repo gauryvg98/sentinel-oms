@@ -59,24 +59,25 @@ def consolidate_markers(fills: list[dict], interval_s: int) -> list[dict]:
     for f in fills:
         ct = (f["t"] // interval_s) * interval_s        # containing candle
         side = f["side"]
-        b = buckets.get((ct, side))
+        kind = f.get("kind") or ("LONG" if side == "BUY" else "SHORT")
+        b = buckets.get((ct, kind))                     # one marker per (candle, kind)
         qty, price = Decimal(f["qty"]), Decimal(f["price"])
         if b is None:
-            b = buckets[(ct, side)] = {
-                "t": ct, "side": side, "n": 0,
+            b = buckets[(ct, kind)] = {
+                "t": ct, "side": side, "kind": kind, "n": 0,
                 "_qty": Decimal(0), "_notional": Decimal(0), "detail": [],
             }
         b["n"] += 1
         b["_qty"] += qty
         b["_notional"] += qty * price
         if len(b["detail"]) < 25:                       # cap hover list
-            b["detail"].append({"t": f["t"], "side": side,
+            b["detail"].append({"t": f["t"], "side": side, "kind": kind,
                                  "qty": f["qty"], "price": f["price"]})
     out = []
     for b in buckets.values():
         vwap = (b["_notional"] / b["_qty"]) if b["_qty"] else Decimal(0)
         out.append({
-            "t": b["t"], "side": b["side"], "n": b["n"],
+            "t": b["t"], "side": b["side"], "kind": b["kind"], "n": b["n"],
             "qty": format(b["_qty"].normalize(), "f"),
             "price": format(vwap.quantize(Decimal("0.01")), "f"),
             "detail": sorted(b["detail"], key=lambda d: d["t"]),
@@ -290,7 +291,8 @@ class Bot:
 
     def __init__(self, app: SentinelApp, venue: Venue, symbol: str, market,
                  bars, spec: InstrumentSpec, strategies: dict, *,
-                 default_strategy: str, size_usdt: Decimal) -> None:
+                 default_strategy: str, size_usdt: Decimal,
+                 equity_fn=None, risk_params=None) -> None:
         self.app = app
         self.venue = venue
         self.symbol = symbol
@@ -300,6 +302,8 @@ class Bot:
         self.strategies = strategies
         self.size = {"usdt": size_usdt}
         self.current = {"name": default_strategy}
+        self.equity_fn = equity_fn        # account equity for risk-based sizing
+        self.risk_params = risk_params    # None -> fixed-notional budget sizing
         self.terminal = Terminal(app, market, spec)
         self.runner = self._build_runner(strategies[default_strategy]())
 
@@ -335,6 +339,8 @@ class Bot:
             on_change=functools.partial(self.app.changes.bump, self.symbol),
             allow_short=self.venue.allow_short,
             lot_step=self.spec.lot_step,
+            equity_fn=self.equity_fn,
+            risk_params=self.risk_params,
         )
 
     async def spawn(self) -> None:
@@ -477,7 +483,7 @@ class InstrumentManager:
 
     def __init__(self, app: SentinelApp, venue: Venue, strategies: dict, *,
                  default_strategy: str, default_usdt: Decimal, caps: dict,
-                 margin_assets: set[str] | None = None) -> None:
+                 margin_assets: set[str] | None = None, risk_params=None) -> None:
         self.app = app
         self.venue = venue
         self.strategies = strategies
@@ -487,12 +493,19 @@ class InstrumentManager:
         # Which balances count as margin collateral. Multi-asset mode -> all
         # stablecoins; single-asset USDT-M -> just {"USDT"}.
         self.margin_assets = margin_assets or set(_STABLES)
+        self.risk_params = risk_params         # None -> fixed-notional budget sizing
         self.bots: dict[str, Bot] = {}
         # Initial-load progress for the boot loading screen: reveal the grid only
         # once every bot is up and in its correct live state.
         self.seed_target = 0
         self.seed_done = False
         self._lock = asyncio.Lock()
+
+    def account_cash(self) -> Decimal:
+        """Stablecoin collateral — the equity base for risk-based sizing. Cheap
+        (stream-fed balances), so it's safe to call on every sizing decision."""
+        return sum((v for a, v in self.app.latest_balances.items()
+                    if a in self.margin_assets), Decimal(0))
 
     def get(self, symbol: str) -> Bot | None:
         return self.bots.get(symbol.upper())
@@ -518,11 +531,19 @@ class InstrumentManager:
             bars = self.venue.make_bars(symbol, self.venue.default_interval)
             bot = Bot(self.app, self.venue, symbol, market, bars, spec,
                       self.strategies, default_strategy=self.default_strategy,
-                      size_usdt=self.default_usdt)
+                      size_usdt=self.default_usdt,
+                      equity_fn=self.account_cash, risk_params=self.risk_params)
             await bot.spawn()                       # loads history -> a mark exists
             mark = market.latest(symbol)
-            self.caps[symbol] = self.venue.cap_for(
-                spec, mark.price if mark else None)
+            price = mark.price if mark else None
+            # Hard per-symbol exposure backstop. With risk-based sizing the cap is
+            # the leverage limit (equity·maxLev/price) so it never clips a
+            # correctly-risk-sized position; otherwise the venue's notional cap.
+            if self.risk_params is not None and price:
+                self.caps[symbol] = spec.round_qty(
+                    self.account_cash() * self.risk_params.max_leverage / price)
+            else:
+                self.caps[symbol] = self.venue.cap_for(spec, price)
             self.bots[symbol] = bot
         await self.app.changes.bump("roster")
         await self.app.changes.bump(symbol)
@@ -608,7 +629,8 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
              strategy_usdt: Decimal = Decimal("15"),
              caps: dict | None = None,
              initial_symbols: tuple[str, ...] = (),
-             margin_assets: set[str] | None = None) -> FastAPI:
+             margin_assets: set[str] | None = None,
+             risk_params=None) -> FastAPI:
     strategies = strategies or {}
     default_strategy = default_strategy or next(iter(strategies), None)
     caps = caps if caps is not None else {}
@@ -616,6 +638,7 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
     mgr = InstrumentManager(app, venue, strategies,
                             default_strategy=default_strategy,
                             default_usdt=strategy_usdt, caps=caps,
+                            risk_params=risk_params,
                             margin_assets=margin_assets)
     ui.state.manager = mgr
 

@@ -230,6 +230,7 @@
       <div class="kv"><span>Engine</span><select id="st-select"></select></div>
       <div class="kv"><span>State</span><b id="st-state">—</b></div>
       <div class="kv"><span>Wants</span><b id="st-wants">—</b></div>
+      <div class="kv"><span>Sizing</span><b id="st-sizing">—</b></div>
       <div id="st-rows"></div>
       <div class="kv"><span>Last action</span><b id="st-last">—</b></div>
       <div class="kv"><span>Entry size</span>
@@ -258,7 +259,7 @@ const signed = v => { const n=parseFloat(v); return isNaN(n)?'—':(n>0?'+':'')+
 let account = {};
 const cards = {};                    // symbol -> {data, el, refs}
 let activeSym = null;                 // which bot the terminal view shows (null = overview)
-let chart=null, cseries=null, overlays={};
+let chart=null, cseries=null, overlays={}, chartInterval=null;
 
 // ------------------------------------------------------------------ websocket
 function connect(){
@@ -404,7 +405,7 @@ function openTerminal(sym){
     timeScale:{ timeVisible:true }, height:420 });
   cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
     wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
-  overlays = {};
+  overlays = {}; chartInterval = null;   // force a fit on first render
   paintTerminalAccount();
   if (cards[sym]) paintTerminalCard(cards[sym].data);
   refreshChart(sym);
@@ -485,16 +486,37 @@ function refreshChart(sym){
   if(!chart || activeSym!==sym) return;
   fetch(`/instrument/${sym}/detail`).then(r=>r.json()).then(d=>{
     if(!chart || d.symbol!==activeSym) return;
-    if(d.candles) cseries.setData(d.candles.map(c=>({time:c.t,open:c.o,high:c.h,low:c.l,close:c.c})));
-    cseries.setMarkers((d.markers||[]).map(m=>({ time:m.t, position:m.side==='BUY'?'belowBar':'aboveBar',
-      color:m.side==='BUY'?'#22e07b':'#f87171', shape:m.side==='BUY'?'arrowUp':'arrowDown',
-      text:(m.n>1?`${m.n}× `:'')+m.qty })));
+    if(d.candles){
+      cseries.setData(d.candles.map(c=>({time:c.t,open:c.o,high:c.h,low:c.l,close:c.c})));
+      // lightweight-charts keeps the old visible range across setData; when the
+      // interval changes the old window no longer fits the new bars (cram left,
+      // empty right), so refit. Live ticks at the same interval keep the zoom.
+      if(d.interval !== chartInterval){ chart.timeScale().fitContent(); chartInterval = d.interval; }
+    }
+    cseries.setMarkers((d.markers||[]).map(m=>{
+      const close=m.kind==='CLOSE', buy=m.side==='BUY';
+      return { time:m.t, position:buy?'belowBar':'aboveBar',
+        color: close?'#fbbf24':(m.kind==='LONG'?'#22e07b':'#f87171'),
+        shape: buy?'arrowUp':'arrowDown',
+        text:(m.n>1?`${m.n}× `:'')+(m.kind||'')+' '+m.qty }; }));
     const view=d.strategy?.view||{}, series=d.strategy?.series||{};
-    (view.overlays||[]).forEach(ov=>{ if(!overlays[ov.key])
-      overlays[ov.key]=chart.addLineSeries({color:ov.color||'#a78bfa',lineWidth:1.5,priceLineVisible:false});
-      overlays[ov.key].setData((series[ov.key]||[]).map(p=>({time:p.t,value:p.value}))); });
+    // Overlays (SMA lines etc.) are sampled at the STRATEGY interval. Rendering
+    // them when the chart is on a different interval pollutes the shared time
+    // axis with their fine-grained points — cramming the coarse candles into a
+    // corner. Only draw them when the intervals match; otherwise clear.
+    const sameIv = d.interval === d.strategy?.interval;
+    (view.overlays||[]).forEach(ov=>{
+      if(ov.kind && ov.kind!=='line') return;   // bands etc. not drawn yet
+      const key = ov.key; if(!key) return;
+      if(!overlays[key]) overlays[key]=chart.addLineSeries({color:ov.color||'#a78bfa',lineWidth:1.5,priceLineVisible:false});
+      // series points are {t, v} — read p.v, not p.value.
+      overlays[key].setData(sameIv ? (series[key]||[]).map(p=>({time:p.t,value:p.v})) : []); });
     $("st-rows").innerHTML = (view.rows||[]).map(row=>{ const v=(d.strategy.detail||{})[row.key];
       return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
+    const rk = d.strategy.risk;
+    $("st-sizing").innerHTML = rk
+      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'}`
+      : '<span class="dim">fixed budget</span>';
     $("o-work").innerHTML = (d.working||[]).length
       ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>
           <b><span class="link" onclick="post('/${sym}/cancel/${o.key}')">${o.state} ✕</span></b></div>`).join('')
@@ -503,10 +525,11 @@ function refreshChart(sym){
       `<div class="aline"><span class="dim">${(x.at||'').slice(11,19)}</span> ${x.actor||''} · ${x.decision||''}</div>`).join('')
       || '<div class="dim">no activity yet</div>';
     const tt = t => new Date(t*1000).toISOString().slice(11,19);
+    const kcls = k => k==='LONG'?'pos':k==='SHORT'?'neg':'warn';
     $("trades").innerHTML = (d.trades||[]).length
-      ? '<tr><th>time</th><th>side</th><th>qty</th><th>price</th></tr>' +
+      ? '<tr><th>time</th><th>action</th><th>qty</th><th>price</th></tr>' +
         d.trades.map(f=>`<tr><td class="dim">${tt(f.t)}</td>
-          <td class="${f.side==='BUY'?'pos':'neg'}">${f.side}</td>
+          <td class="${kcls(f.kind)}">${f.kind||f.side}</td>
           <td>${f.qty}</td><td>${f.price}</td></tr>`).join('')
       : '<tr><td class="dim">no trades yet</td></tr>';
   });

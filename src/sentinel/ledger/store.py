@@ -505,7 +505,7 @@ class LedgerStore:
         the set to the visible window so a long history doesn't ship hundreds
         of off-screen fills every frame."""
         base = """
-            SELECT f.exec_id, f.qty, f.price, e.occurred_at, o.side
+            SELECT f.exec_id, f.qty, f.price, e.occurred_at, o.side, o.authority
             FROM fills f
             JOIN events e ON e.seq = f.event_seq AND e.kind = 'FILL_APPLIED'
             JOIN orders o ON o.order_id = f.order_id
@@ -529,6 +529,10 @@ class LedgerStore:
             {
                 "t": int(r["occurred_at"].timestamp()),
                 "side": r["side"],
+                # Trader-facing label: an ENTRY buy opens a LONG, an ENTRY sell
+                # opens a SHORT, a protective exit CLOSEs the position.
+                "kind": ("CLOSE" if r["authority"] == "PROTECTIVE_EXIT"
+                         else "LONG" if r["side"] == "BUY" else "SHORT"),
                 "qty": format(r["qty"].normalize(), "f"),
                 "price": format(r["price"].normalize(), "f"),
             }

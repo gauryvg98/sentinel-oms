@@ -115,12 +115,18 @@ def _venue() -> Venue:
 
 
 def load_env() -> None:
-    env_file = Path(__file__).parents[3] / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
+    # Look in the CWD first (so running from the repo dir works no matter how the
+    # package is installed), then next to the module. First hit wins.
+    for env_file in (Path.cwd() / ".env", Path(__file__).parents[3] / ".env"):
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+            print(f"  loaded env from {env_file}", flush=True)
+            return
+    print("  no .env found (cwd or module dir) — using shell env + defaults",
+          flush=True)
 
 
 def _build_registry() -> dict:
@@ -153,6 +159,12 @@ async def _serve() -> None:
         await apply_migrations(conn)
 
     venue = _venue()
+    # Loud banner so the active venue/db is never a mystery — spot vs futures vs
+    # bybit is the single most confusing thing to get silently wrong.
+    print(f"  VENUE: {os.environ.get('SENTINEL_VENUE') or 'spot'}  "
+          f"·  adapter {type(venue.adapter).__name__}  "
+          f"·  db {dsn.rsplit('/', 1)[-1]}  "
+          f"·  short={'on' if venue.allow_short else 'off'}", flush=True)
     # Per-symbol exposure caps live in this shared dict; the guard resolves each
     # instrument's cap through it. The manager fills it as bots are added.
     caps: dict[str, Decimal | None] = {}
@@ -171,6 +183,24 @@ async def _serve() -> None:
     margin_env = os.environ.get("SENTINEL_MARGIN_ASSETS")
     margin_assets = ({a.strip().upper() for a in margin_env.split(",") if a.strip()}
                      if margin_env else None)
+    # Risk-based sizing (opt-in): size each trade so a stop-out costs RISK_PCT of
+    # equity, capped by MAX_LEVERAGE, stop at STOP_ATR_MULT×ATR. Enabled when
+    # SENTINEL_RISK_PCT is set; otherwise the fixed-notional budget is used.
+    risk_params = None
+    if os.environ.get("SENTINEL_RISK_PCT"):
+        from sentinel.risk import RiskParams
+        risk_params = RiskParams(
+            risk_pct=Decimal(os.environ["SENTINEL_RISK_PCT"]),
+            max_leverage=Decimal(os.environ.get("SENTINEL_MAX_LEVERAGE", "3")),
+            stop_atr_mult=Decimal(os.environ.get("SENTINEL_STOP_ATR_MULT", "2")),
+            fallback_stop_pct=Decimal(os.environ.get("SENTINEL_STOP_FALLBACK_PCT", "0.02")),
+        )
+        print(f"  SIZING: risk-based · {risk_params.risk_pct} equity/trade · "
+              f"{risk_params.max_leverage}x max lev · stop {risk_params.stop_atr_mult}×ATR",
+              flush=True)
+    else:
+        print("  SIZING: fixed-notional budget  "
+              "(set SENTINEL_RISK_PCT to enable risk-based sizing)", flush=True)
     ui = build_ui(
         app, venue,
         strategies=_build_registry(),
@@ -179,6 +209,7 @@ async def _serve() -> None:
         caps=caps,
         initial_symbols=initial,
         margin_assets=margin_assets,
+        risk_params=risk_params,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

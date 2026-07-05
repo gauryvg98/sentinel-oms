@@ -38,22 +38,23 @@ def load_env() -> None:
 
 
 def _build_registry() -> dict:
-    """The strategies the operator can select from at runtime. 'regime' is the
-    v2 engine (Donchian breakout gated by an ADX regime filter + vol-target
-    conviction); it prefers OHLC bars, which the runner feeds automatically."""
+    """The strategies the operator can select from at runtime, as FACTORIES
+    (each call is a fresh, unwarmed instance) — the live runner and a backtest
+    each need their own. 'regime' is the v2 engine (Donchian breakout gated by
+    an ADX regime filter + vol-target conviction)."""
     from sentinel.strategy import Params, RegimeTrendMR, SmaCross
+    sma_fast = int(os.environ.get("SENTINEL_SMA_FAST", "5"))
+    sma_slow = int(os.environ.get("SENTINEL_SMA_SLOW", "20"))
+    regime_params = Params(
+        donchian_entry=int(os.environ.get("SENTINEL_DONCHIAN_ENTRY", "55")),
+        donchian_exit=int(os.environ.get("SENTINEL_DONCHIAN_EXIT", "20")),
+        adx_trend=float(os.environ.get("SENTINEL_ADX_TREND", "25")),
+        adx_range=float(os.environ.get("SENTINEL_ADX_RANGE", "20")),
+        enable_mean_reversion=os.environ.get("SENTINEL_MR", "0") == "1",
+    )
     return {
-        "sma": SmaCross(
-            fast=int(os.environ.get("SENTINEL_SMA_FAST", "5")),
-            slow=int(os.environ.get("SENTINEL_SMA_SLOW", "20")),
-        ),
-        "regime": RegimeTrendMR(Params(
-            donchian_entry=int(os.environ.get("SENTINEL_DONCHIAN_ENTRY", "55")),
-            donchian_exit=int(os.environ.get("SENTINEL_DONCHIAN_EXIT", "20")),
-            adx_trend=float(os.environ.get("SENTINEL_ADX_TREND", "25")),
-            adx_range=float(os.environ.get("SENTINEL_ADX_RANGE", "20")),
-            enable_mean_reversion=os.environ.get("SENTINEL_MR", "0") == "1",
-        )),
+        "sma": lambda: SmaCross(fast=sma_fast, slow=sma_slow),
+        "regime": lambda: RegimeTrendMR(regime_params),
     }
 
 

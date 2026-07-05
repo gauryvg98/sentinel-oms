@@ -318,10 +318,12 @@ def build_ui(app: SentinelApp, market: MarketData,
              strategy_bars=None) -> FastAPI:
     # Strategies are a registry the operator selects from at runtime (not an
     # env-only boot choice). The runner starts on the default and swaps live.
+    # strategies is a registry of FACTORIES ({name: () -> Strategy}); each call
+    # is a fresh instance (the live runner and any backtest each need their own).
     strategies = strategies or {}
     default_strategy = default_strategy or (next(iter(strategies), None))
     current = {"name": default_strategy}
-    strategy = strategies.get(default_strategy) if default_strategy else None
+    strategy = strategies[default_strategy]() if default_strategy in strategies else None
     # The strategy decides on its OWN bar feed (a fixed interval) when one is
     # given, so flipping the chart timeframe never disturbs it; the chart's
     # MarketData is only its live touch/mark. Falls back to the chart bars.
@@ -452,9 +454,48 @@ def build_ui(app: SentinelApp, market: MarketData,
         if runner is None or name not in strategies:
             return {"error": "unknown strategy"}
         current["name"] = name
-        await runner.set_strategy(strategies[name])
+        await runner.set_strategy(strategies[name]())     # fresh instance
         await app.changes.bump()
         return {"selected": name}
+
+    @ui.post("/backtest")
+    async def backtest(interval: str = "1h", days: int = 365, cost_bps: str = "10"):
+        """Backtest the SELECTED strategy on real mainnet history — the same
+        pure strategy + plan_action the live path uses. Blocking work (data
+        fetch + replay) runs off the event loop."""
+        if runner is None or current["name"] not in strategies:
+            return {"error": "no strategy"}
+        factory, budget, symbol = strategies[current["name"]], size["usdt"], market.symbol
+
+        def _run():
+            from sentinel.backtest.data import load_klines
+            from sentinel.backtest.engine import run_backtest
+            bars = load_klines(symbol, interval, days)
+            r = run_backtest(factory(), bars, symbol=symbol, interval=interval,
+                             budget=budget, cost_bps=Decimal(cost_bps))
+            open0 = float(bars[0]["o"]) if bars else 1.0
+            b = float(budget)
+            # net + buy-hold equity per bar, downsampled to ~300 points.
+            merged = [(t, net, b * float(bars[i]["c"]) / open0)
+                      for i, (t, net) in enumerate(r.equity_curve)]
+            stepn = max(1, len(merged) // 300)
+            curve = [{"t": t, "net": net, "hold": hold}
+                     for t, net, hold in merged[::stepn]]
+            return r, curve
+
+        try:
+            r, curve = await asyncio.to_thread(_run)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"backtest failed: {e}"}
+        return {
+            "strategy": current["name"], "interval": interval, "days": days,
+            "bars": r.bars, "trades": r.trades,
+            "net_return": r.net_return, "gross_return": r.gross_return,
+            "buy_hold_return": r.buy_hold_return, "sharpe": r.sharpe,
+            "max_drawdown": r.max_drawdown, "fees": r.fees_paid,
+            "turnover": r.turnover, "final_equity": r.final_equity,
+            "budget": r.budget, "curve": curve,
+        }
 
     @ui.post("/strategy/size/{usdt}")
     async def strategy_size(usdt: str):

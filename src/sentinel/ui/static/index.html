@@ -181,6 +181,8 @@
       </span></div>
     <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
             onclick="toggleStrategy()">▶ start</button>
+    <button class="tf" style="margin-top:6px;width:100%" onclick="runBacktest()">
+      ↻ backtest on real data</button>
   </div>
 </div>
 
@@ -190,6 +192,20 @@
   <div id="decisions"></div>
 </div>
 <div id="toast"></div>
+
+<div id="bt-modal" style="display:none;position:fixed;inset:0;z-index:50;
+     background:#000a;align-items:center;justify-content:center">
+  <div style="background:#101614;border:1px solid #223;border-radius:10px;
+       width:min(600px,92vw);max-height:88vh;overflow:auto;padding:16px;
+       box-shadow:0 10px 40px #000c">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">Backtest <span style="color:#7c8aa0;font-size:12px">
+        real mainnet data · Binance fees</span></h2>
+      <button class="tf" onclick="closeBacktest()">✕</button>
+    </div>
+    <div id="bt-body" style="margin-top:10px"></div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -311,6 +327,66 @@ async function toggleStrategy() {
 }
 async function selectStrategy(name) {
   await fetch("/strategy/select/" + encodeURIComponent(name), { method: "POST" });
+}
+
+function closeBacktest() { $("bt-modal").style.display = "none"; }
+
+async function runBacktest() {
+  $("bt-modal").style.display = "flex";
+  $("bt-body").innerHTML = `<div style="padding:24px;color:#7c8aa0">
+    running on real mainnet history… (first run fetches ~1y of bars)</div>`;
+  try {
+    const r = await fetch("/backtest?interval=1h&days=365&cost_bps=10", { method: "POST" });
+    const d = await r.json();
+    if (d.error) {
+      $("bt-body").innerHTML = `<div style="padding:24px;color:#f87171">${d.error}</div>`;
+      return;
+    }
+    renderBacktest(d);
+  } catch (e) {
+    $("bt-body").innerHTML = `<div style="padding:24px;color:#f87171">${e}</div>`;
+  }
+}
+
+function btCurve(curve) {
+  if (!curve || !curve.length) return "";
+  const W = 560, H = 170, pad = 4;
+  const t0 = curve[0].t, t1 = curve[curve.length - 1].t;
+  const vals = curve.flatMap(p => [p.net, p.hold]);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const x = t => pad + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (W - 2 * pad);
+  const y = v => pad + (1 - (hi === lo ? 0 : (v - lo) / (hi - lo))) * (H - 2 * pad);
+  const line = (key, color) => `<polyline fill="none" stroke="${color}"
+    stroke-width="1.5" points="${curve.map(p => x(p.t).toFixed(1) + "," +
+    y(p[key]).toFixed(1)).join(" ")}"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;
+    background:#0b0f17;border:1px solid #223;border-radius:6px">
+    ${line("hold", "#6b7280")}${line("net", "#fbbf24")}</svg>
+    <div style="display:flex;gap:16px;font-size:11px;margin-top:4px">
+      <span style="color:#fbbf24">━ strategy (net)</span>
+      <span style="color:#6b7280">━ buy &amp; hold</span></div>`;
+}
+
+function renderBacktest(d) {
+  const pct = x => (x * 100 >= 0 ? "+" : "") + (x * 100).toFixed(2) + "%";
+  const edge = d.net_return - d.buy_hold_return;
+  const row = (label, val, cls) => `<div class="kv"><span>${label}</span>` +
+    `<b class="${cls || ""}">${val}</b></div>`;
+  const rows = [
+    row("Net return", pct(d.net_return), d.net_return >= 0 ? "pos" : "neg"),
+    row("Buy &amp; hold", pct(d.buy_hold_return), d.buy_hold_return >= 0 ? "pos" : "neg"),
+    row("Edge vs hold", pct(edge) + " · " + (edge > 0 ? "beats" : "loses to") + " hold",
+        edge > 0 ? "pos" : "neg"),
+    row("Gross return", pct(d.gross_return)),
+    row("Sharpe (net)", d.sharpe.toFixed(2), d.sharpe >= 0 ? "pos" : "neg"),
+    row("Max drawdown", (d.max_drawdown * 100).toFixed(1) + "%", "neg"),
+    row("Trades", d.trades),
+    row("Fees paid", d.fees.toFixed(2) + " USDT"),
+  ].join("");
+  $("bt-body").innerHTML =
+    `<div style="color:#7c8aa0;font-size:11px;margin-bottom:8px">${d.strategy} · ` +
+    `${d.interval} · ${d.bars} bars · ${d.days}d · budget ${d.budget.toFixed(0)} USDT</div>` +
+    btCurve(d.curve) + `<div style="margin-top:10px">${rows}</div>`;
 }
 async function setSize() {
   const v = $("strat-size").value.trim();

@@ -133,6 +133,7 @@
     <div class="stat0"><b id="equity">—</b><span>equity (usdt)</span></div>
     <div class="stat0"><b id="avail">—</b><span>available</span></div>
     <div class="stat0"><b id="committed">—</b><span>committed</span></div>
+    <div class="stat0"><b id="blocked">—</b><span>blocked (orders)</span></div>
     <div class="stat0"><b id="h-run">—</b><span>running p&l</span></div>
     <div class="stat0"><b id="h-net">—</b><span>net p&l</span></div>
     <div class="stat0"><b><span class="dot" id="oms-dot"></span> <span id="oms">—</span></b><span>oms</span></div>
@@ -198,6 +199,7 @@
       <div class="kv"><span>Equity</span><b id="w-eq">—</b></div>
       <div class="kv"><span>Available</span><b id="w-avail">—</b></div>
       <div class="kv"><span>Committed (margin)</span><b id="w-comm">—</b></div>
+      <div class="kv"><span>Blocked (orders)</span><b id="w-blocked">—</b></div>
       <div class="kv"><span>Unrealized</span><b id="w-unr">—</b></div>
       <div id="w-bal"></div>
     </div>
@@ -291,6 +293,7 @@ function onAccount(a){
   $("equity").textContent = w.equity ?? '—';
   $("avail").textContent = w.available ?? '—';
   $("committed").textContent = w.committed ?? '—';
+  $("blocked").textContent = w.blocked ?? '—';
   $("h-run").textContent = w.running==null?'—':signed(w.running); $("h-run").className = parseFloat(w.running)>=0?'pos':'neg';
   $("h-net").textContent = w.net==null?'—':signed(w.net); $("h-net").className = parseFloat(w.net)>=0?'pos':'neg';
   $("oms").textContent = a.halted ? 'HALTED' : (a.accepting ? 'LIVE' : 'starting');
@@ -435,6 +438,7 @@ function paintTerminalAccount(){
   $("w-eq").textContent = w.equity ? w.equity+' '+w.quote : '—';
   $("w-avail").textContent = w.available ?? '—';
   $("w-comm").textContent = w.committed ?? '—';
+  $("w-blocked").textContent = w.blocked ?? '—';
   $("w-unr").textContent = w.unrealized==null?'—':signed(w.unrealized);
   $("w-unr").className = parseFloat(w.unrealized)>=0?'pos':'neg';
   $("w-bal").innerHTML = Object.entries(w.balances||{}).map(([k,v])=>

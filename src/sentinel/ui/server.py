@@ -37,6 +37,19 @@ _STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
+def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
+    """Initial margin a resting limit ENTRY reserves: its remaining (unfilled)
+    notional / leverage. Zero when there's no live order, no limit price, or
+    nothing left to fill. Pure — the 'blocked' figure the exchange never streams
+    but that its available-balance silently reflects."""
+    if not entry or entry.get("limit_price") is None:
+        return Decimal(0)
+    remaining = entry["qty"] - entry["filled"]
+    if remaining <= 0:
+        return Decimal(0)
+    return remaining * entry["limit_price"] / (lev or Decimal(1))
+
+
 def interval_seconds(interval: str) -> int:
     """Binance interval string ('1m','4h','1d') -> seconds. Defaults to 1m."""
     try:
@@ -618,9 +631,10 @@ class InstrumentManager:
         USDT-M futures margin model (matches Binance): cash is the USDT wallet
         balance; each open position ties up initial margin (notional / leverage)
         and carries unrealized P&L.
-            equity    = cash + Σ unrealized      (Binance 'margin balance')
-            committed = Σ position margin         (initial margin in use)
-            available = cash − committed          (free to open more)
+            equity    = cash + Σ unrealized              (Binance 'margin balance')
+            committed = Σ position margin                 (initial margin in use)
+            blocked   = Σ resting-order margin            (reserved by open orders)
+            available = cash − committed − blocked        (free to open more)
         Non-USDT balances aren't marked into equity — on single-asset USDT-M
         they don't exist; pricing a stray demo dust asset only misleads."""
         balances = self.app.latest_balances
@@ -633,20 +647,25 @@ class InstrumentManager:
                    Decimal(0))
         unrealized = Decimal(0)     # running: open positions, mark-to-market
         realized = Decimal(0)       # locked in from closed trades
-        committed = Decimal(0)
+        committed = Decimal(0)      # margin tied up by open POSITIONS
+        blocked = Decimal(0)        # margin reserved by resting (unfilled) ORDERS
         lev = Decimal(self.venue.leverage or 1)
         for bot in self.bots.values():
             pnl = await bot._pnl()
-            if pnl is None:
-                continue
-            if pnl.unrealized is not None:
-                unrealized += pnl.unrealized
-            realized += pnl.realized or Decimal(0)
-            if pnl.avg_cost and pnl.position:
-                committed += abs(pnl.avg_cost * pnl.position) / lev
+            if pnl is not None:
+                if pnl.unrealized is not None:
+                    unrealized += pnl.unrealized
+                realized += pnl.realized or Decimal(0)
+                if pnl.avg_cost and pnl.position:
+                    committed += abs(pnl.avg_cost * pnl.position) / lev
+            # A resting limit entry ties up initial margin = remaining notional /
+            # leverage until it fills or cancels. Binance never streams this
+            # number (no balance event on placement) — we derive it from the
+            # working order we already track.
+            blocked += _order_margin(await self.app.store.open_entry(bot.symbol), lev)
         net = realized + unrealized     # total P&L across the whole account
         equity = cash + unrealized
-        available = cash - committed
+        available = cash - committed - blocked   # free to open more
         shown = {a: format(v.normalize(), "f")
                  for a, v in sorted(balances.items()) if v}
         return {
@@ -665,7 +684,8 @@ class InstrumentManager:
             "wallet": {
                 "balances": shown, "quote": quote,
                 "cash": q(cash), "equity": q(equity),
-                "committed": q(committed), "available": q(available),
+                "committed": q(committed), "blocked": q(blocked),
+                "available": q(available),
                 "unrealized": q(unrealized),
                 "running": q(unrealized),     # portfolio running P&L (open)
                 "realized": q(realized),

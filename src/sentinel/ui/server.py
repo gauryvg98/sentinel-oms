@@ -312,8 +312,16 @@ class Terminal:
 
 def build_ui(app: SentinelApp, market: MarketData,
              trade_qty: Decimal = Decimal("0.0002"),
-             strategy=None, strategy_usdt: Decimal = Decimal("15"),
+             strategies: dict | None = None,
+             default_strategy: str | None = None,
+             strategy_usdt: Decimal = Decimal("15"),
              strategy_bars=None) -> FastAPI:
+    # Strategies are a registry the operator selects from at runtime (not an
+    # env-only boot choice). The runner starts on the default and swaps live.
+    strategies = strategies or {}
+    default_strategy = default_strategy or (next(iter(strategies), None))
+    current = {"name": default_strategy}
+    strategy = strategies.get(default_strategy) if default_strategy else None
     # The strategy decides on its OWN bar feed (a fixed interval) when one is
     # given, so flipping the chart timeframe never disturbs it; the chart's
     # MarketData is only its live touch/mark. Falls back to the chart bars.
@@ -387,6 +395,8 @@ def build_ui(app: SentinelApp, market: MarketData,
             if runner is not None:
                 snap["strategy"] = runner.snapshot()
                 snap["strategy"]["entry_usdt"] = format(size["usdt"], "f")
+                snap["strategy"]["available"] = list(strategies)
+                snap["strategy"]["selected"] = current["name"]
             return snap
         return build()
 
@@ -434,6 +444,17 @@ def build_ui(app: SentinelApp, market: MarketData,
         result = await terminal.cancel(client_order_id)
         await app.changes.bump()
         return result
+
+    @ui.post("/strategy/select/{name}")
+    async def strategy_select(name: str):
+        """Switch the live strategy. Same bar feed; the runner reseeds onto the
+        new strategy and (if running) reconciles to its target."""
+        if runner is None or name not in strategies:
+            return {"error": "unknown strategy"}
+        current["name"] = name
+        await runner.set_strategy(strategies[name])
+        await app.changes.bump()
+        return {"selected": name}
 
     @ui.post("/strategy/size/{usdt}")
     async def strategy_size(usdt: str):

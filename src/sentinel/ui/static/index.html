@@ -162,6 +162,10 @@
   </div>
   <div class="panel" id="strat-panel">
     <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
+    <div class="kv"><span>Engine</span>
+      <select id="strat-select" onchange="selectStrategy(this.value)"
+              style="background:#0b0f17;border:1px solid #223;color:#dbe4f0;
+                     border-radius:4px;padding:2px 6px;font:inherit"></select></div>
     <div class="kv"><span>State</span><b id="strat-state">—</b></div>
     <div class="kv"><span>Wants</span><b id="strat-signal">—</b></div>
     <div id="strat-rows"></div>
@@ -278,16 +282,22 @@ function renderOverlays(st) {
     .filter(p => p.t >= t0)                     // keep the chart from extending left
     .map(p => ({ time: p.t, value: p.v }));
   const legendParts = [];
+  const active = new Set();
   for (const ov of st.view.overlays) {
     if (ov.kind === "line") {
+      active.add(ov.key);
       overlayLine(ov.key, ov.color).setData(data(st.series[ov.key]));
       legendParts.push(`<span style="color:${ov.color}">━ ${ov.label}</span>`);
     } else if (ov.kind === "band") {
+      active.add("band:" + ov.upper); active.add("band:" + ov.lower);
       overlayLine("band:" + ov.upper, ov.color).setData(data(st.series[ov.upper]));
       overlayLine("band:" + ov.lower, ov.color).setData(data(st.series[ov.lower]));
       legendParts.push(`<span style="color:${ov.color}">╌ ${ov.label}</span>`);
     }
   }
+  // Clear overlays from a previously-selected strategy (e.g. SMA's lines after
+  // switching to the regime engine).
+  for (const k in overlaySeries) if (!active.has(k)) overlaySeries[k].setData([]);
   legend.innerHTML = legendParts.join(" ");
 }
 
@@ -298,6 +308,9 @@ async function setTf(interval) {
 let stratRunning = false;
 async function toggleStrategy() {
   await fetch("/strategy/" + (stratRunning ? "stop" : "start"), { method: "POST" });
+}
+async function selectStrategy(name) {
+  await fetch("/strategy/select/" + encodeURIComponent(name), { method: "POST" });
 }
 async function setSize() {
   const v = $("strat-size").value.trim();
@@ -321,6 +334,12 @@ function fmtRow(kind, val) {
 function renderStrategy(st) {
   if (!st) { $("strat-panel").style.display = "none"; return; }
   stratRunning = st.running;
+  const sel = $("strat-select");                   // available engines
+  if (st.available && sel.dataset.opts !== st.available.join(",")) {
+    sel.innerHTML = st.available.map(n => `<option value="${n}">${n}</option>`).join("");
+    sel.dataset.opts = st.available.join(",");
+  }
+  if (st.selected && document.activeElement !== sel) sel.value = st.selected;
   $("strat-name").textContent = st.name;
   $("strat-state").textContent = st.running ? "RUNNING" : "paused";
   $("strat-state").className = st.running ? "good" : "warn";

@@ -288,6 +288,23 @@ def test_snapshot_carries_view_and_bar_aligned_series():
     assert pts and all("t" in p and "v" in p for p in pts)  # bar-aligned
 
 
+async def test_set_strategy_swaps_and_reseeds_onto_the_new_one():
+    market = SimpleNamespace(candles=_bars([100, 101, 102, 103, 104]), interval="1m")
+    r = _sma_runner(market, running=False)          # starts on SmaCross(2/3)
+    r._seed_from_history()
+    assert r.strategy.name.startswith("sma")
+
+    class _Other:
+        name = "other"
+
+        def on_bar(self, close):
+            return Decision(Stance.FLAT, {"k": "v"})
+
+    await r.set_strategy(_Other())
+    assert r.strategy.name == "other"
+    assert r.last_decision.detail == {"k": "v"}      # re-warmed on the new strategy
+
+
 async def test_reseed_while_running_acts_on_the_fresh_stance():
     placed = []
 

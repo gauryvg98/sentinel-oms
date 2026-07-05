@@ -209,6 +209,14 @@ class StrategyRunner:
             self._history.append({"t": c["t"], "detail": self.last_decision.detail})
         del self._history[:-_HISTORY_CAP]
 
+    async def set_strategy(self, strategy: Strategy) -> None:
+        """Swap the live strategy (from the UI selector). Reseed so the new one
+        warms from history and — if running — reconciles to its OWN target now
+        (which may cancel a resting entry / close a position the previous
+        strategy opened, via the normal guarded path)."""
+        self.strategy = strategy
+        await self.reseed()
+
     async def reseed(self) -> None:
         """Reset + re-warm the strategy from the current bar history, then (if
         running) reconcile to the fresh stance immediately. The hook for a

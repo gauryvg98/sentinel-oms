@@ -37,24 +37,24 @@ def load_env() -> None:
                 os.environ.setdefault(k.strip(), v.strip())
 
 
-def _build_strategy(which: str):
-    """Select the strategy by SENTINEL_STRATEGY (default 'sma'). 'regime' is
-    the v2 engine (Donchian breakout gated by an ADX regime filter + vol-target
+def _build_registry() -> dict:
+    """The strategies the operator can select from at runtime. 'regime' is the
+    v2 engine (Donchian breakout gated by an ADX regime filter + vol-target
     conviction); it prefers OHLC bars, which the runner feeds automatically."""
-    if which == "regime":
-        from sentinel.strategy import Params, RegimeTrendMR
-        return RegimeTrendMR(Params(
+    from sentinel.strategy import Params, RegimeTrendMR, SmaCross
+    return {
+        "sma": SmaCross(
+            fast=int(os.environ.get("SENTINEL_SMA_FAST", "5")),
+            slow=int(os.environ.get("SENTINEL_SMA_SLOW", "20")),
+        ),
+        "regime": RegimeTrendMR(Params(
             donchian_entry=int(os.environ.get("SENTINEL_DONCHIAN_ENTRY", "55")),
             donchian_exit=int(os.environ.get("SENTINEL_DONCHIAN_EXIT", "20")),
             adx_trend=float(os.environ.get("SENTINEL_ADX_TREND", "25")),
             adx_range=float(os.environ.get("SENTINEL_ADX_RANGE", "20")),
             enable_mean_reversion=os.environ.get("SENTINEL_MR", "0") == "1",
-        ))
-    from sentinel.strategy import SmaCross
-    return SmaCross(
-        fast=int(os.environ.get("SENTINEL_SMA_FAST", "5")),
-        slow=int(os.environ.get("SENTINEL_SMA_SLOW", "20")),
-    )
+        )),
+    }
 
 
 async def _serve() -> None:
@@ -73,7 +73,7 @@ async def _serve() -> None:
     app = SentinelApp(pool, adapter, dsn=dsn)
     market = MarketData(SYMBOL)
 
-    strategy = _build_strategy(os.environ.get("SENTINEL_STRATEGY", "sma"))
+    registry = _build_registry()
     # The strategy decides on its OWN fixed interval (its windows are calibrated
     # to one), independent of the chart timeframe the operator flips around.
     from sentinel.ui.bars import BarFeed
@@ -82,7 +82,8 @@ async def _serve() -> None:
     ui = build_ui(
         app, market,
         trade_qty=Decimal(os.environ.get("SENTINEL_TRADE_QTY", "0.0002")),
-        strategy=strategy,
+        strategies=registry,
+        default_strategy=os.environ.get("SENTINEL_STRATEGY", "sma"),
         strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
         strategy_bars=strategy_bars,
     )

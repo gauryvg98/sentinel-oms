@@ -76,3 +76,38 @@ def test_decision_carries_sma_values_for_the_ui():
     d = s.on_bar(Decimal(12))
     assert isinstance(d, Decision)
     assert "fast" in d.detail and "slow" in d.detail
+
+
+# ---- strategy-level stop geometry -------------------------------------------
+
+def test_emits_stop_dist_when_directional():
+    # In a clear uptrend the strategy wants LONG and reports a stop distance:
+    # the gap from price back to the slow SMA (floored at stop_floor_pct).
+    s = SmaCross(fast=2, slow=4, stop_floor_pct=Decimal("0.005"))
+    d = None
+    for p in [10, 11, 12, 13, 20]:            # strong uptrend
+        d = s.on_bar(Decimal(str(p)))
+    assert d.stance is Stance.LONG
+    sd = Decimal(d.detail["stop_dist"])
+    slow = Decimal(d.detail["slow"])
+    # stop distance = max(|price - slow|, 0.5% of price); here the gap dominates.
+    assert sd == max(abs(Decimal("20") - slow), Decimal("20") * Decimal("0.005"))
+    assert sd > 0
+
+
+def test_stop_dist_floored_near_a_cross():
+    # Price hugging the SMA -> the raw gap is ~0, so the floor kicks in and the
+    # stop is never absurdly tight.
+    s = SmaCross(fast=2, slow=4, stop_floor_pct=Decimal("0.01"))
+    d = None
+    for p in [100, 100, 100, 100, 100.5]:     # basically flat, tiny up-tick
+        d = s.on_bar(Decimal(str(p)))
+    if d.stance in (Stance.LONG, Stance.SHORT):
+        sd = Decimal(d.detail["stop_dist"])
+        assert sd >= Decimal("100.5") * Decimal("0.01")   # floored
+
+
+def test_no_stop_dist_while_warming_up():
+    s = SmaCross(fast=2, slow=4)
+    d = s.on_bar(Decimal("10"))
+    assert d.stance is None and "stop_dist" not in d.detail

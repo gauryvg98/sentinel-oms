@@ -19,13 +19,19 @@ from .base import Decision, Stance
 
 
 class SmaCross:
-    def __init__(self, fast: int = 5, slow: int = 20, short: bool = False) -> None:
+    def __init__(self, fast: int = 5, slow: int = 20, short: bool = False,
+                 stop_floor_pct: Decimal = Decimal("0.005")) -> None:
         if fast >= slow:
             raise ValueError("fast period must be shorter than slow")
         # short=True -> stop-and-reverse: SHORT below the cross instead of FLAT,
         # so the strategy is always in the market and can profit in a bear leg
         # (needs a venue that allows shorting; spot clamps SHORT to FLAT).
         self._short = short
+        # The strategy's protective stop is the SLOW SMA (the trend line): a long
+        # is wrong once price falls back to it. Floored so a near-cross entry
+        # (price hugging the SMA) doesn't hand the risk layer a ~0 stop and size
+        # itself into the leverage cap.
+        self._stop_floor = stop_floor_pct
         self.name = f"sma-{'ls' if short else 'cross'}({fast}/{slow})"
         self.fast_period = fast     # public: the chart overlays these windows
         self.slow_period = slow
@@ -68,5 +74,11 @@ class SmaCross:
         slow = sum(prices) / self._slow_n
         below = Stance.SHORT if self._short else Stance.FLAT
         stance = Stance.LONG if fast > slow else below
-        return Decision(stance, {"fast": str(round(fast, 2)),
-                                 "slow": str(round(slow, 2))})
+        detail = {"fast": str(round(fast, 2)), "slow": str(round(slow, 2))}
+        if stance in (Stance.LONG, Stance.SHORT):
+            # Stop geometry: distance from price back to the slow SMA (the trend
+            # line), floored at stop_floor_pct of price. The risk layer sizes and
+            # enforces the SL/TP off this.
+            gap = abs(close - slow)
+            detail["stop_dist"] = str(max(gap, close * self._stop_floor))
+        return Decision(stance, detail)

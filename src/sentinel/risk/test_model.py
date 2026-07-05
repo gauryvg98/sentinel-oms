@@ -21,22 +21,21 @@ def _candles(closes, hi_lo=1.0):
 # ---- sizing -----------------------------------------------------------------
 
 def test_stop_out_loses_about_risk_pct_of_equity():
-    equity, price, atrv = Decimal("10000"), Decimal("60000"), Decimal("500")
-    qty = risk_sized_qty(P, equity=equity, price=price, atr_value=atrv)
-    # stop distance = 2*500 = 1000; a stop-out loses qty * 1000
-    loss_at_stop = qty * (P.stop_atr_mult * atrv)
+    equity, price, sd = Decimal("10000"), Decimal("60000"), Decimal("1000")
+    qty = risk_sized_qty(P, equity=equity, price=price, stop_dist=sd)
+    loss_at_stop = qty * sd                        # a stop-out loses qty * stop_dist
     assert abs(loss_at_stop - P.risk_pct * equity) < Decimal("0.01")   # ~100 USDT
 
 
 def test_conviction_scales_size_linearly():
-    kw = dict(equity=Decimal("10000"), price=Decimal("60000"), atr_value=Decimal("500"))
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"), stop_dist=Decimal("1000"))
     full = risk_sized_qty(P, conviction=Decimal("1"), **kw)
     half = risk_sized_qty(P, conviction=Decimal("0.5"), **kw)
     assert abs(half - full / 2) < Decimal("1e-9")
 
 
 def test_conviction_is_clamped_to_unit_interval():
-    kw = dict(equity=Decimal("10000"), price=Decimal("60000"), atr_value=Decimal("500"))
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"), stop_dist=Decimal("1000"))
     full = risk_sized_qty(P, conviction=Decimal("1"), **kw)
     assert risk_sized_qty(P, conviction=Decimal("5"), **kw) == full     # clamped to 1
     assert risk_sized_qty(P, conviction=Decimal("-1"), **kw) == Decimal(0)  # clamped to 0
@@ -46,16 +45,18 @@ def test_leverage_cap_binds_when_stop_is_tight():
     # A very tight stop would size huge; the leverage cap must clip notional to
     # equity * max_leverage.
     equity, price = Decimal("10000"), Decimal("60000")
-    qty = risk_sized_qty(P, equity=equity, price=price, atr_value=Decimal("1"))
+    qty = risk_sized_qty(P, equity=equity, price=price, stop_dist=Decimal("2"))
     assert qty * price <= equity * P.max_leverage + Decimal("1e-6")
     assert qty == (equity * P.max_leverage) / price     # exactly the cap
 
 
 def test_zero_or_negative_inputs_are_safe():
     assert risk_sized_qty(P, equity=Decimal(0), price=Decimal("60000"),
-                          atr_value=Decimal("500")) == 0
+                          stop_dist=Decimal("1000")) == 0
     assert risk_sized_qty(P, equity=Decimal("10000"), price=Decimal(0),
-                          atr_value=Decimal("500")) == 0
+                          stop_dist=Decimal("1000")) == 0
+    assert risk_sized_qty(P, equity=Decimal("10000"), price=Decimal("60000"),
+                          stop_dist=None) == 0
 
 
 # ---- stop distance / ATR ----------------------------------------------------

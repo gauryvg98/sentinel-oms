@@ -194,11 +194,12 @@ class StrategyRunner:
             return None
         if self._risk_params is not None and self._equity_fn is not None:
             # Risk layer: size so a stop-out costs risk_pct·conviction of equity,
-            # capped by leverage — decoupled from a flat notional budget.
-            from sentinel.risk import atr, risk_sized_qty
+            # capped by leverage. Uses the SAME stop distance as the SL (strategy
+            # geometry or ATR), so size and stop stay consistent.
+            from sentinel.risk import risk_sized_qty
             raw = risk_sized_qty(
                 self._risk_params, equity=self._equity_fn(), price=price,
-                atr_value=atr(self._bars.candles), conviction=self._weight(d))
+                stop_dist=self._stop_dist(price), conviction=self._weight(d))
         else:
             raw = self._weight(d) * self._budget_fn() / price   # fixed-notional budget
         qty = raw.quantize(self._lot_step, rounding=ROUND_DOWN)
@@ -249,6 +250,23 @@ class StrategyRunner:
             await self._on_change()
         return action
 
+    def _stop_dist(self, price: Decimal):
+        """Effective stop distance for BOTH sizing and the SL: the strategy's own
+        geometry (last decision's detail['stop_dist']) when it provides one, else
+        the risk layer's ATR-based stop. None without risk params."""
+        if self._risk_params is None:
+            return None
+        d = self.last_decision
+        raw = d.detail.get("stop_dist") if d and isinstance(d.detail, dict) else None
+        try:
+            sd = Decimal(str(raw)) if raw is not None else None
+        except (InvalidOperation, TypeError):
+            sd = None
+        if sd and sd > 0:
+            return sd
+        from sentinel.risk import atr, stop_distance
+        return stop_distance(self._risk_params, price, atr(self._bars.candles))
+
     async def _check_brackets(self) -> None:
         """Risk-layer protective exits. If the mark has breached the open
         position's stop-loss or take-profit, flatten at market and suppress
@@ -266,18 +284,12 @@ class StrategyRunner:
         price = self._bid_fn() or self._ask_fn()
         if entry is None or entry <= 0 or price is None or price <= 0:
             return
-        from sentinel.risk import atr, brackets, breached, stop_distance
+        from sentinel.risk import brackets, breached
         p = self._risk_params
-        # Stop distance: strategy override in detail['stop_dist'], else ATR-based.
-        sd = None
         d = self.last_decision
-        raw = d.detail.get("stop_dist") if d and isinstance(d.detail, dict) else None
-        try:
-            sd = Decimal(str(raw)) if raw is not None else None
-        except (InvalidOperation, TypeError):
-            sd = None
+        sd = self._stop_dist(price)
         if not sd or sd <= 0:
-            sd = stop_distance(p, price, atr(self._bars.candles))
+            return
         is_long = pos > 0
         stop, take = brackets(entry, is_long, sd, p.rr)
         self._last_bracket = {"stop": stop, "take": take, "is_long": is_long}
@@ -399,11 +411,14 @@ class StrategyRunner:
         p = self._risk_params
         if p is None:
             return None
-        from sentinel.risk import atr, stop_distance
+        from sentinel.risk import atr
         candles = getattr(self._bars, "candles", [])
         price = self._bid_fn() or self._ask_fn()
         a = atr(candles)
-        sd = stop_distance(p, price, a) if price else None
+        sd = self._stop_dist(price) if price else None
+        # Did the strategy supply its own stop geometry, or did we fall back?
+        d = self.last_decision
+        strat_stop = bool(d and isinstance(d.detail, dict) and d.detail.get("stop_dist"))
         b = self._last_bracket
         return {
             "mode": "risk-based",
@@ -411,6 +426,7 @@ class StrategyRunner:
             "max_leverage": str(p.max_leverage),
             "stop_atr_mult": str(p.stop_atr_mult),
             "rr": str(p.rr),
+            "stop_source": "strategy" if strat_stop else "atr",
             "atr": str(a) if a is not None else None,
             "stop_dist": str(sd) if sd is not None else None,
             "stop_pct": (str((sd / price).quantize(Decimal("0.0001")))

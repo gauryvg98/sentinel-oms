@@ -86,16 +86,15 @@ def breached(is_long: bool, mark: Decimal, stop: Decimal,
 
 
 def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
-                   atr_value: Decimal | None,
+                   stop_dist: Decimal | None,
                    conviction: Decimal = Decimal(1)) -> Decimal:
-    """Base-asset quantity so that hitting the stop loses about
-    `risk_pct · conviction` of equity — capped by max leverage. Unsigned."""
-    if equity <= 0 or price <= 0:
-        return Decimal(0)
-    sd = stop_distance(params, price, atr_value)
-    if sd <= 0:
+    """Base-asset quantity so that hitting the stop (`stop_dist` price units away)
+    loses about `risk_pct · conviction` of equity — capped by max leverage.
+    Takes the stop distance directly so sizing and the SL use the SAME stop,
+    whether it's ATR-derived or the strategy's own geometry. Unsigned."""
+    if equity <= 0 or price <= 0 or stop_dist is None or stop_dist <= 0:
         return Decimal(0)
     conviction = max(Decimal(0), min(Decimal(1), conviction))
-    qty = (params.risk_pct * equity * conviction) / sd
+    qty = (params.risk_pct * equity * conviction) / stop_dist
     lev_cap_qty = (equity * params.max_leverage) / price   # never over-lever
     return min(qty, lev_cap_qty)

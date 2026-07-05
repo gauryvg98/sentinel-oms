@@ -520,7 +520,7 @@ function refreshChart(sym){
       return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
     const rk = d.strategy.risk;
     $("st-sizing").innerHTML = rk
-      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} · TP ${rk.rr}R`
+      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} (${rk.stop_source||'atr'}) · TP ${rk.rr}R`
         + (rk.stop_price ? `<br><span class="neg">SL ${rk.stop_price}</span> · <span class="pos">TP ${rk.take_price}</span>` : '')
       : '<span class="dim">fixed budget</span>';
     // SL/TP price lines on the chart (redrawn each refresh; cleared when flat)

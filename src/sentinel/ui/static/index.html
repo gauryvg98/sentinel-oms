@@ -259,7 +259,7 @@ const signed = v => { const n=parseFloat(v); return isNaN(n)?'—':(n>0?'+':'')+
 let account = {};
 const cards = {};                    // symbol -> {data, el, refs}
 let activeSym = null;                 // which bot the terminal view shows (null = overview)
-let chart=null, cseries=null, overlays={}, chartInterval=null;
+let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLine=null;
 
 // ------------------------------------------------------------------ websocket
 function connect(){
@@ -405,7 +405,7 @@ function openTerminal(sym){
     timeScale:{ timeVisible:true }, height:420 });
   cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
     wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
-  overlays = {}; chartInterval = null;   // force a fit on first render
+  overlays = {}; chartInterval = null; slLine = null; tpLine = null;   // fresh chart
   paintTerminalAccount();
   if (cards[sym]) paintTerminalCard(cards[sym].data);
   refreshChart(sym);
@@ -515,8 +515,16 @@ function refreshChart(sym){
       return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
     const rk = d.strategy.risk;
     $("st-sizing").innerHTML = rk
-      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'}`
+      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} · TP ${rk.rr}R`
+        + (rk.stop_price ? `<br><span class="neg">SL ${rk.stop_price}</span> · <span class="pos">TP ${rk.take_price}</span>` : '')
       : '<span class="dim">fixed budget</span>';
+    // SL/TP price lines on the chart (redrawn each refresh; cleared when flat)
+    if(slLine){ cseries.removePriceLine(slLine); slLine=null; }
+    if(tpLine){ cseries.removePriceLine(tpLine); tpLine=null; }
+    if(rk && rk.stop_price) slLine = cseries.createPriceLine({price:parseFloat(rk.stop_price),
+      color:'#f87171', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'SL'});
+    if(rk && rk.take_price) tpLine = cseries.createPriceLine({price:parseFloat(rk.take_price),
+      color:'#22e07b', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'TP'});
     $("o-work").innerHTML = (d.working||[]).length
       ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>
           <b><span class="link" onclick="post('/${sym}/cancel/${o.key}')">${o.state} ✕</span></b></div>`).join('')

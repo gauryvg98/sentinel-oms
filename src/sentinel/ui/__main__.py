@@ -194,10 +194,11 @@ async def _serve() -> None:
             max_leverage=Decimal(os.environ.get("SENTINEL_MAX_LEVERAGE", "3")),
             stop_atr_mult=Decimal(os.environ.get("SENTINEL_STOP_ATR_MULT", "2")),
             fallback_stop_pct=Decimal(os.environ.get("SENTINEL_STOP_FALLBACK_PCT", "0.02")),
+            rr=Decimal(os.environ.get("SENTINEL_RR", "2")),
         )
         print(f"  SIZING: risk-based · {risk_params.risk_pct} equity/trade · "
-              f"{risk_params.max_leverage}x max lev · stop {risk_params.stop_atr_mult}×ATR",
-              flush=True)
+              f"{risk_params.max_leverage}x max lev · stop {risk_params.stop_atr_mult}×ATR "
+              f"· TP {risk_params.rr}R", flush=True)
     else:
         print("  SIZING: fixed-notional budget  "
               "(set SENTINEL_RISK_PCT to enable risk-based sizing)", flush=True)

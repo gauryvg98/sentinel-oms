@@ -341,6 +341,7 @@ class Bot:
             lot_step=self.spec.lot_step,
             equity_fn=self.equity_fn,
             risk_params=self.risk_params,
+            entry_fn=self.avg_cost,
         )
 
     async def spawn(self) -> None:
@@ -399,6 +400,11 @@ class Bot:
 
     async def _pnl(self):
         return (await compute_pnl(self.app.store._pool, self.market)).get(self.symbol)
+
+    async def avg_cost(self) -> Decimal | None:
+        """The open position's entry price — anchors the risk layer's SL/TP."""
+        pnl = await self._pnl()
+        return pnl.avg_cost if pnl else None
 
     async def card(self) -> dict:
         """Compact, always-live state for this bot's card. No candles (a

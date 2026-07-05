@@ -125,6 +125,7 @@ class StrategyRunner:
         lot_step: Decimal = _DEFAULT_LOT_STEP,
         equity_fn: Callable[[], Decimal] | None = None,   # account equity (USDT)
         risk_params=None,                                 # RiskParams -> risk-based sizing
+        entry_fn: Callable[[], Awaitable[Decimal | None]] | None = None,  # position avg cost
     ) -> None:
         self.strategy = strategy
         self._bars = bars
@@ -146,6 +147,9 @@ class StrategyRunner:
         self._lot_step = lot_step
         self._equity_fn = equity_fn
         self._risk_params = risk_params
+        self._entry_fn = entry_fn
+        self._suppressed = None          # stance we exited on a stop/TP — no re-entry until it flips
+        self._last_bracket: dict | None = None   # current SL/TP levels, for the UI
 
         self.running = False
         self.last_decision: Decision | None = None
@@ -177,6 +181,12 @@ class StrategyRunner:
             return None
         if d.stance is Stance.FLAT:
             return Decimal(0)
+        # Re-entry suppression: after a stop/TP exit, stay flat until the stance
+        # FLIPS — don't immediately pile back into the same trade we just exited.
+        if self._suppressed is not None:
+            if d.stance == self._suppressed:
+                return Decimal(0)
+            self._suppressed = None
         if d.stance is Stance.SHORT and not self._allow_short:
             return Decimal(0)
         price = bid if d.stance is Stance.LONG else ask
@@ -239,6 +249,51 @@ class StrategyRunner:
             await self._on_change()
         return action
 
+    async def _check_brackets(self) -> None:
+        """Risk-layer protective exits. If the mark has breached the open
+        position's stop-loss or take-profit, flatten at market and suppress
+        re-entry until the signal flips. Also stashes the live SL/TP levels for
+        the UI. No-op without risk params, a position, an entry price, or while
+        paused."""
+        if not self.running or self._risk_params is None:
+            self._last_bracket = None
+            return
+        pos = await self._position_fn()
+        if pos == 0:
+            self._last_bracket = None
+            return
+        entry = await self._entry_fn() if self._entry_fn is not None else None
+        price = self._bid_fn() or self._ask_fn()
+        if entry is None or entry <= 0 or price is None or price <= 0:
+            return
+        from sentinel.risk import atr, brackets, breached, stop_distance
+        p = self._risk_params
+        # Stop distance: strategy override in detail['stop_dist'], else ATR-based.
+        sd = None
+        d = self.last_decision
+        raw = d.detail.get("stop_dist") if d and isinstance(d.detail, dict) else None
+        try:
+            sd = Decimal(str(raw)) if raw is not None else None
+        except (InvalidOperation, TypeError):
+            sd = None
+        if not sd or sd <= 0:
+            sd = stop_distance(p, price, atr(self._bars.candles))
+        is_long = pos > 0
+        stop, take = brackets(entry, is_long, sd, p.rr)
+        self._last_bracket = {"stop": stop, "take": take, "is_long": is_long}
+        hit = breached(is_long, price, stop, take)
+        if hit is None:
+            return
+        qty = abs(pos)
+        if is_long and self._reduce_sell_fn is not None:
+            await self._reduce_sell_fn(qty)
+        elif not is_long and self._reduce_buy_fn is not None:
+            await self._reduce_buy_fn(qty)
+        self._suppressed = d.stance if d is not None else None
+        self._last_bracket = None
+        self.last_action = f"{hit} hit @ {format(price.normalize(), 'f')} — flattened"
+        await self._on_change()
+
     async def _execute(self, plan: Plan) -> str | None:
         if plan.kind == "noop":
             return None
@@ -284,6 +339,7 @@ class StrategyRunner:
 
         while True:
             await asyncio.sleep(self._poll_s)
+            await self._check_brackets()          # SL/TP on every poll, not just bar closes
             candles = self._bars.candles
             if len(candles) < 2:
                 continue
@@ -348,13 +404,17 @@ class StrategyRunner:
         price = self._bid_fn() or self._ask_fn()
         a = atr(candles)
         sd = stop_distance(p, price, a) if price else None
+        b = self._last_bracket
         return {
             "mode": "risk-based",
             "risk_pct": str(p.risk_pct),
             "max_leverage": str(p.max_leverage),
             "stop_atr_mult": str(p.stop_atr_mult),
+            "rr": str(p.rr),
             "atr": str(a) if a is not None else None,
             "stop_dist": str(sd) if sd is not None else None,
             "stop_pct": (str((sd / price).quantize(Decimal("0.0001")))
                          if sd is not None and price else None),
+            "stop_price": str(b["stop"]) if b else None,
+            "take_price": str(b["take"]) if b else None,
         }

@@ -27,6 +27,7 @@ class RiskParams:
     max_leverage: Decimal      # cap: |notional| <= equity * max_leverage
     stop_atr_mult: Decimal     # stop distance = stop_atr_mult * ATR
     fallback_stop_pct: Decimal  # if ATR is unavailable: stop = fallback_stop_pct * price
+    rr: Decimal = Decimal("2")  # reward:risk — take-profit distance = rr * stop
 
 
 def atr(candles: list[dict], period: int = 14) -> Decimal | None:
@@ -53,6 +54,35 @@ def stop_distance(params: RiskParams, price: Decimal,
     if atr_value and atr_value > 0:
         return params.stop_atr_mult * atr_value
     return params.fallback_stop_pct * price
+
+
+def brackets(entry: Decimal, is_long: bool, stop_dist: Decimal,
+             rr: Decimal) -> tuple[Decimal, Decimal]:
+    """Protective (stop_loss, take_profit) PRICES for a position entered at
+    `entry`. The stop is `stop_dist` on the losing side; the target is `rr ×
+    stop_dist` on the winning side. Long stops below / targets above; short is
+    the mirror. Pure."""
+    if is_long:
+        return entry - stop_dist, entry + rr * stop_dist
+    return entry + stop_dist, entry - rr * stop_dist
+
+
+def breached(is_long: bool, mark: Decimal, stop: Decimal,
+             take: Decimal) -> str | None:
+    """Which bracket the mark has hit, if any: 'STOP', 'TAKE', or None. For a
+    long, price falling to/through the stop or rising to/through the take; short
+    mirrors."""
+    if is_long:
+        if mark <= stop:
+            return "STOP"
+        if mark >= take:
+            return "TAKE"
+    else:
+        if mark >= stop:
+            return "STOP"
+        if mark <= take:
+            return "TAKE"
+    return None
 
 
 def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,

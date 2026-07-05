@@ -69,3 +69,27 @@ def test_atr_none_until_enough_bars_then_positive():
     assert atr(_candles([100, 101, 102]), period=14) is None
     a = atr(_candles([100 + i for i in range(20)], hi_lo=1.0), period=14)
     assert a is not None and a > 0
+
+
+# ---- brackets / breach --------------------------------------------------------
+
+def test_brackets_long_and_short_are_mirrored():
+    from sentinel.risk import brackets
+    # long entered at 100, stop 5 away, rr 2 -> stop 95, take 110
+    assert brackets(Decimal("100"), True, Decimal("5"), Decimal("2")) == \
+        (Decimal("95"), Decimal("110"))
+    # short: stop above, take below
+    assert brackets(Decimal("100"), False, Decimal("5"), Decimal("2")) == \
+        (Decimal("105"), Decimal("90"))
+
+
+def test_breach_detects_stop_and_take_for_both_sides():
+    from sentinel.risk import breached
+    # long, stop 95, take 110
+    assert breached(True, Decimal("94"), Decimal("95"), Decimal("110")) == "STOP"
+    assert breached(True, Decimal("111"), Decimal("95"), Decimal("110")) == "TAKE"
+    assert breached(True, Decimal("100"), Decimal("95"), Decimal("110")) is None
+    # short, stop 105, take 90
+    assert breached(False, Decimal("106"), Decimal("105"), Decimal("90")) == "STOP"
+    assert breached(False, Decimal("89"), Decimal("105"), Decimal("90")) == "TAKE"
+    assert breached(False, Decimal("100"), Decimal("105"), Decimal("90")) is None

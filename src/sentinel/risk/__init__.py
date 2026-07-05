@@ -4,6 +4,14 @@ Separate from alpha (strategies): strategies propose direction + geometry, this
 layer decides the money — size, leverage — and enforces protection.
 """
 
-from .model import RiskParams, atr, risk_sized_qty, stop_distance
+from .model import (
+    RiskParams,
+    atr,
+    brackets,
+    breached,
+    risk_sized_qty,
+    stop_distance,
+)
 
-__all__ = ["RiskParams", "atr", "risk_sized_qty", "stop_distance"]
+__all__ = ["RiskParams", "atr", "brackets", "breached", "risk_sized_qty",
+           "stop_distance"]

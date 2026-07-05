@@ -37,6 +37,15 @@ def test_open_short_from_flat():
     assert p.kind == "open" and p.side == "SELL" and p.qty == Decimal("0.15")
 
 
+def test_qty_is_floored_to_the_venue_lot_step():
+    # Perps trade in 0.001 BTC lots; a raw target of 0.00318 must floor to
+    # 0.003, never reach the exchange as 0.00318 (Binance rejects -1111).
+    p = plan_action(Decimal(0), PX, PX, None, Decimal("0.00318"),
+                    lot_step=Decimal("0.001"))
+    assert p.kind == "open" and p.qty == Decimal("0.003")
+    assert p.qty.as_tuple().exponent >= -3          # <= 3 decimal places
+
+
 def test_add_to_a_long_pegs_the_remainder():
     p = plan_action(Decimal("0.075"), PX, PX, None, TGT)     # gap 0.075 > band
     assert p.kind == "open" and p.side == "BUY" and p.qty == Decimal("0.075")

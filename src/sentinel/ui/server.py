@@ -9,9 +9,12 @@ as markers within a second of the exchange reporting them.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
-from decimal import ROUND_DOWN, Decimal
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,11 +26,11 @@ from sentinel.marks.pnl import compute_pnl
 from sentinel.oms import PlacementBlocked
 from sentinel.runtime import SentinelApp
 
+from .instruments import InstrumentSpec
 from .market import MarketData
 from .strategy_runner import StrategyRunner
 
 STATIC = Path(__file__).parent / "static"
-LOT_STEP = Decimal("0.00001")   # BTCUSDT lot step (round order qty down to this)
 
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -129,10 +132,13 @@ async def order_stats(app: SentinelApp) -> dict:
 
 class Terminal:
     def __init__(self, app: SentinelApp, market: MarketData,
-                 trade_qty: Decimal) -> None:
+                 spec: InstrumentSpec) -> None:
         self.app = app
         self.market = market
-        self.trade_qty = trade_qty
+        self.spec = spec                # the symbol's exchange rules (lot/tick/mins)
+        # A bare manual order (no usdt/btc/pct) defaults to the exchange minimum
+        # quantity for this symbol — never a hardcoded qty.
+        self.trade_qty = spec.min_qty or spec.lot_step
 
     def _intent(self, side: Side, authority: Authority, qty: Decimal,
                 limit_price: Decimal | None = None) -> EconomicOrderIntent:
@@ -153,9 +159,14 @@ class Terminal:
                           authority: Authority = Authority.ENTRY) -> dict:
         """Place a resting LIMIT order (maker). Same guarded path as a market
         order — only the order type differs."""
-        qty = qty.quantize(LOT_STEP, rounding=ROUND_DOWN)
+        qty = self.spec.round_qty(qty)
+        price = self.spec.round_price(price, side)   # snap to tick, stay maker-side
         if qty <= 0:
             return {"blocked": "ZeroSize", "reason": "nothing to trade"}
+        if not self.spec.tradeable(qty, price):
+            return {"blocked": "BelowMinimum",
+                    "reason": f"below exchange minimum "
+                              f"(qty {self.spec.min_qty} / notional {self.spec.min_notional})"}
         try:
             with self.app.metrics.timer("place_ms"):
                 stored = await self.app.gateway.place(
@@ -195,15 +206,19 @@ class Terminal:
         return {"placed": key, "state": state.value, "qty": str(stored.core.qty)}
 
     async def _size(self, side: str, usdt, btc, pct) -> Decimal:
-        """Resolve the order quantity (in BTC) from whatever sizing the UI sent:
+        """Resolve the order quantity (in BTC) from whatever sizing was asked:
+          btc  — an explicit quantity (either side); used to cover/trim a short
+                 (BUY) or shed a long (SELL), so the runner's reduce legs work.
           BUY  — usdt amount, or pct of USDT balance -> qty = spend / price
-          SELL — btc amount, or pct of position     -> qty = fraction of position
-        Rounded down to the lot step. The guards still clamp SELL to what you
+          SELL — pct of the open position
+        Rounded down to the lot step. The guards still clamp a reduce to what you
         actually hold, so this can only ever undershoot."""
         mark = self.market.latest(self.market.symbol)
         if mark is None:
             return Decimal(0)
-        if side == "BUY":
+        if btc is not None:                        # explicit qty, side-agnostic
+            qty = Decimal(str(btc))
+        elif side == "BUY":
             if usdt is not None:
                 spend = Decimal(str(usdt))
             elif pct is not None:
@@ -212,14 +227,11 @@ class Terminal:
             else:
                 spend = self.trade_qty * mark.price
             qty = spend / mark.price
-        else:  # SELL
-            if btc is not None:
-                qty = Decimal(str(btc))
-            else:
-                pos = await self.app.store.get_position(self.market.symbol)
-                frac = Decimal(str(pct)) / 100 if pct is not None else Decimal(1)
-                qty = pos * frac
-        return qty.quantize(LOT_STEP, rounding=ROUND_DOWN)
+        else:  # SELL by fraction of the open position
+            pos = await self.app.store.get_position(self.market.symbol)
+            frac = Decimal(str(pct)) / 100 if pct is not None else Decimal(1)
+            qty = pos * frac
+        return self.spec.round_qty(abs(qty))
 
     async def trade(self, side: str, *, usdt=None, btc=None, pct=None,
                     authority: Authority | None = None) -> dict:
@@ -242,263 +254,474 @@ class Terminal:
             self.app.metrics.inc("orders_blocked")
             return {"blocked": type(e).__name__, "reason": str(e)}
 
-    async def snapshot(self, *, with_candles: bool = True) -> dict:
-        """The UI state. with_candles=False omits the ~180-bar history (sent
-        once on connect) and ships only the forming bar — the bulk of the
-        payload — so per-tick updates are tiny."""
-        symbol = self.market.symbol
-        pnl_all = await compute_pnl(self.app.store._pool, self.market)
-        pnl = pnl_all.get(symbol)
-        mark = self.market.latest(symbol)
-        balances = self.app.latest_balances  # stream-fed, never polled
-        working = [
-            o for o in await self.app.store.recent_orders(20)
-            if o["state"] not in ("FILLED", "CANCELED", "REJECTED")
-        ]
-        quantize = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
-        # Account equity in quote terms: quote cash + base holdings at mark.
-        quote = "USDT"
-        base = symbol[:-len(quote)] if symbol.endswith(quote) else None
-        equity = balances.get(quote, Decimal(0))
-        if base and mark and balances.get(base):
-            equity += balances[base] * mark.price
-        # Display only the traded pair's assets: the testnet account holds
-        # ~445 airdropped tokens — shipping them all bloats the payload/panel,
-        # and equity only prices base+quote anyway.
-        shown = {a: v for a, v in balances.items() if a in (base, quote)}
-        snap = {
-            "type": "state",
-            "symbol": symbol,
-            "interval": self.market.interval,
+
+# ============================================================ multi-bot layer
+
+@dataclass
+class Venue:
+    """Everything build_ui needs to run bots on one exchange account, without
+    knowing which exchange it is. The shared `adapter` carries account-wide
+    execution; the factories build per-symbol market data, bars and rules. This
+    is where 'spot vs Binance-futures vs Bybit' lives — nothing downstream
+    branches on venue, and NOTHING hardcodes a symbol's lot/tick (fetch_spec
+    reads them from the exchange)."""
+
+    adapter: object
+    allow_short: bool
+    predefined: tuple[str, ...]
+    default_symbol: str
+    make_market: Callable[[str], MarketData]
+    make_bars: Callable[[str, str], object]
+    fetch_spec: Callable[[str], Awaitable[InstrumentSpec]]
+    # (spec, reference_price) -> hard signed exposure cap in base units, so a
+    # fixed max notional becomes the right qty for BTC, ETH or DOGE alike.
+    cap_for: Callable[[InstrumentSpec, "Decimal | None"], "Decimal | None"]
+    default_interval: str = "1m"
+
+
+class Bot:
+    """One instrument's independent trading bot: its own market feed, bar clock,
+    exchange rules (spec), order terminal and strategy runner. Bots share the
+    single account/ledger/gateway but never collide — every write is keyed and
+    advisory-locked by instrument, so tens of these run side by side."""
+
+    def __init__(self, app: SentinelApp, venue: Venue, symbol: str, market,
+                 bars, spec: InstrumentSpec, strategies: dict, *,
+                 default_strategy: str, size_usdt: Decimal) -> None:
+        self.app = app
+        self.venue = venue
+        self.symbol = symbol
+        self.market = market
+        self.bars = bars
+        self.spec = spec
+        self.strategies = strategies
+        self.size = {"usdt": size_usdt}
+        self.current = {"name": default_strategy}
+        self.terminal = Terminal(app, market, spec)
+        self.runner = self._build_runner(strategies[default_strategy]())
+
+    # -- the peg's touch: rest at the near side; fall back to the mark --------
+    def _bid(self) -> Decimal | None:
+        b = self.market.best_bid()
+        if b is not None:
+            return b
+        m = self.market.latest(self.symbol)
+        return m.price if m else None
+
+    def _ask(self) -> Decimal | None:
+        a = self.market.best_ask()
+        if a is not None:
+            return a
+        m = self.market.latest(self.symbol)
+        return m.price if m else None
+
+    def _build_runner(self, strategy) -> StrategyRunner:
+        t = self.terminal
+        return StrategyRunner(
+            strategy, self.bars,
+            position_fn=lambda: self.app.store.get_position(self.symbol),
+            open_entry_fn=lambda: self.app.store.open_entry(self.symbol),
+            place_entry_fn=lambda qty, price: t.place_limit("BUY", qty, price),
+            reduce_sell_fn=lambda qty: t.trade("SELL", btc=float(qty)),
+            place_short_fn=lambda qty, price: t.place_limit("SELL", qty, price),
+            reduce_buy_fn=lambda qty: t.trade(
+                "BUY", btc=float(qty), authority=Authority.PROTECTIVE_EXIT),
+            cancel_fn=lambda key: t.cancel(key),
+            bid_fn=self._bid, ask_fn=self._ask,
+            budget_fn=lambda: self.size["usdt"],
+            on_change=functools.partial(self.app.changes.bump, self.symbol),
+            allow_short=self.venue.allow_short,
+            lot_step=self.spec.lot_step,
+        )
+
+    async def spawn(self) -> None:
+        """Warm history and put this bot's three feeds under supervision, each
+        tagged with the symbol so a change patches only this card."""
+        await self.market.load_history()
+        await self.bars.load_history()
+        self.market.on_change = functools.partial(self.app.changes.bump, self.symbol)
+        self.app.supervisor.spawn(f"market:{self.symbol}", self.market.run, restart=True)
+        self.app.supervisor.spawn(f"bars:{self.symbol}", self.bars.run, restart=True)
+        self.app.supervisor.spawn(f"strategy:{self.symbol}", self.runner.run, restart=True)
+
+    def start(self) -> None:
+        self.runner.start()
+
+    def stop(self) -> None:
+        self.runner.stop()
+
+    async def select(self, name: str) -> dict:
+        if name not in self.strategies:
+            return {"error": "unknown strategy"}
+        self.current["name"] = name
+        await self.runner.set_strategy(self.strategies[name]())
+        return {"selected": name}
+
+    async def set_size(self, v: Decimal) -> None:
+        self.size["usdt"] = v
+
+    async def set_timeframe(self, interval: str) -> None:
+        await self.market.set_interval(interval)
+
+    async def close(self) -> None:
+        """Graceful teardown (never disturbs other bots' orders): stop opening,
+        cancel this symbol's working orders, FLATTEN the position at market, then
+        cancel this bot's supervised tasks."""
+        self.runner.stop()
+        for o in await self.app.store.recent_orders(50, self.symbol):
+            if o["state"] not in ("FILLED", "CANCELED", "REJECTED"):
+                await self.terminal.cancel(o["key"])
+        pos = await self.app.store.get_position(self.symbol)
+        if pos > 0:
+            await self.terminal.trade("SELL", btc=float(pos),
+                                      authority=Authority.PROTECTIVE_EXIT)
+        elif pos < 0:
+            await self.terminal.trade("BUY", btc=float(-pos),
+                                      authority=Authority.PROTECTIVE_EXIT)
+        for kind in ("strategy", "bars", "market"):
+            await self.app.supervisor.cancel(f"{kind}:{self.symbol}")
+
+    def _spark(self, n: int = 48) -> list[float]:
+        cs = self.market.candles
+        if not cs:
+            return []
+        step = max(1, len(cs) // n)
+        return [c["c"] for c in cs[::step]][-n:]
+
+    async def _pnl(self):
+        return (await compute_pnl(self.app.store._pool, self.market)).get(self.symbol)
+
+    async def card(self) -> dict:
+        """Compact, always-live state for this bot's card. No candles (a
+        sparkline stands in) so tens of these stay cheap on the wire."""
+        pnl = await self._pnl()
+        s = self.runner.snapshot()
+        mark = self.market.latest(self.symbol)
+        q = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
+        working = [o for o in await self.app.store.recent_orders(20, self.symbol)
+                   if o["state"] not in ("FILLED", "CANCELED", "REJECTED")]
+        return {
+            "type": "card",
+            "symbol": self.symbol,
             "price": str(mark.price) if mark else None,
             "price_age": self.market.price_age_s,
+            "interval": self.market.interval,
+            "strategy_interval": s.get("interval"),
+            "running": s["running"],
+            "stance": s["stance"],
+            "last_action": s["last_action"],
+            "strategy": s["name"],
+            "selected": self.current["name"],
+            "available": list(self.strategies),
+            "entry_usdt": format(self.size["usdt"], "f"),
+            "position": format(pnl.position.normalize(), "f") if pnl else "0",
+            "avg_cost": q(pnl.avg_cost) if pnl else None,
+            "realized": q(pnl.realized) if pnl else "0.00",
+            "unrealized": q(pnl.unrealized) if pnl else None,
+            "working": len(working),
+            "spark": self._spark(),
+            "spec": {"lot_step": str(self.spec.lot_step),
+                     "tick": str(self.spec.price_tick),
+                     "min_qty": str(self.spec.min_qty),
+                     "min_notional": str(self.spec.min_notional)},
+        }
+
+    async def detail(self, with_candles: bool = True) -> dict:
+        """Full chart payload for an expanded card: candles, fill markers, the
+        working-order list, decisions and the strategy's own overlay spec."""
+        s = self.runner.snapshot()
+        d = {
+            "type": "detail",
+            "symbol": self.symbol,
+            "interval": self.market.interval,
             "bid": str(b) if (b := self.market.best_bid()) is not None else None,
             "ask": str(a) if (a := self.market.best_ask()) is not None else None,
             "candle": self.market.candles[-1] if self.market.candles else None,
+            "markers": consolidate_markers(
+                await self.app.store.recent_fills(
+                    self.symbol, limit=1000,
+                    since=(self.market.candles[0]["t"] if self.market.candles else None)),
+                interval_seconds(self.market.interval)),
+            "working": [o for o in await self.app.store.recent_orders(30, self.symbol)
+                        if o["state"] not in ("FILLED", "CANCELED", "REJECTED")],
+            "decisions": await self.app.store.recent_decisions(8, self.symbol),
+            "strategy": {**s, "entry_usdt": format(self.size["usdt"], "f")},
+        }
+        if with_candles:
+            d["candles"] = self.market.candles
+        return d
+
+
+class InstrumentManager:
+    """Owns the live roster of bots on one account. add()/remove() at runtime;
+    the shared caps dict feeds the exposure guard's per-symbol resolver."""
+
+    def __init__(self, app: SentinelApp, venue: Venue, strategies: dict, *,
+                 default_strategy: str, default_usdt: Decimal, caps: dict) -> None:
+        self.app = app
+        self.venue = venue
+        self.strategies = strategies
+        self.default_strategy = default_strategy
+        self.default_usdt = default_usdt
+        self.caps = caps                       # {symbol: cap} read by the guard
+        self.bots: dict[str, Bot] = {}
+        self._lock = asyncio.Lock()
+
+    def get(self, symbol: str) -> Bot | None:
+        return self.bots.get(symbol.upper())
+
+    def roster(self) -> list[str]:
+        return list(self.bots)
+
+    async def add(self, symbol: str) -> dict:
+        symbol = symbol.upper()
+        async with self._lock:
+            if symbol in self.bots:
+                return {"error": "already added"}
+            if symbol not in self.venue.predefined:
+                return {"error": f"{symbol} not in the predefined list"}
+            try:
+                spec = await self.venue.fetch_spec(symbol)
+            except Exception as e:  # noqa: BLE001
+                return {"error": f"could not fetch {symbol} rules: {e}"}
+            market = self.venue.make_market(symbol)
+            bars = self.venue.make_bars(symbol, self.venue.default_interval)
+            bot = Bot(self.app, self.venue, symbol, market, bars, spec,
+                      self.strategies, default_strategy=self.default_strategy,
+                      size_usdt=self.default_usdt)
+            await bot.spawn()                       # loads history -> a mark exists
+            mark = market.latest(symbol)
+            self.caps[symbol] = self.venue.cap_for(
+                spec, mark.price if mark else None)
+            self.bots[symbol] = bot
+        await self.app.changes.bump("roster")
+        await self.app.changes.bump(symbol)
+        return {"added": symbol}
+
+    async def remove(self, symbol: str) -> dict:
+        symbol = symbol.upper()
+        async with self._lock:
+            bot = self.bots.get(symbol)
+            if bot is None:
+                return {"error": "not active"}
+            await bot.close()              # flatten + cancel + stop this bot only
+            del self.bots[symbol]
+            self.caps.pop(symbol, None)
+        await self.app.changes.bump("roster")
+        return {"removed": symbol}
+
+    async def account_snapshot(self) -> dict:
+        """Account-wide state every card shares (topic 'account'/'roster'):
+        liveness, metrics, order totals, invariants, roster, wallet + equity.
+        Equity prices each active base at its own bot's mark."""
+        balances = self.app.latest_balances
+        quote = "USDT"
+        q = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
+        equity = balances.get(quote, Decimal(0))
+        bases = {quote}
+        for bot in self.bots.values():
+            base = bot.symbol[:-len(quote)] if bot.symbol.endswith(quote) else None
+            if not base:
+                continue
+            bases.add(base)
+            mark = bot.market.latest(bot.symbol)
+            if mark and balances.get(base):
+                equity += balances[base] * mark.price
+        shown = {a: format(v.normalize(), "f")
+                 for a, v in sorted(balances.items()) if a in bases and v}
+        return {
+            "type": "account",
             "accepting": self.app.accepting,
             "halted": self.app.supervisor.halted.is_set(),
             "task_failures": len(self.app.supervisor.failures),
             "metrics": self.app.metrics.snapshot(),
             "orders": await order_stats(self.app),
             "invariants": await check_invariants(self.app),
-            # Chart markers: fills bucketed to one arrow per (candle, side),
-            # covering the visible window. Consolidation bounds the payload to
-            # the number of bars no matter how many fills there are, and each
-            # marker carries its constituent fills for the hover tooltip.
-            "markers": consolidate_markers(
-                await self.app.store.recent_fills(
-                    symbol, limit=1000,
-                    since=(self.market.candles[0]["t"]
-                           if self.market.candles else None),
-                ),
-                interval_seconds(self.market.interval),
-            ),
-            "position": format(pnl.position.normalize(), "f") if pnl else "0",
-            "avg_cost": quantize(pnl.avg_cost) if pnl else None,
-            "realized": quantize(pnl.realized) if pnl else "0.00",
-            "unrealized": quantize(pnl.unrealized) if pnl else None,
-            "working": working,
-            "decisions": await self.app.store.recent_decisions(8),
-            "trade_qty": str(self.trade_qty),
-            "wallet": {
-                "balances": {
-                    a: format(v.normalize(), "f") for a, v in sorted(shown.items())
-                },
-                "equity": quantize(equity) if balances else None,
-                "quote": quote,
-            },
+            "roster": self.roster(),
+            "predefined": list(self.venue.predefined),
+            "wallet": {"balances": shown, "equity": q(equity), "quote": quote},
         }
-        if with_candles:
-            snap["candles"] = self.market.candles
-        return snap
 
 
-def build_ui(app: SentinelApp, market: MarketData,
-             trade_qty: Decimal = Decimal("0.0002"),
-             strategies: dict | None = None,
+def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
              default_strategy: str | None = None,
              strategy_usdt: Decimal = Decimal("15"),
-             strategy_bars=None, allow_short: bool = False) -> FastAPI:
-    # Strategies are a registry the operator selects from at runtime (not an
-    # env-only boot choice). The runner starts on the default and swaps live.
-    # strategies is a registry of FACTORIES ({name: () -> Strategy}); each call
-    # is a fresh instance (the live runner and any backtest each need their own).
+             caps: dict | None = None,
+             initial_symbols: tuple[str, ...] = ()) -> FastAPI:
     strategies = strategies or {}
-    default_strategy = default_strategy or (next(iter(strategies), None))
-    current = {"name": default_strategy}
-    strategy = strategies[default_strategy]() if default_strategy in strategies else None
-    # The strategy decides on its OWN bar feed (a fixed interval) when one is
-    # given, so flipping the chart timeframe never disturbs it; the chart's
-    # MarketData is only its live touch/mark. Falls back to the chart bars.
-    bars = strategy_bars if strategy_bars is not None else market
+    default_strategy = default_strategy or next(iter(strategies), None)
+    caps = caps if caps is not None else {}
     ui = FastAPI(title="sentinel-terminal")
-    terminal = Terminal(app, market, trade_qty)
-
-    # The strategy is just another producer of signals into the same gateway.
-    # ENTER -> a BUY sized in USDT; EXIT -> close the whole position. It faces
-    # the identical guards a human does (single-writer, never-over-exit).
-    # Entry size lives in a mutable holder so it can be tuned from the UI
-    # without a restart. This is the ONLY position-size knob: the strategy
-    # targets a single long/flat position, so "trade bigger" = bigger entry,
-    # not more concurrent buys.
-    size = {"usdt": strategy_usdt}
-
-    def _bid() -> Decimal | None:
-        # A maker BUY rests at the bid so it doesn't cross. Fall back to the
-        # last price if the book feed is unavailable (then it may take).
-        b = market.best_bid()
-        if b is not None:
-            return b
-        m = market.latest(market.symbol)
-        return m.price if m else None
-
-    def _ask() -> Decimal | None:
-        a = market.best_ask()
-        if a is not None:
-            return a
-        m = market.latest(market.symbol)
-        return m.price if m else None
-
-    runner = None
-    if strategy is not None:
-        # allow_short is False on spot (a SHORT stance clamps to FLAT and the
-        # short-side callables are never invoked) and True on perps.
-        runner = StrategyRunner(
-            strategy, bars,
-            position_fn=lambda: app.store.get_position(market.symbol),
-            open_entry_fn=lambda: app.store.open_entry(market.symbol),
-            place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
-            reduce_sell_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # trim long
-            place_short_fn=lambda qty, price: terminal.place_limit("SELL", qty, price),  # open short
-            reduce_buy_fn=lambda qty: terminal.trade(                            # cover short
-                "BUY", btc=float(qty), authority=Authority.PROTECTIVE_EXIT),
-            cancel_fn=lambda key: terminal.cancel(key),
-            bid_fn=_bid, ask_fn=_ask,
-            budget_fn=lambda: size["usdt"],                    # risk budget (100% conviction)
-            on_change=app.changes.bump,
-            allow_short=allow_short,
-        )
+    mgr = InstrumentManager(app, venue, strategies,
+                            default_strategy=default_strategy,
+                            default_usdt=strategy_usdt, caps=caps)
+    ui.state.manager = mgr
 
     @ui.on_event("startup")
     async def _startup() -> None:
         from sentinel.runtime import AnotherWriterActive
-
-        market.on_change = app.changes.bump          # ticks push to the UI
-        # Manual terminal: no auto-arm — a market-style protective exit on
-        # boot would flatten the position. Exits stay on the SELL button.
         try:
-            await app.start(arm_protection=False)    # claims the account lock
+            await app.start(arm_protection=False)     # claims the account lock
         except AnotherWriterActive as e:
             print(f"\n  REFUSING TO START: {e}\n", flush=True)
-            os._exit(1)                              # clean, no traceback
-        await market.load_history()
-        app.supervisor.spawn("market-data", market.run, restart=True)
-        if strategy_bars is not None:
-            # The strategy's own fixed-interval clock — warm it before the
-            # runner seeds off it.
-            await strategy_bars.load_history()
-            app.supervisor.spawn("strategy-bars", strategy_bars.run, restart=True)
-        if runner is not None:
-            # Always-on task: keeps indicators warm; acts only when started.
-            app.supervisor.spawn("strategy", runner.run, restart=True)
+            os._exit(1)
+        for sym in initial_symbols:
+            await mgr.add(sym)
 
     @ui.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
 
-    def _snap(with_candles: bool):
-        async def build():
-            snap = await terminal.snapshot(with_candles=with_candles)
-            if runner is not None:
-                snap["strategy"] = runner.snapshot()
-                snap["strategy"]["entry_usdt"] = format(size["usdt"], "f")
-                snap["strategy"]["available"] = list(strategies)
-                snap["strategy"]["selected"] = current["name"]
-            return snap
-        return build()
-
     @ui.websocket("/ws")
     async def ws(websocket: WebSocket):
-        """Event-driven: send full state once, then push only when the world
-        changes (fill, order update, balance, tick, strategy), with a 2s
-        heartbeat so price-age keeps ticking even in dead-quiet markets."""
+        """Topic-driven: full sync on connect (account + every card), then push
+        ONLY the topics that changed — one bot card, or 'account'. A bot's tick
+        patches its card alone; nothing reflushes the whole roster."""
         await websocket.accept()
-        seen = -1
-        last_interval = None
+
+        async def send_card(sym: str) -> None:
+            bot = mgr.get(sym)
+            if bot is not None:
+                await websocket.send_text(json.dumps(await bot.card()))
+
         try:
-            await websocket.send_text(json.dumps(await _snap(True)))
+            await websocket.send_text(json.dumps(await mgr.account_snapshot()))
+            for sym in mgr.roster():
+                await send_card(sym)
             seen = app.changes.revision
-            last_interval = market.interval
             while True:
-                seen = await app.changes.wait_past(seen, timeout=2.0)
-                switched = market.interval != last_interval
-                await websocket.send_text(json.dumps(await _snap(switched)))
-                last_interval = market.interval
+                nxt = await app.changes.wait_past(seen, timeout=2.0)
+                topics = app.changes.topics_since(seen)
+                seen = nxt
+                if not topics:                        # heartbeat (dead-quiet)
+                    await websocket.send_text(json.dumps(await mgr.account_snapshot()))
+                    continue
+                for topic in topics:
+                    if topic in ("account", "roster"):
+                        await websocket.send_text(json.dumps(await mgr.account_snapshot()))
+                    else:
+                        await send_card(topic)
         except WebSocketDisconnect:
             pass
 
-    @ui.post("/strategy/{action}")
-    async def strategy_toggle(action: str):
-        if runner is None:
-            return {"error": "no strategy configured"}
+    # ------------------------------------------------------------ roster ops
+    @ui.post("/instrument/add/{symbol}")
+    async def add_instrument(symbol: str):
+        return await mgr.add(symbol)
+
+    @ui.post("/instrument/remove/{symbol}")
+    async def remove_instrument(symbol: str):
+        return await mgr.remove(symbol)
+
+    @ui.get("/instrument/{symbol}/detail")
+    async def instrument_detail(symbol: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        return await bot.detail(with_candles=True)
+
+    # ------------------------------------------------------ per-symbol control
+    @ui.post("/{symbol}/strategy/{action}")
+    async def strategy_toggle(symbol: str, action: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
         if action == "start":
-            runner.start()
-            await runner.reconcile_now()   # act on the current stance now
+            bot.start()
+            await bot.runner.reconcile_now()
         elif action == "stop":
-            runner.stop()
-        await app.changes.bump()
-        return runner.snapshot()
+            bot.stop()
+        await app.changes.bump(bot.symbol)
+        return bot.runner.snapshot()
 
-    # No manual /trade endpoint — this is a systematic terminal. The strategy
-    # runner drives Terminal.trade() directly; the human's only control is
-    # start/stop below.
+    @ui.post("/{symbol}/strategy/select/{name}")
+    async def strategy_select(symbol: str, name: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        res = await bot.select(name)
+        await app.changes.bump(bot.symbol)
+        return res
 
-    @ui.post("/cancel/{client_order_id}")
-    async def cancel_order(client_order_id: str):
-        """Cancel a working order (e.g. a strategy's resting maker entry). A
-        legit ops control — canceling a systematic order, not discretionary
-        trading."""
-        result = await terminal.cancel(client_order_id)
-        await app.changes.bump()
-        return result
+    @ui.post("/{symbol}/size/{usdt}")
+    async def set_size(symbol: str, usdt: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        try:
+            v = Decimal(usdt)
+        except Exception:  # noqa: BLE001
+            return {"error": "invalid amount"}
+        if v <= 0:
+            return {"error": "must be positive"}
+        await bot.set_size(v)
+        await app.changes.bump(bot.symbol)
+        return {"entry_usdt": format(v, "f")}
 
-    @ui.post("/strategy/select/{name}")
-    async def strategy_select(name: str):
-        """Switch the live strategy. Same bar feed; the runner reseeds onto the
-        new strategy and (if running) reconciles to its target."""
-        if runner is None or name not in strategies:
-            return {"error": "unknown strategy"}
-        current["name"] = name
-        await runner.set_strategy(strategies[name]())     # fresh instance
-        await app.changes.bump()
-        return {"selected": name}
+    @ui.post("/{symbol}/timeframe/{interval}")
+    async def set_timeframe(symbol: str, interval: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        await bot.set_timeframe(interval)
+        await app.changes.bump(bot.symbol)
+        return {"interval": bot.market.interval}
+
+    @ui.post("/{symbol}/cancel/{client_order_id}")
+    async def cancel_order(symbol: str, client_order_id: str):
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        res = await bot.terminal.cancel(client_order_id)
+        await app.changes.bump(bot.symbol)
+        return res
+
+    @ui.post("/{symbol}/trade/{side}")
+    async def trade(symbol: str, side: str, usdt: str | None = None,
+                    btc: str | None = None):
+        """Manual marketable order on ONE bot, through the same guarded gateway
+        the strategy uses. BUY = ENTRY, SELL = PROTECTIVE_EXIT."""
+        bot = mgr.get(symbol)
+        if bot is None:
+            return {"error": "not active"}
+        side = side.upper()
+        if side not in ("BUY", "SELL"):
+            return {"error": "side must be BUY or SELL"}
+        kw = {}
+        if usdt is not None:
+            kw["usdt"] = Decimal(usdt)
+        elif btc is not None:
+            kw["btc"] = float(btc)
+        res = await bot.terminal.trade(side, **kw)
+        await app.changes.bump(bot.symbol)
+        return res
 
     @ui.post("/backtest")
-    async def backtest(interval: str = "1h", days: int = 365, cost_bps: str = "10",
+    async def backtest(symbol: str | None = None, interval: str = "1h",
+                       days: int = 365, cost_bps: str = "10",
                        strategy: str | None = None, budget: str | None = None):
         """Backtest a strategy on real mainnet history — the same pure strategy +
-        plan_action the live path uses. Defaults to the live-selected strategy
-        and entry size; the Backtest tab overrides both. Blocking work (data
-        fetch + replay) runs off the event loop."""
-        name = strategy or current["name"]
-        if runner is None or name not in strategies:
+        plan_action the live path uses. Symbol defaults to the first active bot;
+        strategy/budget default to that bot's live selection."""
+        sym = (symbol or (mgr.roster()[0] if mgr.roster() else venue.default_symbol)).upper()
+        bot = mgr.get(sym)
+        name = strategy or (bot.current["name"] if bot else default_strategy)
+        if name not in strategies:
             return {"error": "no strategy"}
-        factory, symbol = strategies[name], market.symbol
+        factory = strategies[name]
         try:
-            budget = Decimal(budget) if budget else size["usdt"]
+            budget_v = Decimal(budget) if budget else (bot.size["usdt"] if bot else strategy_usdt)
         except Exception:  # noqa: BLE001
             return {"error": "invalid budget"}
-        name_for_report = name
 
         def _run():
             from sentinel.backtest.data import load_klines
             from sentinel.backtest.engine import run_backtest
-            bars = load_klines(symbol, interval, days)
-            r = run_backtest(factory(), bars, symbol=symbol, interval=interval,
-                             budget=budget, cost_bps=Decimal(cost_bps))
+            bars = load_klines(sym, interval, days)
+            r = run_backtest(factory(), bars, symbol=sym, interval=interval,
+                             budget=budget_v, cost_bps=Decimal(cost_bps))
             open0 = float(bars[0]["o"]) if bars else 1.0
-            b = float(budget)
-            # net + buy-hold equity per bar, downsampled to ~300 points.
+            b = float(budget_v)
             merged = [(t, net, b * float(bars[i]["c"]) / open0)
                       for i, (t, net) in enumerate(r.equity_curve)]
             stepn = max(1, len(merged) // 300)
@@ -511,33 +734,12 @@ def build_ui(app: SentinelApp, market: MarketData,
         except Exception as e:  # noqa: BLE001
             return {"error": f"backtest failed: {e}"}
         return {
-            "strategy": name_for_report, "interval": interval, "days": days,
-            "bars": r.bars, "trades": r.trades,
-            "net_return": r.net_return, "gross_return": r.gross_return,
-            "buy_hold_return": r.buy_hold_return, "sharpe": r.sharpe,
-            "max_drawdown": r.max_drawdown, "fees": r.fees_paid,
+            "strategy": name, "symbol": sym, "interval": interval, "days": days,
+            "bars": r.bars, "trades": r.trades, "net_return": r.net_return,
+            "gross_return": r.gross_return, "buy_hold_return": r.buy_hold_return,
+            "sharpe": r.sharpe, "max_drawdown": r.max_drawdown, "fees": r.fees_paid,
             "turnover": r.turnover, "final_equity": r.final_equity,
             "budget": r.budget, "curve": curve,
         }
-
-    @ui.post("/strategy/size/{usdt}")
-    async def strategy_size(usdt: str):
-        """Set the strategy's per-entry size in USDT (live, no restart)."""
-        try:
-            v = Decimal(usdt)
-        except Exception:
-            return {"error": "invalid amount"}
-        if v <= 0:
-            return {"error": "must be positive"}
-        size["usdt"] = v
-        await app.changes.bump()
-        return {"entry_usdt": format(v, "f")}
-
-    @ui.post("/timeframe/{interval}")
-    async def timeframe(interval: str):
-        # Chart-only: the strategy runs on its own BarFeed, so flipping the
-        # chart timeframe is a pure viewing change and never disturbs it.
-        await market.set_interval(interval)
-        return {"interval": market.interval}
 
     return ui

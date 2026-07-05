@@ -375,11 +375,16 @@ class LedgerStore:
             json.dumps(detail, default=str),
         )
 
-    async def recent_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
+    async def recent_decisions(self, limit: int = 50,
+                               instrument: str | None = None
+                               ) -> list[dict[str, Any]]:
+        # instrument set -> just this bot's decisions (per-card activity feed).
+        where = "WHERE instrument = $2 " if instrument else ""
+        args = (limit, instrument) if instrument else (limit,)
         rows = await self._pool.fetch(
             "SELECT seq, trace_id, instrument, actor, decision, detail, occurred_at "
-            "FROM decision_log ORDER BY seq DESC LIMIT $1",
-            limit,
+            f"FROM decision_log {where}ORDER BY seq DESC LIMIT $1",
+            *args,
         )
         return [
             {
@@ -396,7 +401,12 @@ class LedgerStore:
 
     # ------------------------------------------------------------ UI reads
 
-    async def recent_orders(self, limit: int = 30) -> list[dict[str, Any]]:
+    async def recent_orders(self, limit: int = 30,
+                            instrument: str | None = None
+                            ) -> list[dict[str, Any]]:
+        # instrument set -> just this bot's orders (per-card working list).
+        where = "WHERE instrument = $2 " if instrument else ""
+        args = (limit, instrument) if instrument else (limit,)
         rows = await self._pool.fetch(
             # Order by last_event_seq (the authoritative per-order sequence),
             # NOT updated_at: updated_at has DEFAULT now() and is reset for
@@ -405,9 +415,9 @@ class LedgerStore:
             # would return an arbitrary slice — silently dropping live working
             # orders from the panel. last_event_seq is reproduced from the log.
             "SELECT client_order_id, instrument, side, qty, filled_qty, state, "
-            "broker_order_id, authority, limit_price, updated_at FROM orders "
+            f"broker_order_id, authority, limit_price, updated_at FROM orders {where}"
             "ORDER BY last_event_seq DESC LIMIT $1",
-            limit,
+            *args,
         )
         return [
             {

@@ -1,682 +1,423 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>sentinel · paper</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>sentinel · multi-bot</title>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
     --bg: #0a0e0d; --panel: #101614; --edge: #1d2a25; --ink: #cfe3da;
     --dim: #5e7268; --green: #22e07b; --red: #f87171; --amber: #fbbf24;
-    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --violet: #a78bfa; --mono: "SF Mono", ui-monospace, Menlo, monospace;
   }
   * { box-sizing: border-box; margin: 0; }
   body { background: var(--bg); color: var(--ink); font-family: var(--mono);
-         font-size: 13px; padding: 12px; max-width: 1200px; margin: 0 auto; }
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+         font-size: 13px; padding: 14px 18px 40px; }
   .brand { color: var(--green); font-weight: 700; letter-spacing: 2px; }
   .chip { padding: 2px 8px; border-radius: 4px; font-size: 11px;
           color: var(--amber); border: 1px solid var(--amber); }
-  #price { font-size: 22px; font-weight: 700; }
-  .dim { color: var(--dim); font-size: 11px; }
+  .dim { color: var(--dim); } .pos { color: var(--green); } .neg { color: var(--red); }
+  .warn { color: var(--amber); } .good { color: var(--green); }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .ok { background: var(--green); } .bad { background: var(--red); }
+  .pill { font-size: 9px; padding: 1px 6px; border-radius: 4px; margin-left: 4px;
+          border: 1px solid var(--edge); color: var(--dim); }
+  button { font-family: var(--mono); cursor: pointer; }
+
+  /* overview --------------------------------------------------------------- */
+  .ovhead { display: flex; align-items: center; gap: 16px; padding: 6px 2px 14px;
+            border-bottom: 1px solid var(--edge); flex-wrap: wrap; }
+  .stat0 { display: flex; flex-direction: column; line-height: 1.25; }
+  .stat0 b { font-size: 14px; } .stat0 span { font-size: 10px; color: var(--dim);
+             text-transform: uppercase; letter-spacing: 1px; }
+  .grow { flex: 1; }
+  .btn { background: var(--bg); border: 1px solid var(--edge); color: var(--ink);
+         border-radius: 6px; padding: 6px 12px; font-size: 12px; }
+  .btn:hover { border-color: var(--dim); }
+  .add { color: var(--green); border-color: var(--green); font-weight: 700; }
+  #grid { display: grid; gap: 14px; margin-top: 16px;
+          grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--edge);
+          border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .card.run { border-color: #244; box-shadow: 0 0 0 1px rgba(34,224,123,.15) inset; }
+  .chead { display: flex; align-items: baseline; gap: 8px; }
+  .sym { font-size: 15px; font-weight: 700; letter-spacing: 1px; cursor: pointer; }
+  .sym:hover { color: var(--green); }
+  .px { margin-left: auto; font-size: 15px; }
+  .x { border: none; background: none; color: var(--dim); font-size: 15px; cursor: pointer; padding: 0 2px; }
+  .x:hover { color: var(--red); }
+  canvas.spark { width: 100%; height: 40px; display: block; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .badge { font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 5px; border: 1px solid; }
+  .LONG { color: var(--green); border-color: var(--green); }
+  .SHORT { color: var(--red); border-color: var(--red); }
+  .FLAT, .none { color: var(--dim); border-color: var(--edge); }
+  .kvv { display: flex; flex-direction: column; line-height: 1.3; }
+  .kvv span { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
+  select, input { font-family: var(--mono); background: var(--bg); color: var(--ink);
+                  border: 1px solid var(--edge); border-radius: 6px; padding: 5px 7px; font-size: 12px; }
+  .ctl { display: flex; gap: 6px; } .ctl select { flex: 1; }
+  .go { color: var(--green); border-color: var(--green); }
+  .stopb { color: var(--red); border-color: var(--red); }
+  .foot { font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; gap: 8px; }
+  .last { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .sizerow { display: flex; gap: 6px; align-items: center; }
+  .sizerow input { width: 84px; }
+  .link { cursor: pointer; color: var(--dim); text-decoration: underline dotted; }
+  .link:hover { color: var(--ink); }
+  #picker { position: absolute; background: var(--panel); border: 1px solid var(--edge);
+            border-radius: 8px; padding: 6px; display: none; z-index: 30; max-height: 320px; overflow: auto; }
+  #picker div { padding: 6px 12px; border-radius: 5px; cursor: pointer; }
+  #picker div:hover { background: var(--bg); color: var(--green); }
+
+  /* terminal (per-symbol) -------------------------------------------------- */
+  #terminal { max-width: 1200px; margin: 0 auto; }
+  .tmhead { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; padding-top: 4px; }
+  #tprice { font-size: 22px; font-weight: 700; }
   .spacer { flex: 1; }
-
-  #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
-           margin-bottom: 12px; }
-  .stat { background: var(--panel); border: 1px solid var(--edge);
-          border-radius: 8px; padding: 10px 14px; }
-  .stat span { color: var(--dim); font-size: 10px; text-transform: uppercase;
-               letter-spacing: 1.5px; display: block; margin-bottom: 4px; }
+  #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 14px; }
+  .stat span { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px;
+               display: block; margin-bottom: 4px; }
   .stat b { font-size: 24px; font-weight: 700; }
-  .pos { color: var(--green); } .neg { color: var(--red); }
-
   #tfbar { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
-  #sma-legend { margin-left: auto; display: flex; gap: 14px; font-size: 11px; }
-  .tf { font-family: var(--mono); font-size: 12px; color: var(--dim);
-        background: var(--panel); border: 1px solid var(--edge);
-        border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  .tf { font-family: var(--mono); font-size: 12px; color: var(--dim); background: var(--panel);
+        border: 1px solid var(--edge); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
   .tf:hover { color: var(--ink); }
-  .tf.active { color: var(--bg); background: var(--green);
-               border-color: var(--green); font-weight: 700; }
-  #chart { background: var(--panel); border: 1px solid var(--edge);
-           border-radius: 8px; height: 420px; margin-bottom: 12px; }
-
+  .tf.active { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
+  #chart { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+           height: 420px; margin-bottom: 12px; }
   #sys { display: grid; gap: 10px; margin-bottom: 12px;
          grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
-  .panel { background: var(--panel); border: 1px solid var(--edge);
-           border-radius: 8px; padding: 10px 14px; }
-  .panel h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px;
-              text-transform: uppercase; margin-bottom: 8px;
-              display: flex; align-items: center; gap: 6px; }
-  .kv { display: flex; justify-content: space-between; align-items: baseline;
-        padding: 3px 0; font-size: 12px; }
-  .kv > span { color: var(--dim); }
-  .kv > b { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .kv .unit { color: var(--dim); font-weight: 400; font-size: 10px; }
-  .warn { color: var(--amber); } .good { color: var(--green); }
-  .pill { font-size: 9px; padding: 1px 6px; border-radius: 4px; margin-left: 4px;
-          border: 1px solid var(--edge); color: var(--dim);
-          font-variant-numeric: tabular-nums; }
-
-  #controls { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-              margin-bottom: 12px; }
-  .side { display: flex; flex-direction: column; gap: 8px;
-          background: var(--panel); border: 1px solid var(--edge);
-          border-radius: 8px; padding: 12px; }
-  .sizerow { display: flex; align-items: center; gap: 6px; }
-  .sizerow input { flex: 1; background: var(--bg); border: 1px solid var(--edge);
-                   border-radius: 6px; color: var(--ink); font-family: var(--mono);
-                   font-size: 15px; padding: 10px 12px; }
-  .sizerow input:focus { outline: none; border-color: var(--dim); }
-  .sizerow .unit { color: var(--dim); font-size: 12px; }
-  .pcts { display: flex; gap: 6px; }
-  .pct { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--dim);
-         background: var(--bg); border: 1px solid var(--edge); border-radius: 6px;
-         padding: 6px 0; cursor: pointer; }
-  .pct:hover { color: var(--ink); border-color: var(--dim); }
-  button { font-family: var(--mono); font-size: 15px; font-weight: 700;
-           border-radius: 8px; padding: 12px 28px; cursor: pointer;
-           background: transparent; }
-  #buy  { color: var(--green); border: 2px solid var(--green); }
-  #buy:hover  { background: rgba(34,224,123,.12); }
-  #sell { color: var(--red); border: 2px solid var(--red); }
-  #sell:hover { background: rgba(248,113,113,.12); }
-
-  #activity { background: var(--panel); border: 1px solid var(--edge);
-              border-radius: 8px; padding: 10px 14px; min-height: 90px; }
-  #activity h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px;
-                 text-transform: uppercase; margin-bottom: 6px; }
-  .line { padding: 2px 0; font-size: 12px; border-bottom: 1px dotted var(--edge); }
-  .line .t { color: var(--dim); }
-  .blocked { color: var(--red); }
+  .panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 14px; }
+  .panel h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px; text-transform: uppercase;
+              margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; font-size: 12px; }
+  .kv > span { color: var(--dim); } .kv > b { font-variant-numeric: tabular-nums; font-weight: 600; }
+  #activity { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+              padding: 10px 14px; min-height: 80px; }
+  #activity h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+  .aline { padding: 2px 0; font-size: 12px; border-bottom: 1px dotted var(--edge); }
   #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
            border: 1px solid var(--green); border-radius: 8px; padding: 10px 14px;
-           opacity: 0; transition: opacity .3s; max-width: 420px; font-size: 12px; }
-  #tabs { display: flex; gap: 6px; padding: 0 0 10px; }
-  .tab { background: transparent; border: 1px solid #223; color: #7c8aa0;
-         border-radius: 6px; padding: 5px 16px; cursor: pointer; font: inherit; }
-  .tab.active { background: #16201c; color: #dbe4f0; border-color: #2a5b46; }
-  #view-backtest label { display: flex; flex-direction: column; gap: 3px;
-         font-size: 11px; color: #7c8aa0; }
-  #view-backtest select, #view-backtest input { background: #0b0f17;
-         border: 1px solid #223; color: #dbe4f0; border-radius: 4px;
-         padding: 3px 6px; font: inherit; }
+           display: none; max-width: 420px; font-size: 12px; z-index: 60; }
 </style>
 </head>
 <body>
-<header>
-  <span class="brand">SENTINEL</span>
-  <span class="chip">SYSTEMATIC · PAPER · BINANCE TESTNET</span>
-  <span id="price">—</span>
-  <span class="dim" id="symbol"></span>
-  <span class="spacer"></span>
-  <span id="invs"></span>
-  <span id="conn" class="dim"><span class="dot bad"></span> connecting…</span>
-</header>
 
-<div id="tabs">
-  <button class="tab active" data-tab="terminal" onclick="switchTab('terminal')">Terminal</button>
-  <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</button>
-</div>
-
-<div id="view-terminal">
-<div id="stats">
-  <div class="stat"><span>Position (BTC)</span><b id="position">—</b></div>
-  <div class="stat"><span>Avg Entry</span><b id="avg">—</b></div>
-  <div class="stat"><span>Unrealized P&amp;L</span><b id="unreal">—</b></div>
-  <div class="stat"><span>Realized P&amp;L</span><b id="real">—</b></div>
-</div>
-
-<div id="tfbar">
-  <button class="tf" onclick="setTf('1m')">1m</button>
-  <button class="tf" onclick="setTf('5m')">5m</button>
-  <button class="tf" onclick="setTf('15m')">15m</button>
-  <button class="tf" onclick="setTf('1h')">1h</button>
-  <button class="tf" onclick="setTf('4h')">4h</button>
-  <button class="tf" onclick="setTf('1d')">1d</button>
-  <span id="sma-legend"></span>
-</div>
-<div id="chart"></div>
-
-<div id="sys">
-  <div class="panel">
-    <h2>Wallet <span class="pill" id="wallet-src">testnet</span></h2>
-    <div class="kv"><span>Equity</span><b id="wallet-equity">—</b></div>
-    <div id="wallet-balances"></div>
+<!-- ============================================================ OVERVIEW -->
+<div id="overview">
+  <div class="ovhead">
+    <span class="brand">SENTINEL</span>
+    <span class="pill" id="venue">multi-bot</span>
+    <div class="stat0"><b id="equity">—</b><span>equity</span></div>
+    <div class="stat0"><b id="cash">—</b><span>usdt</span></div>
+    <div class="stat0"><b><span class="dot" id="oms-dot"></span> <span id="oms">—</span></b><span>oms</span></div>
+    <div class="stat0"><b id="fails">0</b><span>task fails</span></div>
+    <div class="grow"></div>
+    <button class="btn add" id="addbtn">+ add instrument</button>
   </div>
-  <div class="panel">
-    <h2>OMS State <span class="dot" id="sys-dot"></span></h2>
-    <div class="kv"><span>Status</span><b id="sys-status">—</b></div>
-    <div class="kv"><span>Accepting cmds</span><b id="sys-accepting">—</b></div>
-    <div class="kv"><span>Queue depth</span><b id="sys-queue">—</b></div>
-    <div class="kv"><span>Reconciliations</span><b id="sys-recon">—</b></div>
-    <div class="kv"><span>Task failures</span><b id="sys-failures">—</b></div>
-    <div class="kv"><span>Feed age</span><b id="sys-feed">—</b></div>
-  </div>
-  <div class="panel">
-    <h2>Latency &amp; Throughput</h2>
-    <div class="kv"><span>Event apply</span>
-      <b id="lat-apply">—</b></div>
-    <div class="kv"><span>Order place</span>
-      <b id="lat-place">—</b></div>
-    <div class="kv"><span>Events applied</span><b id="thr-events">—</b></div>
-    <div class="kv"><span>Events / sec</span>
-      <b id="thr-eps">—</b></div>
-    <div class="kv"><span>Orders placed</span><b id="thr-placed">—</b></div>
-    <div class="kv"><span>Orders blocked</span><b id="thr-blocked">—</b></div>
-    <div class="kv"><span>Broker rejected</span><b id="thr-rejected">—</b></div>
-  </div>
-  <div class="panel">
-    <h2>Orders &amp; Fills</h2>
-    <div class="kv"><span>Total orders</span><b id="ord-total">—</b></div>
-    <div id="ord-states"></div>
-    <div class="kv"><span>Total fills</span><b id="ord-fills">—</b></div>
-    <div id="ord-working"></div>
-  </div>
-  <div class="panel" id="strat-panel">
-    <h2>Strategy <span class="pill" id="strat-name">—</span></h2>
-    <div class="kv"><span>Engine</span>
-      <select id="strat-select" onchange="selectStrategy(this.value)"
-              style="background:#0b0f17;border:1px solid #223;color:#dbe4f0;
-                     border-radius:4px;padding:2px 6px;font:inherit"></select></div>
-    <div class="kv"><span>State</span><b id="strat-state">—</b></div>
-    <div class="kv"><span>Wants</span><b id="strat-signal">—</b></div>
-    <div id="strat-rows"></div>
-    <div class="kv"><span>Last action</span><b id="strat-action">—</b></div>
-    <div class="kv"><span>Entry size</span>
-      <span style="display:flex;gap:4px;align-items:center">
-        <input id="strat-size" type="number" min="1" step="1"
-               style="width:64px;background:#0b0f17;border:1px solid #223;
-                      color:#dbe4f0;border-radius:4px;padding:2px 4px;
-                      font:inherit;text-align:right">
-        <span style="color:#7c8aa0">USDT</span>
-        <button class="tf" style="padding:2px 8px" onclick="setSize()">set</button>
-      </span></div>
-    <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
-            onclick="toggleStrategy()">▶ start</button>
-    <button class="tf" style="margin-top:6px;width:100%" onclick="switchTab('backtest')">
-      ↻ backtest on real data</button>
-  </div>
+  <div id="grid"></div>
 </div>
+<div id="picker"></div>
 
-
-<div id="activity">
-  <h2>Activity</h2>
-  <div id="decisions"></div>
-</div>
-</div><!-- /view-terminal -->
-
-<div id="view-backtest" style="display:none">
-  <div class="panel" style="max-width:940px;margin:8px auto">
-    <h2>Backtest <span class="pill">real mainnet data · Binance fees</span></h2>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin:12px 0">
-      <label>Strategy<select id="bt-strategy"></select></label>
-      <label>Interval<select id="bt-interval">
-        <option value="1h">1h</option><option value="4h">4h</option>
-        <option value="1d" selected>1d</option></select></label>
-      <label>Days<input id="bt-days" type="number" value="365" style="width:70px"></label>
-      <label>Cost bps<input id="bt-cost" type="number" value="10" style="width:64px"></label>
-      <label>Budget USDT<input id="bt-budget" type="number" value="1000" style="width:88px"></label>
-      <button class="tf" style="padding:5px 16px" onclick="runBacktestTab()">▶ run</button>
+<!-- ============================================================ TERMINAL -->
+<div id="terminal" style="display:none">
+  <div class="tmhead">
+    <button class="btn" onclick="showOverview()">‹ all bots</button>
+    <span class="brand">SENTINEL</span>
+    <span id="tprice">—</span>
+    <span class="dim" id="tsym"></span>
+    <span class="spacer"></span>
+    <span id="invs"></span>
+    <span class="dim" id="conn"><span class="dot bad"></span> live</span>
+  </div>
+  <div id="stats">
+    <div class="stat"><span>Position</span><b id="position">—</b></div>
+    <div class="stat"><span>Avg Entry</span><b id="avg">—</b></div>
+    <div class="stat"><span>Unrealized P&amp;L</span><b id="unreal">—</b></div>
+    <div class="stat"><span>Realized P&amp;L</span><b id="real">—</b></div>
+  </div>
+  <div id="tfbar">
+    <button class="tf" data-tf="1m">1m</button><button class="tf" data-tf="5m">5m</button>
+    <button class="tf" data-tf="15m">15m</button><button class="tf" data-tf="1h">1h</button>
+    <button class="tf" data-tf="4h">4h</button><button class="tf" data-tf="1d">1d</button>
+    <span style="margin-left:auto" class="dim" id="specline"></span>
+  </div>
+  <div id="chart"></div>
+  <div id="sys">
+    <div class="panel">
+      <h2>Wallet</h2>
+      <div class="kv"><span>Equity</span><b id="w-eq">—</b></div>
+      <div id="w-bal"></div>
     </div>
-    <div id="bt-result" style="color:#7c8aa0">
-      Pick a strategy and run a backtest on real mainnet history.</div>
+    <div class="panel">
+      <h2>OMS State <span class="dot" id="sdot"></span></h2>
+      <div class="kv"><span>Status</span><b id="s-status">—</b></div>
+      <div class="kv"><span>Accepting</span><b id="s-acc">—</b></div>
+      <div class="kv"><span>Queue depth</span><b id="s-q">—</b></div>
+      <div class="kv"><span>Reconciliations</span><b id="s-rec">—</b></div>
+      <div class="kv"><span>Task failures</span><b id="s-fail">—</b></div>
+      <div class="kv"><span>Price age</span><b id="s-age">—</b></div>
+    </div>
+    <div class="panel">
+      <h2>Latency &amp; Throughput</h2>
+      <div class="kv"><span>Event apply</span><b id="l-apply">—</b></div>
+      <div class="kv"><span>Order place</span><b id="l-place">—</b></div>
+      <div class="kv"><span>Events applied</span><b id="t-ev">—</b></div>
+      <div class="kv"><span>Orders placed</span><b id="t-pl">—</b></div>
+      <div class="kv"><span>Orders blocked</span><b id="t-bl">—</b></div>
+      <div class="kv"><span>Broker rejected</span><b id="t-rj">—</b></div>
+    </div>
+    <div class="panel">
+      <h2>Orders &amp; Fills <span class="pill" id="of-scope">this bot</span></h2>
+      <div id="o-work"></div>
+      <div class="kv"><span>Account orders</span><b id="o-total">—</b></div>
+      <div class="kv"><span>Account fills</span><b id="o-fills">—</b></div>
+    </div>
+    <div class="panel" id="strat-panel">
+      <h2>Strategy <span class="pill" id="st-name">—</span></h2>
+      <div class="kv"><span>Engine</span><select id="st-select"></select></div>
+      <div class="kv"><span>State</span><b id="st-state">—</b></div>
+      <div class="kv"><span>Wants</span><b id="st-wants">—</b></div>
+      <div id="st-rows"></div>
+      <div class="kv"><span>Last action</span><b id="st-last">—</b></div>
+      <div class="kv"><span>Entry size</span>
+        <span style="display:flex;gap:4px;align-items:center">
+          <input id="st-size" type="number" min="1" step="10" style="width:72px;text-align:right">
+          <span class="dim">USDT</span>
+          <button class="tf" onclick="setSize()">set</button></span></div>
+      <button class="tf" id="st-toggle" style="margin-top:8px;width:100%" onclick="toggleStrat()">▶ start</button>
+    </div>
   </div>
+  <div id="activity"><h2>Activity</h2><div id="decisions"></div></div>
 </div>
 
 <div id="toast"></div>
 
 <script>
 const $ = id => document.getElementById(id);
+const post = p => fetch(p, {method:'POST'}).then(r=>r.json());
+const toast = m => { const t=$("toast"); t.textContent=m; t.style.display='block';
+                     clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',2600); };
+const signed = v => { const n=parseFloat(v); return isNaN(n)?'—':(n>0?'+':'')+v; };
 
-const chart = LightweightCharts.createChart($("chart"), {
-  layout: { background: { color: "#101614" }, textColor: "#5e7268" },
-  grid: { vertLines: { color: "#16201c" }, horzLines: { color: "#16201c" } },
-  timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#1d2a25" },
-  rightPriceScale: { borderColor: "#1d2a25" },
-  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-});
-const series = chart.addCandlestickSeries({
-  upColor: "#22e07b", downColor: "#f87171",
-  wickUpColor: "#22e07b", wickDownColor: "#f87171",
-  borderVisible: false,
-});
-// Strategy overlays are dynamic: the strategy DECLARES them (view.overlays) and
-// SHIPS their values (series) computed on its own bars — the chart just plots
-// them, so it can never disagree with the decision (no client-side indicator
-// math). Line series are created lazily per key and reused.
-const overlaySeries = {};
-function overlayLine(key, color) {
-  if (!overlaySeries[key]) {
-    overlaySeries[key] = chart.addLineSeries({ color, lineWidth: 1.5,
-      priceLineVisible: false, lastValueVisible: false });
-  }
-  return overlaySeries[key];
+let account = {};
+const cards = {};                    // symbol -> {data, el, refs}
+let activeSym = null;                 // which bot the terminal view shows (null = overview)
+let chart=null, cseries=null, overlays={};
+
+// ------------------------------------------------------------------ websocket
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { $("conn").innerHTML = '<span class="dot ok"></span> live'; };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'account') onAccount(m);
+    else if (m.type === 'card') onCard(m);
+  };
+  ws.onclose = () => { $("conn").innerHTML='<span class="dot bad"></span> reconnecting'; setTimeout(connect,1000); };
 }
 
-new ResizeObserver(() =>
-  chart.applyOptions({ width: $("chart").clientWidth,
-                       height: $("chart").clientHeight })
-).observe($("chart"));
-
-let lastPrice = null;
-let lastInterval = null;    // chart timeframe (for overlay alignment)
-let candleData = [];        // maintained bar array (chart timeframe)
-
-// Hover tooltip for consolidated markers: candle time -> { BUY, SELL } each a
-// server-consolidated bucket (n, qty, price, detail[]). Hovering a bar with
-// trades expands the single arrow into its individual entries/exits.
-const markerDetail = new Map();
-const chartEl = $("chart");
-chartEl.style.position = "relative";
-const mtip = document.createElement("div");
-mtip.style.cssText =
-  "position:absolute;z-index:20;pointer-events:none;display:none;" +
-  "background:#0b0f17ee;border:1px solid #223;border-radius:6px;" +
-  "padding:6px 8px;font:11px/1.5 ui-monospace,monospace;color:#dbe4f0;" +
-  "box-shadow:0 4px 14px #000a;max-width:240px";
-chartEl.appendChild(mtip);
-
-chart.subscribeCrosshairMove(p => {
-  const bucket = p.time != null ? markerDetail.get(p.time) : null;
-  if (!bucket || !p.point) { mtip.style.display = "none"; return; }
-  const rows = [];
-  for (const side of ["BUY", "SELL"]) {
-    const b = bucket[side];
-    if (!b) continue;
-    const col = side === "BUY" ? "#22e07b" : "#f87171";
-    rows.push(`<div style="color:${col};font-weight:600">${side} ` +
-      `${b.n}× · ${b.qty} @ ${b.price}</div>`);
-    for (const f of b.detail) {
-      const hm = new Date(f.t * 1000).toLocaleTimeString(
-        undefined, { hour: "2-digit", minute: "2-digit" });
-      rows.push(`<div style="color:#7c8aa0">· ${hm} ${f.qty} @ ${f.price}</div>`);
-    }
-  }
-  mtip.innerHTML = rows.join("");
-  mtip.style.display = "block";
-  const w = chartEl.clientWidth;
-  mtip.style.left = Math.min(p.point.x + 12, w - 248) + "px";
-  mtip.style.top = Math.max(p.point.y - 8, 4) + "px";
-});
-
-function renderOverlays(st) {
-  // Draw the strategy's declared overlays from the series IT shipped. Only when
-  // the chart timeframe matches the strategy's decision interval — otherwise the
-  // series times wouldn't align, so we hide them and say where they live.
-  const legend = $("sma-legend");
-  const aligned = st && st.view && st.series && st.interval === lastInterval;
-  if (!aligned) {
-    for (const k in overlaySeries) overlaySeries[k].setData([]);
-    legend.innerHTML = (st && st.interval && st.interval !== lastInterval)
-      ? `<span style="color:#7c8aa0">overlays on ${st.interval}</span>` : "";
-    return;
-  }
-  const t0 = candleData.length ? candleData[0].t : 0;
-  const data = arr => (arr || [])
-    .filter(p => p.t >= t0)                     // keep the chart from extending left
-    .map(p => ({ time: p.t, value: p.v }));
-  const legendParts = [];
-  const active = new Set();
-  for (const ov of st.view.overlays) {
-    if (ov.kind === "line") {
-      active.add(ov.key);
-      overlayLine(ov.key, ov.color).setData(data(st.series[ov.key]));
-      legendParts.push(`<span style="color:${ov.color}">━ ${ov.label}</span>`);
-    } else if (ov.kind === "band") {
-      active.add("band:" + ov.upper); active.add("band:" + ov.lower);
-      overlayLine("band:" + ov.upper, ov.color).setData(data(st.series[ov.upper]));
-      overlayLine("band:" + ov.lower, ov.color).setData(data(st.series[ov.lower]));
-      legendParts.push(`<span style="color:${ov.color}">╌ ${ov.label}</span>`);
-    }
-  }
-  // Clear overlays from a previously-selected strategy (e.g. SMA's lines after
-  // switching to the regime engine).
-  for (const k in overlaySeries) if (!active.has(k)) overlaySeries[k].setData([]);
-  legend.innerHTML = legendParts.join(" ");
+function onAccount(a){
+  account = a;
+  // overview top bar
+  $("equity").textContent = a.wallet.equity ? a.wallet.equity+' '+a.wallet.quote : '—';
+  $("cash").textContent = a.wallet.balances[a.wallet.quote] || '0';
+  $("oms").textContent = a.halted ? 'HALTED' : (a.accepting ? 'LIVE' : 'starting');
+  $("oms").className = a.halted ? 'neg' : 'good';
+  $("oms-dot").className = 'dot ' + (a.halted ? 'bad' : 'ok');
+  $("fails").textContent = a.task_failures; $("fails").className = a.task_failures ? 'neg' : '';
+  for (const sym of Object.keys(cards)) if (!a.roster.includes(sym)) dropCard(sym);
+  renderPicker();
+  if (activeSym) paintTerminalAccount();
 }
 
-async function setTf(interval) {
-  await fetch("/timeframe/" + interval, { method: "POST" });
+function onCard(c){
+  if (!cards[c.symbol]) makeCard(c.symbol);
+  cards[c.symbol].data = c;
+  paintCard(c);
+  if (activeSym === c.symbol){ paintTerminalCard(c); refreshChart(c.symbol); }
 }
 
-let stratRunning = false;
-async function toggleStrategy() {
-  await fetch("/strategy/" + (stratRunning ? "stop" : "start"), { method: "POST" });
+// ------------------------------------------------------------------ overview cards
+function makeCard(sym){
+  const el = document.createElement('div'); el.className='card';
+  el.innerHTML = `
+    <div class="chead"><span class="sym" data-open>${sym}</span>
+      <span class="px" data-px>—</span><button class="x" title="close bot" data-x>✕</button></div>
+    <canvas class="spark" width="300" height="40" data-spark></canvas>
+    <div class="row"><span class="badge none" data-stance>—</span>
+      <div class="kvv"><b data-pos>0</b><span>position</span></div>
+      <div class="kvv"><b data-rpnl>—</b><span>realized</span></div>
+      <div class="kvv"><b data-upnl>—</b><span>unreal</span></div></div>
+    <div class="ctl"><select data-strat></select><button class="btn" data-go>start</button></div>
+    <div class="sizerow"><input data-size type="number" step="10" min="10"/>
+      <button class="btn" data-setsize>set usdt</button>
+      <span class="link" data-chart style="margin-left:auto">open ›</span></div>
+    <div class="foot"><span class="last" data-last>—</span><span data-work></span></div>`;
+  $("grid").appendChild(el);
+  const q = s => el.querySelector(s);
+  cards[sym] = { data:{}, el, refs:{ px:q('[data-px]'), spark:q('[data-spark]'), stance:q('[data-stance]'),
+    pos:q('[data-pos]'), rpnl:q('[data-rpnl]'), upnl:q('[data-upnl]'), strat:q('[data-strat]'),
+    go:q('[data-go]'), size:q('[data-size]'), last:q('[data-last]'), work:q('[data-work]') }};
+  q('[data-x]').onclick = () => closeBot(sym);
+  q('[data-go]').onclick = () => post(`/${sym}/strategy/${cards[sym].data.running?'stop':'start'}`);
+  q('[data-strat]').onchange = e => post(`/${sym}/strategy/select/${encodeURIComponent(e.target.value)}`);
+  q('[data-setsize]').onclick = () => { const v=q('[data-size]').value; if(v>0)
+    post(`/${sym}/size/${v}`).then(()=>toast(`${sym} size → ${v} USDT`)); };
+  q('[data-chart]').onclick = () => openTerminal(sym);
+  q('[data-open]').onclick = () => openTerminal(sym);
 }
-async function selectStrategy(name) {
-  await fetch("/strategy/select/" + encodeURIComponent(name), { method: "POST" });
+function dropCard(sym){ cards[sym]?.el.remove(); delete cards[sym]; if(activeSym===sym) showOverview(); }
+
+function paintCard(c){
+  const k = cards[c.symbol]; if(!k) return; const r=k.refs;
+  k.el.classList.toggle('run', !!c.running);
+  r.px.textContent = c.price ? Number(c.price).toLocaleString() : '—';
+  r.stance.textContent = c.stance || 'FLAT'; r.stance.className = 'badge '+(c.stance||'FLAT');
+  r.pos.textContent = c.position;
+  r.pos.className = parseFloat(c.position)>0?'pos':parseFloat(c.position)<0?'neg':'';
+  r.rpnl.textContent = signed(c.realized); r.rpnl.className = parseFloat(c.realized)>=0?'pos':'neg';
+  r.upnl.textContent = c.unrealized===null?'—':signed(c.unrealized);
+  r.upnl.className = parseFloat(c.unrealized)>=0?'pos':'neg';
+  if (r.strat.options.length !== (c.available||[]).length)
+    r.strat.innerHTML = (c.available||[]).map(n=>`<option>${n}</option>`).join('');
+  r.strat.value = c.selected; r.go.textContent = c.running?'stop':'start';
+  r.go.className = 'btn '+(c.running?'stopb':'go');
+  if (document.activeElement !== r.size) r.size.value = c.entry_usdt;
+  r.last.textContent = c.last_action || '—'; r.last.title = c.last_action||'';
+  r.work.textContent = c.working ? `${c.working} working` : '';
+  drawSpark(r.spark, c.spark, c.stance==='SHORT'?'--red':c.stance==='LONG'?'--green':'--dim');
+}
+function drawSpark(cv, pts, cssVar){
+  const ctx=cv.getContext('2d'), w=cv.width, h=cv.height; ctx.clearRect(0,0,w,h);
+  if(!pts||pts.length<2) return;
+  const mn=Math.min(...pts), mx=Math.max(...pts), rng=(mx-mn)||1;
+  ctx.beginPath(); pts.forEach((v,i)=>{ const x=i/(pts.length-1)*w, y=h-2-((v-mn)/rng)*(h-4);
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.strokeStyle=getComputedStyle(document.body).getPropertyValue(cssVar).trim();
+  ctx.lineWidth=1.5; ctx.stroke();
+}
+async function closeBot(sym){
+  if(!confirm(`Close ${sym}? Flattens its position and cancels its orders.`)) return;
+  toast(`closing ${sym}…`); const r = await post(`/instrument/remove/${sym}`);
+  toast(r.removed?`${sym} closed`:(r.error||'error'));
 }
 
-function switchTab(name) {
-  document.querySelectorAll(".tab").forEach(b =>
-    b.classList.toggle("active", b.dataset.tab === name));
-  $("view-terminal").style.display = name === "terminal" ? "" : "none";
-  $("view-backtest").style.display = name === "backtest" ? "" : "none";
-  if (name === "terminal")                         // chart was hidden -> re-fit
-    chart.applyOptions({ width: $("chart").clientWidth, height: $("chart").clientHeight });
+// ------------------------------------------------------------------ add picker
+function renderPicker(){
+  const avail = (account.predefined||[]).filter(s=>!(account.roster||[]).includes(s));
+  $("picker").innerHTML = avail.length ? avail.map(s=>`<div onclick="addBot('${s}')">${s}</div>`).join('')
+                                       : '<div class="dim">all added</div>';
 }
+$("addbtn").onclick = () => { const p=$("picker"), b=$("addbtn").getBoundingClientRect();
+  p.style.display = p.style.display==='block'?'none':'block';
+  p.style.top=(b.bottom+6)+'px'; p.style.left=b.left+'px'; };
+async function addBot(sym){ $("picker").style.display='none'; toast(`adding ${sym}…`);
+  const r = await post(`/instrument/add/${sym}`); toast(r.added?`${sym} added`:(r.error||'error')); }
+document.addEventListener('click', e => {
+  if(!$("picker").contains(e.target) && e.target!==$("addbtn")) $("picker").style.display='none'; });
 
-async function runBacktestTab() {
-  const p = new URLSearchParams({
-    strategy: $("bt-strategy").value,
-    interval: $("bt-interval").value,
-    days: $("bt-days").value || "365",
-    cost_bps: $("bt-cost").value || "10",
-    budget: $("bt-budget").value || "1000",
+// ------------------------------------------------------------------ terminal view
+function openTerminal(sym){
+  activeSym = sym;
+  $("overview").style.display='none'; $("terminal").style.display='block';
+  $("tsym").textContent = sym; $("of-scope").textContent = sym;
+  $("chart").innerHTML='';
+  chart = LightweightCharts.createChart($("chart"), {
+    layout:{ background:{color:'#101614'}, textColor:'#8aa' },
+    grid:{ vertLines:{color:'#17211d'}, horzLines:{color:'#17211d'} },
+    timeScale:{ timeVisible:true }, height:420 });
+  cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
+    wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
+  overlays = {};
+  paintTerminalAccount();
+  if (cards[sym]) paintTerminalCard(cards[sym].data);
+  refreshChart(sym);
+}
+function showOverview(){
+  activeSym=null; $("terminal").style.display='none'; $("overview").style.display='block';
+  if(chart){ chart.remove(); chart=null; }
+}
+$("tfbar").addEventListener('click', e => {
+  const iv = e.target.dataset.tf; if(!iv||!activeSym) return;
+  post(`/${activeSym}/timeframe/${iv}`).then(()=>refreshChart(activeSym)); });
+
+function fmtLat(x){ return x ? `${x.p50} · ${x.p95} · ${x.p99} ms` : '—'; }
+function paintTerminalAccount(){
+  const a=account, m=a.metrics||{}, c=m.counters||{}, l=m.latency||{}, g=m.gauges||{};
+  $("w-eq").textContent = a.wallet.equity ? a.wallet.equity+' '+a.wallet.quote : '—';
+  $("w-bal").innerHTML = Object.entries(a.wallet.balances||{}).map(([k,v])=>
+    `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  $("s-status").textContent = a.halted?'HALTED':'LIVE'; $("s-status").className = a.halted?'neg':'good';
+  $("sdot").className = 'dot '+(a.halted?'bad':'ok');
+  $("s-acc").textContent = a.accepting?'yes':'no';
+  $("s-q").textContent = g.queue_depth ?? 0;
+  $("s-rec").textContent = c.reconciliations ?? 0;
+  $("s-fail").textContent = a.task_failures; $("s-fail").className = a.task_failures?'neg':'';
+  $("l-apply").textContent = fmtLat(l.event_apply_ms); $("l-place").textContent = fmtLat(l.place_ms);
+  $("t-ev").textContent = c.events_applied ?? 0;
+  $("t-pl").textContent = c.orders_placed ?? 0;
+  $("t-bl").textContent = c.orders_blocked ?? 0;
+  $("t-rj").textContent = c.orders_rejected ?? 0; $("t-rj").className = c.orders_rejected?'warn':'';
+  $("o-total").textContent = a.orders?.orders_total ?? 0;
+  $("o-fills").textContent = a.orders?.fills_total ?? 0;
+  const inv = a.invariants||{}; const bad = Object.entries(inv).filter(([,v])=>!v).map(([k])=>k);
+  $("invs").innerHTML = bad.length ? `<span class="neg">⚠ ${bad.join(', ')}</span>`
+                                   : `<span class="good">✓ invariants</span>`;
+}
+function paintTerminalCard(c){
+  $("tprice").textContent = c.price ? Number(c.price).toLocaleString() : '—';
+  $("position").textContent = c.position;
+  $("position").className = parseFloat(c.position)>0?'pos':parseFloat(c.position)<0?'neg':'';
+  $("avg").textContent = c.avg_cost || '—';
+  $("unreal").textContent = c.unrealized===null?'—':signed(c.unrealized);
+  $("unreal").className = parseFloat(c.unrealized)>=0?'pos':'neg';
+  $("real").textContent = signed(c.realized); $("real").className = parseFloat(c.realized)>=0?'pos':'neg';
+  $("s-age").textContent = c.price_age!=null ? c.price_age+' s' : '—';
+  // strategy panel
+  $("st-name").textContent = c.strategy || '—';
+  if ($("st-select").options.length !== (c.available||[]).length)
+    $("st-select").innerHTML = (c.available||[]).map(n=>`<option>${n}</option>`).join('');
+  $("st-select").value = c.selected;
+  $("st-select").onchange = e => post(`/${activeSym}/strategy/select/${encodeURIComponent(e.target.value)}`);
+  $("st-state").textContent = c.running?'RUNNING':'paused'; $("st-state").className = c.running?'good':'warn';
+  $("st-wants").textContent = c.stance || '—';
+  $("st-last").textContent = c.last_action || '—';
+  if (document.activeElement !== $("st-size")) $("st-size").value = c.entry_usdt;
+  $("st-toggle").textContent = c.running?'■ stop':'▶ start';
+  $("specline").textContent = c.spec ? `lot ${c.spec.lot_step} · tick ${c.spec.tick} · min ${c.spec.min_notional} USDT` : '';
+  document.querySelectorAll('#tfbar .tf').forEach(b=>b.classList.toggle('active', b.dataset.tf===c.interval));
+}
+function toggleStrat(){ const c=cards[activeSym]?.data; post(`/${activeSym}/strategy/${c&&c.running?'stop':'start'}`); }
+function setSize(){ const v=$("st-size").value; if(v>0) post(`/${activeSym}/size/${v}`).then(()=>toast(`size → ${v} USDT`)); }
+
+function refreshChart(sym){
+  if(!chart || activeSym!==sym) return;
+  fetch(`/instrument/${sym}/detail`).then(r=>r.json()).then(d=>{
+    if(!chart || d.symbol!==activeSym) return;
+    if(d.candles) cseries.setData(d.candles.map(c=>({time:c.t,open:c.o,high:c.h,low:c.l,close:c.c})));
+    cseries.setMarkers((d.markers||[]).map(m=>({ time:m.t, position:m.side==='BUY'?'belowBar':'aboveBar',
+      color:m.side==='BUY'?'#22e07b':'#f87171', shape:m.side==='BUY'?'arrowUp':'arrowDown',
+      text:(m.n>1?`${m.n}× `:'')+m.qty })));
+    const view=d.strategy?.view||{}, series=d.strategy?.series||{};
+    (view.overlays||[]).forEach(ov=>{ if(!overlays[ov.key])
+      overlays[ov.key]=chart.addLineSeries({color:ov.color||'#a78bfa',lineWidth:1.5,priceLineVisible:false});
+      overlays[ov.key].setData((series[ov.key]||[]).map(p=>({time:p.t,value:p.value}))); });
+    $("st-rows").innerHTML = (view.rows||[]).map(row=>{ const v=(d.strategy.detail||{})[row.key];
+      return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
+    $("o-work").innerHTML = (d.working||[]).length
+      ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>
+          <b><span class="link" onclick="post('/${sym}/cancel/${o.key}')">${o.state} ✕</span></b></div>`).join('')
+      : '<div class="kv dim"><span>no working orders</span></div>';
+    $("decisions").innerHTML = (d.decisions||[]).map(x=>
+      `<div class="aline"><span class="dim">${(x.at||'').slice(11,19)}</span> ${x.actor||''} · ${x.decision||''}</div>`).join('')
+      || '<div class="dim">no activity yet</div>';
   });
-  $("bt-result").innerHTML = `<div style="padding:24px;color:#7c8aa0">
-    running on real mainnet history… (first run for a timeframe fetches the bars)</div>`;
-  try {
-    const r = await fetch("/backtest?" + p.toString(), { method: "POST" });
-    const d = await r.json();
-    $("bt-result").innerHTML = "";
-    if (d.error) {
-      $("bt-result").innerHTML = `<div style="padding:24px;color:#f87171">${d.error}</div>`;
-      return;
-    }
-    renderBacktest(d);
-  } catch (e) {
-    $("bt-result").innerHTML = `<div style="padding:24px;color:#f87171">${e}</div>`;
-  }
 }
 
-function btCurve(curve) {
-  if (!curve || !curve.length) return "";
-  const W = 560, H = 170, pad = 4;
-  const t0 = curve[0].t, t1 = curve[curve.length - 1].t;
-  const vals = curve.flatMap(p => [p.net, p.hold]);
-  const lo = Math.min(...vals), hi = Math.max(...vals);
-  const x = t => pad + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (W - 2 * pad);
-  const y = v => pad + (1 - (hi === lo ? 0 : (v - lo) / (hi - lo))) * (H - 2 * pad);
-  const line = (key, color) => `<polyline fill="none" stroke="${color}"
-    stroke-width="1.5" points="${curve.map(p => x(p.t).toFixed(1) + "," +
-    y(p[key]).toFixed(1)).join(" ")}"/>`;
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;
-    background:#0b0f17;border:1px solid #223;border-radius:6px">
-    ${line("hold", "#6b7280")}${line("net", "#fbbf24")}</svg>
-    <div style="display:flex;gap:16px;font-size:11px;margin-top:4px">
-      <span style="color:#fbbf24">━ strategy (net)</span>
-      <span style="color:#6b7280">━ buy &amp; hold</span></div>`;
-}
-
-function renderBacktest(d) {
-  const pct = x => (x * 100 >= 0 ? "+" : "") + (x * 100).toFixed(2) + "%";
-  const edge = d.net_return - d.buy_hold_return;
-  const row = (label, val, cls) => `<div class="kv"><span>${label}</span>` +
-    `<b class="${cls || ""}">${val}</b></div>`;
-  const rows = [
-    row("Net return", pct(d.net_return), d.net_return >= 0 ? "pos" : "neg"),
-    row("Buy &amp; hold", pct(d.buy_hold_return), d.buy_hold_return >= 0 ? "pos" : "neg"),
-    row("Edge vs hold", pct(edge) + " · " + (edge > 0 ? "beats" : "loses to") + " hold",
-        edge > 0 ? "pos" : "neg"),
-    row("Gross return", pct(d.gross_return)),
-    row("Sharpe (net)", d.sharpe.toFixed(2), d.sharpe >= 0 ? "pos" : "neg"),
-    row("Max drawdown", (d.max_drawdown * 100).toFixed(1) + "%", "neg"),
-    row("Trades", d.trades),
-    row("Fees paid", d.fees.toFixed(2) + " USDT"),
-  ].join("");
-  $("bt-result").innerHTML =
-    `<div style="color:#7c8aa0;font-size:11px;margin-bottom:8px">${d.strategy} · ` +
-    `${d.interval} · ${d.bars} bars · ${d.days}d · budget ${d.budget.toFixed(0)} USDT</div>` +
-    btCurve(d.curve) + `<div style="margin-top:10px">${rows}</div>`;
-}
-async function setSize() {
-  const v = $("strat-size").value.trim();
-  if (!v || parseFloat(v) <= 0) return;
-  await fetch("/strategy/size/" + encodeURIComponent(v), { method: "POST" });
-}
-
-function fmtRow(kind, val) {
-  if (val == null) return { text: "—", cls: "" };
-  if (kind === "regime")
-    return { text: val, cls: val === "TREND" ? "good" : "warn" };
-  if (kind === "signed") {
-    const n = parseFloat(val);
-    return { text: val, cls: n < 0 ? "neg" : n > 0 ? "pos" : "" };
-  }
-  if (kind === "weight")
-    return { text: Math.round(parseFloat(val) * 100) + "%", cls: "" };
-  return { text: val, cls: "" };
-}
-
-function renderStrategy(st) {
-  if (!st) { $("strat-panel").style.display = "none"; return; }
-  stratRunning = st.running;
-  // Populate the engine dropdowns (live selector + backtest tab) once.
-  if (st.available) {
-    const opts = st.available.map(n => `<option value="${n}">${n}</option>`).join("");
-    for (const id of ["strat-select", "bt-strategy"]) {
-      const el = $(id);
-      if (el && el.dataset.opts !== st.available.join(",")) {
-        el.innerHTML = opts; el.dataset.opts = st.available.join(",");
-        if (id === "bt-strategy" && st.selected) el.value = st.selected;
-      }
-    }
-  }
-  const sel = $("strat-select");
-  if (st.selected && document.activeElement !== sel) sel.value = st.selected;
-  $("strat-name").textContent = st.name;
-  $("strat-state").textContent = st.running ? "RUNNING" : "paused";
-  $("strat-state").className = st.running ? "good" : "warn";
-  const stance = st.stance || (st.detail && st.detail.warming_up ? "warming" : "—");
-  $("strat-signal").textContent = stance;
-  $("strat-signal").className =
-    stance === "LONG" ? "good" : stance === "FLAT" ? "warn" : "";
-
-  // Strategy-specific rows: the strategy DECLARES them (view.rows); we pull the
-  // values from detail. Warm-up shows progress instead.
-  const rows = $("strat-rows");
-  if (st.detail && st.detail.warming_up) {
-    rows.innerHTML = `<div class="kv"><span>Warming up</span>` +
-      `<b class="warn">${st.detail.have}/${st.detail.need}</b></div>`;
-  } else {
-    rows.innerHTML = ((st.view && st.view.rows) || []).map(r => {
-      const f = fmtRow(r.kind, st.detail ? st.detail[r.key] : null);
-      return `<div class="kv"><span>${r.label}</span>` +
-        `<b class="${f.cls}">${f.text}</b></div>`;
-    }).join("");
-  }
-
-  $("strat-action").textContent = st.last_action || "—";
-  const sizeEl = $("strat-size");
-  if (st.entry_usdt != null && document.activeElement !== sizeEl)
-    sizeEl.value = parseFloat(st.entry_usdt);   // don't clobber mid-type
-  const btn = $("strat-toggle");
-  btn.textContent = st.running ? "■ stop" : "▶ start";
-  btn.classList.toggle("active", st.running);
-}
-
-function render(s) {
-  $("symbol").textContent = s.symbol + " · " + s.interval;
-  lastInterval = s.interval;
-  if (s.price) {
-    const p = parseFloat(s.price);
-    $("price").textContent = p.toLocaleString(undefined,
-      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    $("price").style.color =
-      lastPrice === null || p === lastPrice ? "#cfe3da"
-      : p > lastPrice ? "#22e07b" : "#f87171";
-    lastPrice = p;
-  }
-  $("invs").innerHTML = Object.entries(s.invariants).map(([k, ok]) =>
-    `<span class="dot ${ok ? "ok" : "bad"}" title="${k}"></span>`).join(" ");
-
-  $("position").textContent = s.position;
-  $("avg").textContent = s.avg_cost ?? "—";
-  const money = (el, v) => {
-    if (v === null) { el.textContent = "—"; el.className = ""; return; }
-    const up = !v.startsWith("-");
-    el.textContent = (up ? "+" : "") + v;
-    el.className = up ? "pos" : "neg";
-  };
-  money($("unreal"), s.unrealized);
-  money($("real"), s.realized);
-
-  const toBar = c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c });
-  if (s.candles) {                          // full history: initial OR tf switch
-    candleData = s.candles.slice();
-    series.setData(s.candles.map(toBar));
-  } else if (s.candle) {                    // delta frames: the forming bar only
-    const last = candleData[candleData.length - 1];
-    if (last && last.t === s.candle.t) candleData[candleData.length - 1] = s.candle;
-    else candleData.push(s.candle);
-    series.update(toBar(s.candle));
-  }
-  renderOverlays(s.strategy);                // strategy-authored overlays
-  document.querySelectorAll(".tf").forEach(b =>
-    b.classList.toggle("active", b.textContent === s.interval));
-  // Markers arrive already consolidated to one bucket per (candle, side) and
-  // aligned to candle-open times. We just render an arrow per bucket (its `n`
-  // shown when >1) and index the buckets by time so the crosshair handler can
-  // expand them into individual fills on hover. Buckets whose candle isn't in
-  // the current window are skipped — they'd clamp onto the last bar otherwise.
-  if (s.markers && candleData.length) {
-    const times = new Set(candleData.map(c => c.t));
-    markerDetail.clear();
-    const markers = [];
-    for (const m of s.markers) {
-      if (!times.has(m.t)) continue;                       // outside window
-      (markerDetail.get(m.t) || markerDetail.set(m.t, {}).get(m.t))[m.side] = m;
-      markers.push({
-        time: m.t,
-        position: m.side === "BUY" ? "belowBar" : "aboveBar",
-        color: m.side === "BUY" ? "#22e07b" : "#f87171",
-        shape: m.side === "BUY" ? "arrowUp" : "arrowDown",
-        text: (m.side === "BUY" ? "B" : "S") + (m.n > 1 ? "×" + m.n : ""),
-      });
-    }
-    markers.sort((a, b) => a.time - b.time);               // required ascending
-    series.setMarkers(markers);
-  }
-
-
-  $("decisions").innerHTML = s.decisions.map(d => {
-    const cls = d.decision.includes("BLOCKED") ? "blocked" : "";
-    return `<div class="line"><span class="t">#${d.seq}</span>
-      <span class="${cls}">${d.decision}</span>
-      ${d.detail.key ?? ""} ${d.detail.reason ?? ""}</div>`;
-  }).join("");
-
-  $("conn").innerHTML = s.halted
-    ? '<span class="dot bad"></span> HALTED'
-    : `<span class="dot ok"></span> live · feed ${s.price_age ?? "—"}s`;
-
-  renderSys(s);
-}
-
-const lat = (h) => h && h.p50 != null
-  ? `${h.p50}<span class="unit"> p50</span> · ${h.p95}<span class="unit"> p95</span> · ${h.p99 ?? "—"}<span class="unit"> p99</span> ms`
-  : "—";
-
-const fmtAmt = (v) => {
-  const n = parseFloat(v);
-  if (!isFinite(n)) return v;
-  const d = Math.abs(n) >= 1000 ? 2 : Math.abs(n) >= 1 ? 4 : 8;
-  return n.toLocaleString(undefined, { maximumFractionDigits: d });
-};
-
-function renderWallet(w) {
-  if (!w) return;
-  const eq = $("wallet-equity");
-  eq.textContent = w.equity != null
-    ? fmtAmt(w.equity) + " " + w.quote : "—";
-  $("wallet-src").textContent = "live stream";
-  const assets = Object.keys(w.balances || {});
-  $("wallet-balances").innerHTML = assets.length
-    ? assets.map(a =>
-        `<div class="kv"><span>${a}</span><b>${fmtAmt(w.balances[a])}</b></div>`
-      ).join("")
-    : '<div class="kv"><span class="dim">no balances</span><b></b></div>';
-}
-
-function renderSys(s) {
-  renderWallet(s.wallet);
-  renderStrategy(s.strategy);
-  const m = s.metrics || {};
-  const c = m.counters || {}, g = m.gauges || {}, r = m.rates || {}, L = m.latency || {};
-
-  // --- OMS state ---
-  const dot = $("sys-dot");
-  dot.className = "dot " + (s.halted ? "bad" : "ok");
-  $("sys-status").textContent = s.halted ? "HALTED" : "LIVE";
-  $("sys-status").className = s.halted ? "neg" : "good";
-  $("sys-accepting").textContent = s.accepting ? "yes" : "no";
-  $("sys-accepting").className = s.accepting ? "good" : "warn";
-
-  const q = g.queue_depth ?? 0;
-  $("sys-queue").textContent = q;
-  $("sys-queue").className = q > 0 ? "warn" : "";
-
-  $("sys-recon").textContent = c.reconciliations ?? 0;
-  const f = s.task_failures ?? 0;
-  $("sys-failures").textContent = f;
-  $("sys-failures").className = f > 0 ? "neg" : "good";
-  $("sys-feed").innerHTML = (s.price_age ?? "—") + '<span class="unit"> s</span>';
-
-  // --- latency & throughput ---
-  $("lat-apply").innerHTML = lat(L.event_apply_ms);
-  $("lat-place").innerHTML = lat(L.place_ms);
-  $("thr-events").textContent = c.events_applied ?? 0;
-  $("thr-eps").innerHTML = (r.events_applied ?? 0) + '<span class="unit"> /s</span>';
-  $("thr-placed").textContent = c.orders_placed ?? 0;
-  const blk = c.orders_blocked ?? 0;
-  $("thr-blocked").textContent = blk;
-  $("thr-blocked").className = blk > 0 ? "warn" : "";
-  const rej = c.orders_rejected ?? 0;
-  $("thr-rejected").textContent = rej;
-  $("thr-rejected").className = rej > 0 ? "neg" : "";
-
-  // --- orders & fills ---
-  const ord = s.orders || {};
-  $("ord-total").textContent = ord.orders_total ?? 0;
-  $("ord-fills").textContent = ord.fills_total ?? 0;
-  const states = ord.states || {};
-  const order = ["CREATED", "SUBMITTING", "WORKING", "PARTIAL",
-                 "CANCEL_PENDING", "UNKNOWN", "RECONCILING",
-                 "FILLED", "CANCELED", "REJECTED"];
-  const keys = Object.keys(states).sort(
-    (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
-  $("ord-states").innerHTML = keys.length
-    ? '<div class="kv" style="flex-wrap:wrap;gap:4px"><span>By state</span><span>' +
-      keys.map(k => `<span class="pill">${k} ${states[k]}</span>`).join(" ") +
-      '</span></div>'
-    : "";
-
-  // Resting orders: the strategy's live maker entries (and anything else
-  // working). Show price + progress + a cancel control.
-  const working = s.working || [];
-  $("ord-working").innerHTML = working.length
-    ? '<div style="margin-top:6px;color:#7c8aa0;font-size:11px">RESTING</div>' +
-      working.map(o => {
-        const px = o.limit_price != null ? "@ " + o.limit_price : "mkt";
-        const prog = parseFloat(o.filled) > 0 ? ` · ${o.filled}/${o.qty}` : "";
-        const cancelable = ["WORKING", "PARTIAL"].includes(o.state);
-        return `<div class="kv" style="gap:6px">
-          <span>${o.side} ${o.qty} ${px}<span style="color:#7c8aa0"> ${o.state}${prog}</span></span>
-          ${cancelable
-            ? `<button class="tf" style="padding:1px 7px"
-                 onclick="cancelOrder('${o.key}')">cancel</button>`
-            : ""}</div>`;
-      }).join("")
-    : "";
-}
-
-async function cancelOrder(key) {
-  await fetch("/cancel/" + encodeURIComponent(key), { method: "POST" });
-}
-
-function connect() {
-  const ws = new WebSocket(
-    (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-  ws.onmessage = ev => render(JSON.parse(ev.data));
-  ws.onclose = () => {
-    $("conn").innerHTML = '<span class="dot bad"></span> reconnecting…';
-    setTimeout(connect, 1000);
-  };
-}
 connect();
 </script>
 </body>

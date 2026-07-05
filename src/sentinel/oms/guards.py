@@ -7,6 +7,7 @@ of the integrity model rather than best-effort hygiene.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 
@@ -20,15 +21,23 @@ from .errors import (
     PositionLimitReached,
 )
 
+# The signed exposure cap can be a single value (one-symbol deployments) or a
+# per-instrument resolver (multi-bot: BTC caps at 0.05, ETH at 1.0, ...).
+MaxPosition = "Decimal | Callable[[str], Decimal | None] | None"
+
 
 class ExposureGuards:
     def __init__(self, store: LedgerStore, *,
-                 max_position: Decimal | None = None) -> None:
+                 max_position=None) -> None:
         self._store = store
         # Signed exposure cap (base units). None on spot (budget bounds size,
         # and you can't short anyway); futures sets a hard cap so a bad strategy
         # can never open more than the authorized |position|, in EITHER direction.
+        # A callable is resolved per instrument so each bot has its OWN cap.
         self._max = max_position
+
+    def _cap(self, instrument: str) -> Decimal | None:
+        return self._max(instrument) if callable(self._max) else self._max
 
     async def check_entry(self, intent: EconomicOrderIntent) -> EconomicOrderIntent:
         """Entries are refused while the instrument holds unprovable state
@@ -45,16 +54,17 @@ class ExposureGuards:
             raise DuplicateEntryBlocked(
                 f"{intent.instrument}: a live ENTRY order already exists"
             )
-        if self._max is None:
+        cap = self._cap(intent.instrument)
+        if cap is None:
             return intent
         position = await self._store.get_position(intent.instrument)
         signed = intent.qty if intent.side is Side.BUY else -intent.qty
-        if abs(position + signed) <= self._max:
+        if abs(position + signed) <= cap:
             return intent
-        headroom = self._max - abs(position)          # room to grow |exposure|
+        headroom = cap - abs(position)                # room to grow |exposure|
         if headroom <= 0:
             raise PositionLimitReached(
-                f"{intent.instrument}: position {position} at cap {self._max}"
+                f"{intent.instrument}: position {position} at cap {cap}"
             )
         return replace(intent, qty=min(intent.qty, Decimal(headroom)))
 

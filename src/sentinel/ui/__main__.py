@@ -1,11 +1,16 @@
-"""Run the Sentinel paper-trading terminal against Binance testnet:
+"""Run the Sentinel paper-trading terminal against a testnet:
 
     python -m sentinel.ui        ->  http://localhost:8000
 
-Needs: docker compose postgres (:5433) and BINANCE_TESTNET_KEY/SECRET in
-.env. The ledger PERSISTS across restarts — startup recovery reconciles any
-non-terminal orders against the real exchange before the page goes live.
-That is not a demo behavior; that is the system.
+Needs: docker compose postgres (:5433) and the venue's keys in .env. The ledger
+PERSISTS across restarts — startup recovery reconciles any non-terminal orders
+against the real exchange before the page goes live. That is not a demo
+behavior; that is the system.
+
+Multi-bot: the terminal runs one bot per instrument, all on ONE account/ledger.
+SENTINEL_SYMBOLS (comma-separated) seeds the initial roster; the UI '+' adds
+more from the venue's predefined list. Every symbol's lot/tick/min rules are
+fetched from the exchange — nothing is hardcoded.
 """
 
 from __future__ import annotations
@@ -22,31 +27,58 @@ from sentinel.broker.binance import BinanceFuturesAdapter, BinanceSpotAdapter
 from sentinel.ledger import apply_migrations
 from sentinel.runtime import SentinelApp
 from sentinel.ui.bars import BarFeed
+from sentinel.ui.instruments import fetch_binance_spec, fetch_bybit_spec
+from sentinel.ui.market import REST_BASE as SPOT_REST
 from sentinel.ui.market import MarketData
-from sentinel.ui.server import build_ui
+from sentinel.ui.server import Venue, build_ui
 
 DEFAULT_DB = "postgresql://sentinel:sentinel@127.0.0.1:5433/sentinel"
 SYMBOL = os.environ.get("SENTINEL_SYMBOL", "BTCUSDT")
 FUT_REST = "https://demo-fapi.binance.com"       # Binance Demo Trading (demo.binance.com)
 FUT_STREAM = "wss://demo-fstream.binance.com"
 
+# Hard exposure ceiling per bot, as a max notional (USDT). Turned into a
+# base-unit cap at each symbol's price, so it means the same risk on BTC as DOGE.
+MAX_NOTIONAL = Decimal(os.environ.get("SENTINEL_MAX_NOTIONAL", "5000"))
 
-def _venue():
-    """Select spot (long/flat) or USDT-M futures (long/short) by SENTINEL_VENUE.
-    Returns (adapter, market, bar_feed, max_position, allow_short)."""
+# The menu the "+" offers. These are just NAMES — each symbol's real trading
+# rules (lot/tick/mins) are fetched from the exchange when it's added, and the
+# add is refused if the exchange doesn't list it.
+PERP_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT")
+SPOT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "LTCUSDT")
+
+
+def _notional_cap(spec, price):
+    """A fixed max notional -> this symbol's base-unit exposure cap at `price`.
+    None means no cap (spot: can't short, and the budget already bounds size)."""
+    if price and price > 0:
+        return spec.round_qty(MAX_NOTIONAL / price)
+    return None
+
+
+def _venue() -> Venue:
+    """Assemble the account's Venue: one shared adapter + per-symbol factories
+    that fetch rules FROM the exchange. SENTINEL_VENUE picks spot (long/flat) /
+    Binance-futures / Bybit (both long/short)."""
     interval = os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m")
     venue = os.environ.get("SENTINEL_VENUE")
+
     if venue == "bybit":
-        # Bybit V5 USDT-perp testnet — execution AND price on the same venue, so
-        # the peg quotes against the book its orders land in (no cross-venue
-        # basis). Generally open, faucet-funded.
         from sentinel.broker.bybit import BybitFuturesAdapter
+        from sentinel.ui.bybit_market import REST_BASE as BYBIT_REST
         from sentinel.ui.bybit_market import BybitBarFeed, BybitMarketData
         adapter = BybitFuturesAdapter(
-            os.environ["BYBIT_KEY"], os.environ["BYBIT_SECRET"], symbols=(SYMBOL,))
-        cap = Decimal(os.environ.get("SENTINEL_MAX_POSITION", "0.05"))
-        return (adapter, BybitMarketData(SYMBOL), BybitBarFeed(SYMBOL, interval),
-                cap, True)
+            os.environ["BYBIT_KEY"], os.environ["BYBIT_SECRET"], symbols=PERP_SYMBOLS)
+        return Venue(
+            adapter=adapter, allow_short=True, predefined=PERP_SYMBOLS,
+            default_symbol=SYMBOL, default_interval=interval,
+            make_market=lambda s: BybitMarketData(s),
+            make_bars=lambda s, iv: BybitBarFeed(s, iv),
+            fetch_spec=lambda s: fetch_bybit_spec(BYBIT_REST, s),
+            cap_for=_notional_cap,
+        )
+
     if venue == "futures":
         # Default: Binance Demo Trading (demo-fapi). Override for the classic
         # auto-funded testnet: SENTINEL_FUT_REST=https://testnet.binancefuture.com
@@ -55,18 +87,30 @@ def _venue():
         stream = os.environ.get("SENTINEL_FUT_STREAM", FUT_STREAM)
         adapter = BinanceFuturesAdapter(
             os.environ["BINANCE_FUTURES_KEY"], os.environ["BINANCE_FUTURES_SECRET"],
-            symbols=(SYMBOL,), base_url=rest, ws_base=stream,
+            symbols=PERP_SYMBOLS, base_url=rest, ws_base=stream,
             leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")))
-        mkt = MarketData(SYMBOL, rest_base=rest, stream_base=stream,
-                         kline_path="/fapi/v1/klines")
-        bars = BarFeed(SYMBOL, interval, rest_base=rest, stream_base=stream,
-                       kline_path="/fapi/v1/klines")
-        cap = Decimal(os.environ.get("SENTINEL_MAX_POSITION", "0.05"))  # hard exposure cap
-        return adapter, mkt, bars, cap, True
+        return Venue(
+            adapter=adapter, allow_short=True, predefined=PERP_SYMBOLS,
+            default_symbol=SYMBOL, default_interval=interval,
+            make_market=lambda s: MarketData(s, rest_base=rest, stream_base=stream,
+                                             kline_path="/fapi/v1/klines"),
+            make_bars=lambda s, iv: BarFeed(s, iv, rest_base=rest, stream_base=stream,
+                                            kline_path="/fapi/v1/klines"),
+            fetch_spec=lambda s: fetch_binance_spec(rest, "/fapi/v1/exchangeInfo", s),
+            cap_for=_notional_cap,
+        )
+
     adapter = BinanceSpotAdapter(
         os.environ["BINANCE_TESTNET_KEY"], os.environ["BINANCE_TESTNET_SECRET"],
-        symbols=(SYMBOL,))
-    return adapter, MarketData(SYMBOL), BarFeed(SYMBOL, interval), None, False
+        symbols=SPOT_SYMBOLS)
+    return Venue(
+        adapter=adapter, allow_short=False, predefined=SPOT_SYMBOLS,
+        default_symbol=SYMBOL, default_interval=interval,
+        make_market=lambda s: MarketData(s),
+        make_bars=lambda s, iv: BarFeed(s, iv),
+        fetch_spec=lambda s: fetch_binance_spec(SPOT_REST, "/api/v3/exchangeInfo", s),
+        cap_for=lambda spec, price: None,
+    )
 
 
 def load_env() -> None:
@@ -80,9 +124,9 @@ def load_env() -> None:
 
 def _build_registry() -> dict:
     """The strategies the operator can select from at runtime, as FACTORIES
-    (each call is a fresh, unwarmed instance) — the live runner and a backtest
-    each need their own. 'regime' is the v2 engine (Donchian breakout gated by
-    an ADX regime filter + vol-target conviction)."""
+    (each call is a fresh, unwarmed instance) — every bot and any backtest each
+    need their own. 'regime' is the v2 engine (Donchian breakout gated by an ADX
+    regime filter + vol-target conviction)."""
     from sentinel.strategy import Params, RegimeTrendMR, SmaCross
     sma_fast = int(os.environ.get("SENTINEL_SMA_FAST", "5"))
     sma_slow = int(os.environ.get("SENTINEL_SMA_SLOW", "20"))
@@ -107,19 +151,27 @@ async def _serve() -> None:
     async with pool.acquire() as conn:
         await apply_migrations(conn)
 
-    adapter, market, strategy_bars, max_position, allow_short = _venue()
-    # dsn -> single-writer enforcement: refuse to boot if another process
-    # already owns this account/database. max_position caps futures exposure.
-    app = SentinelApp(pool, adapter, dsn=dsn, max_position=max_position)
+    venue = _venue()
+    # Per-symbol exposure caps live in this shared dict; the guard resolves each
+    # instrument's cap through it. The manager fills it as bots are added.
+    caps: dict[str, Decimal | None] = {}
+    # dsn -> single-writer enforcement: refuse to boot if another process already
+    # owns this account/database.
+    app = SentinelApp(pool, venue.adapter, dsn=dsn,
+                      max_position=lambda sym: caps.get(sym))
 
+    initial = tuple(
+        s.strip().upper()
+        for s in os.environ.get("SENTINEL_SYMBOLS", SYMBOL).split(",")
+        if s.strip()
+    )
     ui = build_ui(
-        app, market,
-        trade_qty=Decimal(os.environ.get("SENTINEL_TRADE_QTY", "0.0002")),
+        app, venue,
         strategies=_build_registry(),
         default_strategy=os.environ.get("SENTINEL_STRATEGY", "sma"),
         strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
-        strategy_bars=strategy_bars,
-        allow_short=allow_short,
+        caps=caps,
+        initial_symbols=initial,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

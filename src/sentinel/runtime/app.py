@@ -34,18 +34,22 @@ _RECON_MAX_RETRIES = 5
 
 
 class ChangeSignal:
-    """Event-driven UI notifier. bump() on any state change; wait_past() blocks
-    a viewer until the world is newer than what it last rendered. A monotonic
-    revision + Condition (not a bare Event) so multiple viewers fan out
-    correctly and no wakeup is lost."""
+    """Event-driven UI notifier, per TOPIC. bump(topic) on a state change;
+    wait_past() blocks a viewer until the world is newer than what it last
+    rendered, and topics_since() tells it WHICH topics moved so it can patch
+    just those (one bot card, or 'account') instead of reflushing everything.
+    A monotonic revision + Condition (not a bare Event) so multiple viewers fan
+    out correctly and no wakeup is lost."""
 
     def __init__(self) -> None:
         self._cond = asyncio.Condition()
         self.revision = 0
+        self._topics: dict[str, int] = {}     # topic -> revision at last change
 
-    async def bump(self) -> None:
+    async def bump(self, topic: str = "account") -> None:
         async with self._cond:
             self.revision += 1
+            self._topics[topic] = self.revision
             self._cond.notify_all()
 
     async def wait_past(self, seen: int, *, timeout: float) -> int:
@@ -57,6 +61,11 @@ class ChangeSignal:
             except asyncio.TimeoutError:
                 pass  # heartbeat: return current revision even if unchanged
             return self.revision
+
+    def topics_since(self, seen: int) -> list[str]:
+        """Topics whose last change is newer than `seen` — the set a viewer at
+        revision `seen` still needs to be told about."""
+        return [t for t, rev in self._topics.items() if rev > seen]
 
 
 class SentinelApp:

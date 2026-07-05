@@ -72,6 +72,24 @@ class TaskSupervisor:
             log.critical("task %s failed (%r); HALTING", child.name, error)
             self.halted.set()
 
+    async def cancel(self, name: str) -> None:
+        """Cancel and forget the tasks with this name — used to tear down ONE
+        bot (its market/bars/strategy tasks) without touching the others. Awaits
+        cleanup; a cancelled task records no failure and does not restart."""
+        keep: list[_Child] = []
+        for child in self._children:
+            if child.name != name:
+                keep.append(child)
+                continue
+            task = child.task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._children = keep
+
     async def shutdown(self) -> None:
         """Cancel children newest-first and await each: cleanup always runs,
         and no accepted work is abandoned mid-await."""

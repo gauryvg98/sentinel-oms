@@ -57,6 +57,11 @@ _STATUS_MAP = {
     "FILLED": BrokerOrderState.FILLED,
     "CANCELED": BrokerOrderState.CANCELED,
     "EXPIRED": BrokerOrderState.CANCELED,
+    # STP (self-trade prevention): a maker peg that would cross this account's
+    # OWN resting order is expired in-match. Terminal, no residual — the remainder
+    # is dead (any real fills arrived as separate TRADE events). Common when many
+    # bots share one account and their pegs collide.
+    "EXPIRED_IN_MATCH": BrokerOrderState.CANCELED,
     "REJECTED": BrokerOrderState.REJECTED,
 }
 
@@ -82,7 +87,7 @@ def parse_futures_event(payload: dict) -> BrokerEvent | None:
             qty=Decimal(o["l"]),          # last filled qty
             price=Decimal(o["L"]),        # last filled price
         )
-    if x in ("CANCELED", "EXPIRED"):
+    if x in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"):
         return BrokerCancelConfirmed(client_order_id=o["c"])
     return None
 

@@ -144,6 +144,17 @@ def test_parse_order_trade_update_cancel():
     assert isinstance(ev, BrokerCancelConfirmed) and ev.client_order_id == "K1"
 
 
+def test_parse_stp_expired_in_match_is_a_cancel():
+    # Self-trade prevention expiry — terminal, no residual. Must resolve like a
+    # cancel, not crash recovery with an unmapped status (KeyError halted boot).
+    from sentinel.broker.binance.futures import _STATUS_MAP
+    from sentinel.broker.adapter import BrokerOrderState
+    assert _STATUS_MAP["EXPIRED_IN_MATCH"] is BrokerOrderState.CANCELED
+    ev = parse_futures_event({"e": "ORDER_TRADE_UPDATE",
+                              "o": {"c": "K1", "x": "EXPIRED_IN_MATCH"}})
+    assert isinstance(ev, BrokerCancelConfirmed) and ev.client_order_id == "K1"
+
+
 def test_parse_account_update_balances():
     ev = parse_futures_event({"e": "ACCOUNT_UPDATE", "a": {
         "B": [{"a": "USDT", "wb": "9500.5"}]}})

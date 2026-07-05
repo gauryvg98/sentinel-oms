@@ -54,6 +54,7 @@ def _build_registry() -> dict:
     )
     return {
         "sma": lambda: SmaCross(fast=sma_fast, slow=sma_slow),
+        "sma-ls": lambda: SmaCross(fast=sma_fast, slow=sma_slow, short=True),
         "regime": lambda: RegimeTrendMR(regime_params),
     }
 

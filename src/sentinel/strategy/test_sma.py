@@ -51,6 +51,15 @@ def test_flips_long_to_flat_across_a_reversal():
     assert Stance.FLAT in stances[last_long + 1:]
 
 
+def test_long_short_variant_shorts_below_the_cross():
+    # short=True -> below the cross is SHORT (not FLAT): always in the market,
+    # can profit in a downtrend on a shorting venue.
+    plain = feed(SmaCross(fast=2, slow=4), [10, 11, 12, 5, 4, 3])
+    ls = feed(SmaCross(fast=2, slow=4, short=True), [10, 11, 12, 5, 4, 3])
+    assert Stance.FLAT in plain and Stance.SHORT not in plain
+    assert Stance.SHORT in ls and Stance.FLAT not in ls
+
+
 def test_is_deterministic():
     prices = [10, 11, 9, 12, 8, 13, 7, 14, 15, 16, 5, 4, 3]
 

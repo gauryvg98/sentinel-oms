@@ -23,8 +23,9 @@ from typing import Any, Protocol, runtime_checkable
 
 
 class Stance(str, Enum):
-    LONG = "LONG"   # want to be holding
-    FLAT = "FLAT"   # want to be out
+    LONG = "LONG"    # want positive exposure
+    FLAT = "FLAT"    # want to be out
+    SHORT = "SHORT"  # want negative exposure (perps/margin only; spot clamps to FLAT)
 
 
 @dataclass(frozen=True, slots=True)

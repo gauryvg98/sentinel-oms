@@ -32,7 +32,8 @@ def _feed(strategy, b: dict):
 
 
 def _target(decision, price: Decimal, budget: Decimal, lot: Decimal):
-    """Same stance+conviction -> target-qty mapping the runner uses."""
+    """Same stance+conviction -> SIGNED target-qty mapping the runner uses.
+    Backtest allows shorts (it's a sim); a live spot venue would clamp them."""
     if decision is None or decision.stance is None:
         return None
     if decision.stance is Stance.FLAT:
@@ -44,7 +45,8 @@ def _target(decision, price: Decimal, budget: Decimal, lot: Decimal):
     except Exception:  # noqa: BLE001
         w = Decimal(1)
     w = max(Decimal(0), min(Decimal(1), w))
-    return (w * budget / price).quantize(lot, rounding=ROUND_DOWN)
+    qty = (w * budget / price).quantize(lot, rounding=ROUND_DOWN)
+    return -qty if decision.stance is Stance.SHORT else qty
 
 
 @dataclass(slots=True)
@@ -95,13 +97,9 @@ def run_backtest(strategy, bars, *, symbol="", interval="",
         po = Decimal(str(b["o"]))
         if pending is not None:                      # execute prior decision now
             target = _target(pending, po, budget, lot)
-            plan = plan_action(position, po, None, target)
-            if plan.kind == "place":
-                fill(b["t"], plan.qty, po, +1)
-            elif plan.kind == "trim":
-                fill(b["t"], plan.qty, po, -1)
-            elif plan.kind == "exit" and position > 0:
-                fill(b["t"], position, po, -1)
+            plan = plan_action(position, po, po, None, target)   # bid=ask=open
+            if plan.kind in ("open", "reduce"):
+                fill(b["t"], plan.qty, po, +1 if plan.side == "BUY" else -1)
         pc = Decimal(str(b["c"]))
         net_equity = gross_cash + position * pc - fees
         curve.append((b["t"], float(net_equity)))

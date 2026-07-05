@@ -340,28 +340,37 @@ def build_ui(app: SentinelApp, market: MarketData,
     # not more concurrent buys.
     size = {"usdt": strategy_usdt}
 
-    def _touch() -> Decimal | None:
+    def _bid() -> Decimal | None:
         # A maker BUY rests at the bid so it doesn't cross. Fall back to the
         # last price if the book feed is unavailable (then it may take).
-        bid = market.best_bid()
-        if bid is not None:
-            return bid
+        b = market.best_bid()
+        if b is not None:
+            return b
+        m = market.latest(market.symbol)
+        return m.price if m else None
+
+    def _ask() -> Decimal | None:
+        a = market.best_ask()
+        if a is not None:
+            return a
         m = market.latest(market.symbol)
         return m.price if m else None
 
     runner = None
     if strategy is not None:
+        # Spot venue: long/flat only. allow_short=False clamps a SHORT stance to
+        # FLAT and the short-side callables are absent (perps wire them, Stage 2).
         runner = StrategyRunner(
             strategy, bars,
             position_fn=lambda: app.store.get_position(market.symbol),
             open_entry_fn=lambda: app.store.open_entry(market.symbol),
             place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
-            trim_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # reduce to size
+            reduce_sell_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # market
             cancel_fn=lambda key: terminal.cancel(key),
-            exit_fn=lambda: terminal.trade("SELL", pct=100),   # exits stay market
-            touch_fn=_touch,
+            bid_fn=_bid, ask_fn=_ask,
             budget_fn=lambda: size["usdt"],                    # risk budget (100% conviction)
             on_change=app.changes.bump,
+            allow_short=False,
         )
 
     @ui.on_event("startup")

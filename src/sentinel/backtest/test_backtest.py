@@ -33,6 +33,13 @@ class _Warming:
         return Decision(None)
 
 
+class _AlwaysShort:
+    name = "always-short"
+
+    def on_bar(self, close):
+        return Decision(Stance.SHORT)
+
+
 class _LongThenFlat:
     """LONG on the first close, FLAT forever after — to check trade timing."""
     name = "long-then-flat"
@@ -73,6 +80,16 @@ def test_costs_drag_net_below_gross():
 def test_flat_market_flat_pnl_before_costs():
     r = run_backtest(_Always(), bars([100, 100, 100, 100]), cost_bps=Decimal(0))
     assert abs(r.gross_return) < 1e-6                  # bought and held, no move
+
+
+def test_short_profits_when_price_falls():
+    r = run_backtest(_AlwaysShort(), bars([100, 98, 96, 94, 92]), cost_bps=Decimal(0))
+    assert r.net_return > 0                            # short a falling market -> gain
+
+
+def test_short_loses_when_price_rises():
+    r = run_backtest(_AlwaysShort(), bars([100, 102, 104, 106, 108]), cost_bps=Decimal(0))
+    assert r.net_return < 0
 
 
 def test_deterministic():

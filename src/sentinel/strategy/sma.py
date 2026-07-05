@@ -19,10 +19,14 @@ from .base import Decision, Stance
 
 
 class SmaCross:
-    def __init__(self, fast: int = 5, slow: int = 20) -> None:
+    def __init__(self, fast: int = 5, slow: int = 20, short: bool = False) -> None:
         if fast >= slow:
             raise ValueError("fast period must be shorter than slow")
-        self.name = f"sma-cross({fast}/{slow})"
+        # short=True -> stop-and-reverse: SHORT below the cross instead of FLAT,
+        # so the strategy is always in the market and can profit in a bear leg
+        # (needs a venue that allows shorting; spot clamps SHORT to FLAT).
+        self._short = short
+        self.name = f"sma-{'ls' if short else 'cross'}({fast}/{slow})"
         self.fast_period = fast     # public: the chart overlays these windows
         self.slow_period = slow
         self._fast_n = fast
@@ -62,6 +66,7 @@ class SmaCross:
         prices = list(self._prices)
         fast = sum(prices[-self._fast_n:]) / self._fast_n
         slow = sum(prices) / self._slow_n
-        stance = Stance.LONG if fast > slow else Stance.FLAT
+        below = Stance.SHORT if self._short else Stance.FLAT
+        stance = Stance.LONG if fast > slow else below
         return Decision(stance, {"fast": str(round(fast, 2)),
                                  "slow": str(round(slow, 2))})

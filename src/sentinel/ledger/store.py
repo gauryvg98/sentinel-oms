@@ -431,7 +431,7 @@ class LedgerStore:
         decide whether the working limit needs re-pricing or is already filling.
         There is at most one (the R1.9 duplicate-entry guard)."""
         r = await self._pool.fetchrow(
-            "SELECT client_order_id, qty, filled_qty, state, limit_price "
+            "SELECT client_order_id, side, qty, filled_qty, state, limit_price "
             "FROM orders WHERE instrument = $1 AND authority = 'ENTRY' "
             "AND state NOT IN ('FILLED','CANCELED','REJECTED') "
             "ORDER BY last_event_seq DESC LIMIT 1",
@@ -441,6 +441,7 @@ class LedgerStore:
             return None
         return {
             "key": r["client_order_id"],
+            "side": r["side"],
             "qty": r["qty"],
             "filled": r["filled_qty"],
             "state": r["state"],

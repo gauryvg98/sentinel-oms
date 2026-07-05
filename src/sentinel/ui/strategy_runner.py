@@ -3,21 +3,22 @@
 It runs as a supervised task, ALWAYS feeding every closed bar to the strategy
 (so the indicators stay warm even while paused), but only ACTING when started.
 Actions go through injected callables that hit the normal CommandGateway — so
-the strategy faces the exact same guards a human does: single-writer,
-never-over-exit, duplicate-entry. A bad strategy trades badly; it cannot bypass
-the safety layer or corrupt state.
+the strategy faces the exact same guards a human does. A bad strategy trades
+badly; it cannot bypass the safety layer or corrupt state.
 
-SIZED TARGET-POSITION model. The strategy states a desired STANCE and an
-optional CONVICTION (`detail["target_weight"]` in [0,1]); the runner turns that
-into a target quantity — `weight * budget / touch` — and reconciles the actual
-position toward it:
-  - under target : peg a resting maker BUY (join the bid, re-price on drift)
-  - over  target : trim the excess at market
-  - flat / weight 0 : close the position
-A no-trade band around the target absorbs small drift so conviction jitter (and
-price drift) doesn't churn. Entries are makers; reductions are market (when
-you want less risk you want it now, not a price). The place/trim/cancel decision
-is a PURE function (`plan_action`), so every case is tested without a broker.
+SIGNED target-position model. The strategy states a desired STANCE (LONG / FLAT
+/ SHORT) and an optional CONVICTION (`detail["target_weight"]` in [0,1]); the
+runner turns that into a SIGNED target quantity — +weight*budget/price for LONG,
+-weight*budget/price for SHORT — and reconciles the actual position toward it:
+  - move AWAY from zero, toward the target's side : peg a resting maker order
+  - move TOWARD zero (reduce / flip)             : market (want less risk now)
+A flip (long -> short) reduces to zero one bar, then opens the other side the
+next — the peg's natural one-bar cadence. A no-trade band absorbs small drift so
+conviction/price jitter doesn't churn.
+
+SPOT can't short, so on a spot venue `allow_short=False` clamps a SHORT stance to
+FLAT (safe, behavior unchanged). Perps set allow_short=True and wire the
+short-side callables. plan_action is pure -> every case is tested without a broker.
 """
 
 from __future__ import annotations
@@ -28,82 +29,76 @@ from typing import Awaitable, Callable
 
 from sentinel.strategy import Bar, Decision, Stance, Strategy
 
-# A working entry is safe to re-price only when cleanly resting. In any in-flight
-# state (SUBMITTING / CANCEL_PENDING / UNKNOWN / RECONCILING) we wait: touching
-# it would race the broker or the duplicate-entry guard.
-_RESTING = ("WORKING", "PARTIAL")
-
+_RESTING = ("WORKING", "PARTIAL")             # cleanly resting -> safe to re-price
 _DEFAULT_REPRICE_FRAC = Decimal("0.0005")     # 5 bps: re-peg once the touch drifts
 _DEFAULT_REBALANCE_FRAC = Decimal("0.20")     # no-trade band around target (anti-churn)
-_DEFAULT_LOT_STEP = Decimal("0.00001")        # BTCUSDT lot step
-_HISTORY_CAP = 400                            # bars of indicator series kept for the chart
+_DEFAULT_LOT_STEP = Decimal("0.00001")
+_HISTORY_CAP = 400
 
 
 @dataclass(frozen=True, slots=True)
 class Plan:
-    """What the runner should do this bar. One primary action; the executor
-    handles any incidental cleanup (e.g. cancelling a resting entry on exit)."""
-    kind: str                       # "place" | "trim" | "cancel" | "exit" | "noop"
+    """What the runner should do this bar.
+    kind: "open" (maker, toward the target's side) | "reduce" (market, toward
+          zero) | "cancel" | "noop". side/qty/price describe the order."""
+    kind: str
+    side: str | None = None          # "BUY" | "SELL"
     qty: Decimal | None = None
-    price: Decimal | None = None
+    price: Decimal | None = None      # peg price for an open
     cancel_key: str | None = None
     reason: str = ""
 
 
 def plan_action(
     position: Decimal,
-    touch: Decimal | None,
-    entry: dict | None,             # store.open_entry(): key/qty/filled/state/limit_price
-    target: Decimal | None,         # desired position qty (0 = flat, None = no opinion)
+    bid: Decimal | None,
+    ask: Decimal | None,
+    entry: dict | None,               # store.open_entry(): key/side/qty/filled/state/limit_price
+    target: Decimal | None,           # SIGNED desired position (None = no opinion)
     *,
     reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
     rebalance_frac: Decimal = _DEFAULT_REBALANCE_FRAC,
     lot_step: Decimal = _DEFAULT_LOT_STEP,
 ) -> Plan:
-    """Pure reconciliation of actual position -> target. No I/O, no clock."""
+    """Pure reconciliation of actual position -> a SIGNED target. No I/O."""
     if target is None:
         return Plan("noop", reason="no opinion")
 
-    # Flatten entirely.
-    if target <= 0:
-        if position > 0:
-            return Plan("exit", reason="target flat: close position")
-        if entry is not None:
-            return Plan("cancel", cancel_key=entry["key"], reason="target flat: drop entry")
-        return Plan("noop", reason="flat")
+    gap = target - position
+    band = abs(target) * rebalance_frac
+    if abs(gap) <= band:                          # at target (within the band)
+        if entry is not None and entry["state"] in _RESTING:
+            return Plan("cancel", cancel_key=entry["key"], reason="at target: cancel remainder")
+        return Plan("noop", reason="at target")
 
-    gap = target - position                     # >0 need more, <0 hold too much
-    band = target * rebalance_frac              # ignore drift smaller than this
+    # Reduce? gap moves the position TOWARD zero (opposite sign to the position).
+    if position != 0 and (gap > 0) != (position > 0):
+        reduce = min(abs(gap), abs(position)).quantize(lot_step, rounding=ROUND_DOWN)
+        if reduce <= 0:
+            return Plan("noop", reason="dust")
+        side = "SELL" if position > 0 else "BUY"   # sell to shed a long, buy to cover a short
+        return Plan("reduce", side=side, qty=reduce, reason="reduce toward target")
 
-    # Over target beyond the band: trim the excess at market.
-    if -gap > band:
-        excess = (-gap).quantize(lot_step, rounding=ROUND_DOWN)
-        if excess > 0:
-            return Plan("trim", qty=excess, reason="over target: trim to size")
-
-    # Under target beyond the band: peg a maker entry for the shortfall.
-    if gap > band:
-        if touch is None or touch <= 0:
-            return Plan("noop", reason="no touch price to peg to")
-        remaining = gap.quantize(lot_step, rounding=ROUND_DOWN)
-        if remaining <= 0:
-            return Plan("noop", reason="within a lot of target")
-        if entry is None:
-            return Plan("place", qty=remaining, price=touch,
-                        reason="place maker entry at touch")
-        if entry["state"] not in _RESTING:
-            return Plan("noop", reason=f"entry in flight ({entry['state']})")
-        resting = entry["limit_price"]
-        if resting is None:
-            return Plan("noop", reason="entry has no limit price, leaving it")
-        if abs(touch - resting) / touch > reprice_frac:
-            return Plan("cancel", cancel_key=entry["key"], reason="re-peg to touch")
-        return Plan("noop", reason="pegged")
-
-    # Within the no-trade band: at target. Cancel any leftover resting entry.
-    if entry is not None and entry["state"] in _RESTING:
-        return Plan("cancel", cancel_key=entry["key"], reason="at target: cancel remainder")
-    return Plan("noop", reason="at target")
+    # Otherwise open/add AWAY from zero, toward the target's side -> maker peg.
+    add = abs(gap).quantize(lot_step, rounding=ROUND_DOWN)
+    if add <= 0:
+        return Plan("noop", reason="within a lot of target")
+    side = "BUY" if gap > 0 else "SELL"
+    touch = bid if side == "BUY" else ask          # join the near side (maker)
+    if touch is None or touch <= 0:
+        return Plan("noop", reason="no touch price to peg to")
+    if entry is None:
+        return Plan("open", side=side, qty=add, price=touch, reason="place maker entry")
+    if entry["state"] not in _RESTING:
+        return Plan("noop", reason=f"entry in flight ({entry['state']})")
+    if entry.get("side") not in (None, side):      # resting order on the wrong side
+        return Plan("cancel", cancel_key=entry["key"], reason="entry wrong side")
+    resting = entry["limit_price"]
+    if resting is None:
+        return Plan("noop", reason="entry has no limit price, leaving it")
+    if abs(touch - resting) / touch > reprice_frac:
+        return Plan("cancel", cancel_key=entry["key"], reason="re-peg to touch")
+    return Plan("noop", reason="pegged")
 
 
 class StrategyRunner:
@@ -114,13 +109,16 @@ class StrategyRunner:
         *,
         position_fn: Callable[[], Awaitable[Decimal]],
         open_entry_fn: Callable[[], Awaitable[dict | None]],
-        place_entry_fn: Callable[[Decimal, Decimal], Awaitable[dict]],  # (qty, price)
-        trim_fn: Callable[[Decimal], Awaitable[dict]],                  # market sell qty
+        place_entry_fn: Callable[[Decimal, Decimal], Awaitable[dict]],  # maker BUY at bid
+        reduce_sell_fn: Callable[[Decimal], Awaitable[dict]],           # market SELL qty
         cancel_fn: Callable[[str], Awaitable[dict]],
-        exit_fn: Callable[[], Awaitable[dict]],   # market close (all)
-        touch_fn: Callable[[], Decimal | None],
+        bid_fn: Callable[[], Decimal | None],
+        ask_fn: Callable[[], Decimal | None],
         budget_fn: Callable[[], Decimal],         # risk budget in USDT (100% conviction)
         on_change: Callable[[], Awaitable[None]],
+        place_short_fn: Callable[[Decimal, Decimal], Awaitable[dict]] | None = None,  # maker SELL at ask
+        reduce_buy_fn: Callable[[Decimal], Awaitable[dict]] | None = None,            # market BUY (cover)
+        allow_short: bool = False,
         poll_s: float = 2.0,
         reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
         rebalance_frac: Decimal = _DEFAULT_REBALANCE_FRAC,
@@ -131,12 +129,15 @@ class StrategyRunner:
         self._position_fn = position_fn
         self._open_entry_fn = open_entry_fn
         self._place_entry_fn = place_entry_fn
-        self._trim_fn = trim_fn
+        self._reduce_sell_fn = reduce_sell_fn
+        self._place_short_fn = place_short_fn
+        self._reduce_buy_fn = reduce_buy_fn
         self._cancel_fn = cancel_fn
-        self._exit_fn = exit_fn
-        self._touch_fn = touch_fn
+        self._bid_fn = bid_fn
+        self._ask_fn = ask_fn
         self._budget_fn = budget_fn
         self._on_change = on_change
+        self._allow_short = allow_short
         self._poll_s = poll_s
         self._reprice_frac = reprice_frac
         self._rebalance_frac = rebalance_frac
@@ -146,9 +147,6 @@ class StrategyRunner:
         self.last_decision: Decision | None = None
         self.last_action: str | None = None
         self._last_closed_t: int | None = None
-        # Per-bar indicator history {t, detail} for strategy-authored chart
-        # overlays — the strategy is the single source of its own indicators;
-        # the chart plots what it emits rather than re-deriving anything.
         self._history: list[dict] = []
 
     def start(self) -> None:
@@ -159,44 +157,39 @@ class StrategyRunner:
 
     @staticmethod
     def _weight(d: Decision) -> Decimal:
-        """Conviction in [0,1] from the decision detail; 1.0 (full budget) when
-        the strategy doesn't express one (e.g. plain SMA -> unchanged behavior)."""
         try:
             w = Decimal(str(d.detail.get("target_weight", "1")))
         except (InvalidOperation, AttributeError, TypeError):
             w = Decimal("1")
         return max(Decimal(0), min(Decimal(1), w))
 
-    def _target(self, touch: Decimal | None) -> Decimal | None:
-        """Desired position qty from the current stance + conviction. None =
-        no opinion (leave everything alone). 0 = flat. LONG = weight*budget/touch
-        (needs a price to size); FLAT needs no price so exits never block on the
-        feed."""
+    def _target(self, bid: Decimal | None, ask: Decimal | None) -> Decimal | None:
+        """Signed desired position from stance + conviction. LONG -> +qty (sized
+        off the bid, the side we'd buy into); SHORT -> -qty (off the ask). FLAT
+        -> 0 (needs no price, so exits never block on the feed). A SHORT on a
+        spot venue (allow_short=False) clamps to 0 — you can't short spot."""
         d = self.last_decision
         if d is None or d.stance is None:
             return None
         if d.stance is Stance.FLAT:
             return Decimal(0)
-        if touch is None or touch <= 0:
+        if d.stance is Stance.SHORT and not self._allow_short:
+            return Decimal(0)
+        price = bid if d.stance is Stance.LONG else ask
+        if price is None or price <= 0:
             return None
-        qty = self._weight(d) * self._budget_fn() / touch
-        return qty.quantize(self._lot_step, rounding=ROUND_DOWN)
+        qty = (self._weight(d) * self._budget_fn() / price).quantize(
+            self._lot_step, rounding=ROUND_DOWN)
+        return -qty if d.stance is Stance.SHORT else qty
 
     def _feed(self, c: dict) -> Decision:
-        """Feed one closed candle to the strategy, preferring the OHLC path
-        (true range for ATR/ADX, highs/lows for Donchian) when the strategy
-        exposes it, else the bare close. Both are pure."""
         ohlcv = getattr(self.strategy, "on_bar_ohlcv", None)
         if callable(ohlcv):
-            return ohlcv(Bar(high=Decimal(str(c["h"])),
-                             low=Decimal(str(c["l"])),
+            return ohlcv(Bar(high=Decimal(str(c["h"])), low=Decimal(str(c["l"])),
                              close=Decimal(str(c["c"]))))
         return self.strategy.on_bar(Decimal(str(c["c"])))
 
     def _seed_from_history(self) -> None:
-        """Warm the strategy from closed history (all but the forming bar),
-        leaving last_decision + the bar cursor set to the latest CLOSED bar.
-        Pure/synchronous — no awaits — so it is atomic w.r.t. the run() loop."""
         reset = getattr(self.strategy, "reset", None)
         if callable(reset):
             reset()
@@ -210,36 +203,22 @@ class StrategyRunner:
         del self._history[:-_HISTORY_CAP]
 
     async def set_strategy(self, strategy: Strategy) -> None:
-        """Swap the live strategy (from the UI selector). Reseed so the new one
-        warms from history and — if running — reconciles to its OWN target now
-        (which may cancel a resting entry / close a position the previous
-        strategy opened, via the normal guarded path)."""
         self.strategy = strategy
         await self.reseed()
 
     async def reseed(self) -> None:
-        """Reset + re-warm the strategy from the current bar history, then (if
-        running) reconcile to the fresh stance immediately. The hook for a
-        strategy-interval change: after the bar source's clock changes, this
-        forgets old-interval indicator state so the signal isn't a mix of two
-        timeframes and the runner doesn't stall for a full interval."""
         self._seed_from_history()
         if self.running:
             await self.reconcile_now()
 
     async def reconcile_now(self) -> str | None:
-        """Bring the broker position into line with the sized target. Pulls its
-        own inputs, so the run loop and the /strategy/start path share it."""
         if not self.running or self.last_decision is None:
             return None
-        touch = self._touch_fn()
+        bid, ask = self._bid_fn(), self._ask_fn()
         plan = plan_action(
-            await self._position_fn(),
-            touch,
-            await self._open_entry_fn(),
-            self._target(touch),
-            reprice_frac=self._reprice_frac,
-            rebalance_frac=self._rebalance_frac,
+            await self._position_fn(), bid, ask, await self._open_entry_fn(),
+            self._target(bid, ask),
+            reprice_frac=self._reprice_frac, rebalance_frac=self._rebalance_frac,
             lot_step=self._lot_step,
         )
         action = await self._execute(plan)
@@ -251,19 +230,25 @@ class StrategyRunner:
     async def _execute(self, plan: Plan) -> str | None:
         if plan.kind == "noop":
             return None
-        if plan.kind == "place":
-            r = await self._place_entry_fn(plan.qty, plan.price)
-            return f"PEG {self._fmt(r)} @ {format(plan.price.normalize(), 'f')}"
-        if plan.kind == "trim":
-            return f"TRIM {self._fmt(await self._trim_fn(plan.qty))}"
         if plan.kind == "cancel":
             await self._cancel_fn(plan.cancel_key)
             return f"CANCEL {plan.cancel_key} — {plan.reason}"
-        if plan.kind == "exit":
-            entry = await self._open_entry_fn()      # don't leave a maker live
-            if entry is not None:
-                await self._cancel_fn(entry["key"])
-            return f"EXIT {self._fmt(await self._exit_fn())}"
+        if plan.kind == "open":
+            if plan.side == "BUY":
+                r = await self._place_entry_fn(plan.qty, plan.price)
+            elif self._place_short_fn is not None:
+                r = await self._place_short_fn(plan.qty, plan.price)
+            else:
+                return "BLOCKED short-open (spot venue)"
+            return f"PEG {plan.side} {self._fmt(r)} @ {format(plan.price.normalize(), 'f')}"
+        if plan.kind == "reduce":
+            if plan.side == "SELL":
+                r = await self._reduce_sell_fn(plan.qty)
+            elif self._reduce_buy_fn is not None:
+                r = await self._reduce_buy_fn(plan.qty)
+            else:
+                return "BLOCKED cover (spot venue)"
+            return f"REDUCE {plan.side} {self._fmt(r)}"
         return None
 
     @staticmethod
@@ -281,8 +266,6 @@ class StrategyRunner:
         return str(result)
 
     async def run(self) -> None:
-        """Supervised task. Seed the strategy from history so it's warm, then
-        reconcile on each newly-closed bar."""
         self._seed_from_history()
 
         import asyncio
@@ -292,7 +275,7 @@ class StrategyRunner:
             candles = self._bars.candles
             if len(candles) < 2:
                 continue
-            closed = candles[-2]                  # most recently completed bar
+            closed = candles[-2]
             if self._last_closed_t is not None and closed["t"] <= self._last_closed_t:
                 continue
             self._last_closed_t = closed["t"]
@@ -301,16 +284,13 @@ class StrategyRunner:
             self._history.append({"t": closed["t"], "detail": self.last_decision.detail})
             del self._history[:-_HISTORY_CAP]
             await self.reconcile_now()
-            await self._on_change()               # always push the fresh decision
+            await self._on_change()
 
     def _view_spec(self) -> dict:
         vs = getattr(self.strategy, "view_spec", None)
         return vs() if callable(vs) else {"rows": [], "overlays": []}
 
     def _series(self, view: dict) -> dict:
-        """Bar-aligned history of just the values the overlays reference — the
-        chart plots these directly (the strategy's own numbers), so it can never
-        disagree with the decision. Keys absent on a bar (warm-up) are skipped."""
         keys: set[str] = set()
         for ov in view.get("overlays", []):
             if ov["kind"] == "line":
@@ -331,15 +311,14 @@ class StrategyRunner:
 
     def snapshot(self) -> dict:
         d = self.last_decision
+        directional = d and d.stance in (Stance.LONG, Stance.SHORT)
         return {
             "name": self.strategy.name,
             "running": self.running,
             "stance": d.stance.value if d and d.stance else None,
             "detail": d.detail if d else {},
             "last_action": self.last_action,
-            # Conviction actually applied (1.0 if the strategy expresses none).
-            "weight": str(self._weight(d)) if d and d.stance is Stance.LONG else None,
-            # The strategy's own presentation, chart series, and fixed interval.
+            "weight": str(self._weight(d)) if directional else None,
             "view": (view := self._view_spec()),
             "series": self._series(view),
             "interval": getattr(self._bars, "interval", None),

@@ -19,6 +19,8 @@ from .engine import run_backtest
 def _strategy(name: str):
     if name == "regime":
         return RegimeTrendMR(Params())
+    if name == "sma-ls":
+        return SmaCross(short=True)          # long/short (stop-and-reverse)
     return SmaCross()
 
 
@@ -48,7 +50,7 @@ def _report(args, r) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel.backtest")
-    ap.add_argument("--strategy", default="regime", choices=["sma", "regime"])
+    ap.add_argument("--strategy", default="regime", choices=["sma", "sma-ls", "regime"])
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--interval", default="1h")
     ap.add_argument("--days", type=int, default=365)

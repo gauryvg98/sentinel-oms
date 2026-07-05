@@ -26,10 +26,14 @@ from uuid import uuid4
 
 from sentinel.broker import BrokerAdapter, BrokerOrderState
 from sentinel.domain import (
+    Authority,
+    EconomicOrderIntent,
     FillReceived,
     OrderState,
     ReconcileResolved,
     ReconcileStarted,
+    Side,
+    SubmissionStarted,
 )
 from sentinel.ledger import FillOutcome, LedgerStore, StoredOrder
 from sentinel.oms import WriterCoordinator
@@ -57,6 +61,7 @@ class RecoveryReport:
     events_replayed: int = 0
     reconciled: list[str] = field(default_factory=list)
     resolved_states: dict[str, OrderState] = field(default_factory=dict)
+    positions_imported: list[str] = field(default_factory=list)
 
 
 class Reconciler:
@@ -178,4 +183,71 @@ class Reconciler:
             key = resolved.core.client_order_id
             report.reconciled.append(key)
             report.resolved_states[key] = resolved.core.state
+        report.positions_imported = await self.reconcile_positions()
         return report
+
+    async def reconcile_positions(self) -> list[str]:
+        """Adopt the exchange's actual positions — R1.12 (broker truth replaces
+        local belief) at the POSITION level. For each symbol where the exchange
+        holds a different quantity than our ledger, import the delta as a
+        synthetic opening-balance fill at the exchange's entry price, so both the
+        position AND the cost basis match the exchange. Idempotent: after import
+        the delta is zero, so a re-run imports nothing. Skips venues without a
+        position concept (spot)."""
+        get_positions = getattr(self._broker, "open_positions", None)
+        if get_positions is None:
+            return []
+        try:
+            exchange = await get_positions()
+        except Exception as e:  # noqa: BLE001 — a slow query mustn't block boot
+            log.warning("position reconcile: could not fetch exchange positions: %r", e)
+            return []
+        ledger = await self._store.load_positions()          # {symbol: qty} nonzero
+        imported: list[str] = []
+        for sym in set(exchange) | set(ledger):
+            led = ledger.get(sym, Decimal(0))
+            ex = exchange.get(sym)
+            ex_qty = ex.qty if ex is not None else Decimal(0)
+            delta = ex_qty - led
+            if delta == 0:
+                continue
+            if ex is not None:
+                price = ex.entry_price                       # adopt at the true entry
+            else:
+                # exchange is flat but we hold: close our phantom at avg cost so
+                # the forced close realizes ~nothing.
+                from sentinel.marks.pnl import compute_pnl
+                pnl = (await compute_pnl(self._store._pool)).get(sym)
+                price = pnl.avg_cost if pnl else None
+            if await self._import_position_delta(sym, delta, price):
+                imported.append(sym)
+        return imported
+
+    async def _import_position_delta(self, instrument: str, delta: Decimal,
+                                     price: Decimal | None) -> bool:
+        """Record a synthetic opening-balance fill of `delta` at `price` — flows
+        through the same tested transitions (CREATED -> SUBMITTING -> FILLED), so
+        it preserves position = Σ fills. Tagged RECON- and logged for audit."""
+        if price is None or price <= 0:
+            log.warning("position reconcile: skip %s (delta %s) — no price",
+                        instrument, delta)
+            return False
+        side = Side.BUY if delta > 0 else Side.SELL
+        qty = abs(delta)
+        trace = uuid4()
+        coid = f"RECON-{instrument}-{uuid4().hex[:8]}"
+        intent = EconomicOrderIntent(
+            intent_id=uuid4(), idempotency_key=coid, instrument=instrument,
+            side=side, qty=qty, limit_price=None, authority=Authority.ENTRY,
+            trace_id=trace, quote_at_decision=price,
+        )
+        stored = await self._store.create_order(intent)
+        stored = await self._store.apply_event(stored, SubmissionStarted(), trace)
+        await self._store.apply_event(
+            stored, FillReceived(exec_id=f"X-{coid}", qty=qty, price=price), trace)
+        await self._store.record_decision(
+            trace, instrument, "reconciler", "POSITION_IMPORTED",
+            {"delta": str(delta), "price": str(price)})
+        log.warning("position reconcile: imported %s delta %s @ %s (exchange truth)",
+                    instrument, delta, price)
+        return True

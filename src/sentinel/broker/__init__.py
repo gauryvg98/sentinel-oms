@@ -9,6 +9,7 @@ from .adapter import (
     BrokerFill,
     BrokerOrderState,
     BrokerOrderView,
+    BrokerPosition,
     BrokerReject,
     BrokerTimeout,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "BrokerFill",
     "BrokerOrderState",
     "BrokerOrderView",
+    "BrokerPosition",
     "BrokerReject",
     "BrokerTimeout",
 ]

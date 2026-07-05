@@ -74,6 +74,16 @@ BrokerEvent = OrderStreamEvent | BrokerBalanceUpdate
 
 
 @dataclass(frozen=True, slots=True)
+class BrokerPosition:
+    """An actual open position on the exchange — signed base qty (negative =
+    short) and the exchange's entry price. The source of truth for POSITION
+    reconciliation (query_positions returns wallet BALANCES, not positions)."""
+
+    qty: Decimal
+    entry_price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class BrokerOrderView:
     """The broker's authoritative view, as returned by reconciliation queries.
     ``fills`` carries every execution so a recovering OMS can backfill missed
@@ -110,6 +120,12 @@ class BrokerAdapter(Protocol):
 
     async def query_positions(self) -> dict[str, Decimal]:
         ...
+
+    async def open_positions(self) -> dict[str, BrokerPosition]:
+        """Actual open positions on the exchange, keyed by instrument. Default
+        empty — venues without a position concept (spot) or a query need not
+        implement it; POSITION reconciliation simply skips them."""
+        return {}
 
     def events(self) -> AsyncIterator[BrokerEvent]:
         ...

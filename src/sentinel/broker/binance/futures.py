@@ -38,6 +38,7 @@ from ..adapter import (
     BrokerFill,
     BrokerOrderState,
     BrokerOrderView,
+    BrokerPosition,
     BrokerReject,
     BrokerTimeout,
 )
@@ -263,6 +264,20 @@ class BinanceFuturesAdapter:
             raise BrokerError(f"balance: {resp.text}")
         return {b["asset"]: Decimal(b["balance"])
                 for b in resp.json() if Decimal(b["balance"]) != 0}
+
+    async def open_positions(self) -> dict[str, BrokerPosition]:
+        """Actual open positions (signed qty + entry price) for POSITION
+        reconciliation — from /fapi/v2/positionRisk."""
+        resp = await self._signed("GET", "/fapi/v2/positionRisk", {})
+        if resp.status_code >= 400:
+            raise BrokerError(f"positionRisk: {resp.text}")
+        out: dict[str, BrokerPosition] = {}
+        for p in resp.json():
+            amt = Decimal(p["positionAmt"])
+            if amt != 0:
+                out[p["symbol"]] = BrokerPosition(
+                    qty=amt, entry_price=Decimal(p["entryPrice"]))
+        return out
 
     # --------------------------------------------------------- user stream
 

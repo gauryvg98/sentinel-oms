@@ -132,6 +132,9 @@ class SentinelApp:
         # both of which SHOULD halt the account, not silently respawn.
         self.supervisor.spawn("reconcile", self._reconcile_loop, restart=False)
         report = await self.recon.startup_recovery()      # 1. recover
+        if report.positions_imported:
+            print(f"  RECONCILED positions from exchange: "
+                  f"{', '.join(report.positions_imported)}", flush=True)
         if arm_protection:
             # NOTE: with market-style exits, auto-arm means flatten-on-boot
             # against a real broker. Manual/paper terminals pass False and

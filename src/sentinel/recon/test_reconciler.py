@@ -243,3 +243,47 @@ async def test_startup_recovery_full_sequence(pool):
     # The book is clean: nothing UNKNOWN or RECONCILING survives recovery.
     for instrument in ("IDX-A", "IDX-B", "IDX-C", "IDX-D"):
         assert not await store2.has_unresolved(instrument)
+
+
+# ------------------------------------------------ position reconciliation (R1.12)
+
+class _PosBroker:
+    """Minimal broker exposing only what position reconcile needs."""
+    def __init__(self, positions):
+        self._positions = positions
+    async def open_positions(self):
+        return self._positions
+
+
+async def test_position_reconcile_imports_exchange_baseline(pool):
+    from sentinel.broker import BrokerPosition
+    store = LedgerStore(pool)
+    broker = _PosBroker({"RCN-A": BrokerPosition(qty=Decimal("-0.0211"),
+                                                 entry_price=Decimal("62702"))})
+    recon = Reconciler(store, broker, WriterCoordinator())
+
+    assert await store.get_position("RCN-A") == 0             # ledger starts flat
+    assert await recon.reconcile_positions() == ["RCN-A"]     # imports the delta
+    assert await store.get_position("RCN-A") == Decimal("-0.0211")   # adopts exchange
+    # idempotent: a second pass sees no divergence, imports nothing.
+    assert await recon.reconcile_positions() == []
+    assert await store.get_position("RCN-A") == Decimal("-0.0211")
+
+
+async def test_position_reconcile_converges_partial_ledger(pool):
+    from sentinel.broker import BrokerPosition
+    store = LedgerStore(pool)
+    # exchange holds MORE than our ledger will after one import step; reconcile
+    # must land exactly on the exchange qty.
+    broker = _PosBroker({"RCN-B": BrokerPosition(qty=Decimal("5"),
+                                                 entry_price=Decimal("100"))})
+    recon = Reconciler(store, broker, WriterCoordinator())
+    await recon.reconcile_positions()
+    assert await store.get_position("RCN-B") == Decimal("5")
+
+
+async def test_position_reconcile_skips_when_broker_has_no_positions_api(pool):
+    store = LedgerStore(pool)
+    broker = ScriptedBroker(BrokerScript())          # no open_positions method
+    recon = Reconciler(store, broker, WriterCoordinator())
+    assert await recon.reconcile_positions() == []

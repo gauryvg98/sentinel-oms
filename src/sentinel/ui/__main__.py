@@ -27,8 +27,8 @@ from sentinel.ui.server import build_ui
 
 DEFAULT_DB = "postgresql://sentinel:sentinel@127.0.0.1:5433/sentinel"
 SYMBOL = os.environ.get("SENTINEL_SYMBOL", "BTCUSDT")
-FUT_REST = "https://testnet.binancefuture.com"
-FUT_STREAM = "wss://fstream.binancefuture.com"
+FUT_REST = "https://demo-fapi.binance.com"       # Binance Demo Trading (demo.binance.com)
+FUT_STREAM = "wss://demo-fstream.binance.com"
 
 
 def _venue():

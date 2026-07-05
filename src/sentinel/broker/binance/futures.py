@@ -3,7 +3,9 @@ USDT-M perpetual futures. Same contract as the spot adapter; the difference is
 the venue can hold a SIGNED (long OR short) position, which is what unlocks
 regime-agnostic strategies.
 
-Testnet-first (https://testnet.binancefuture.com — free keys, 24/7).
+Demo-first (https://demo-fapi.binance.com — Binance "Demo Trading", the newer
+paper env behind demo.binance.com; keys made there under Futures, spot-testnet
+keys and the older testnet.binancefuture.com are a DIFFERENT system).
 
 Design choices:
 - ONE-WAY position mode (net signed position), set lazily on first submit so a
@@ -43,8 +45,8 @@ from .signing import ServerClock, fmt_decimal, signed_query
 
 log = logging.getLogger("sentinel.binance.futures")
 
-TESTNET_BASE = "https://testnet.binancefuture.com"
-TESTNET_WS = "wss://fstream.binancefuture.com"
+TESTNET_BASE = "https://demo-fapi.binance.com"
+TESTNET_WS = "wss://demo-fstream.binance.com"
 
 _ABSENT_CODE = -2013           # "Order does not exist" — the ONLY proof of absence
 

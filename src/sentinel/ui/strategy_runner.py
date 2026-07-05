@@ -123,6 +123,8 @@ class StrategyRunner:
         reprice_frac: Decimal = _DEFAULT_REPRICE_FRAC,
         rebalance_frac: Decimal = _DEFAULT_REBALANCE_FRAC,
         lot_step: Decimal = _DEFAULT_LOT_STEP,
+        equity_fn: Callable[[], Decimal] | None = None,   # account equity (USDT)
+        risk_params=None,                                 # RiskParams -> risk-based sizing
     ) -> None:
         self.strategy = strategy
         self._bars = bars
@@ -142,6 +144,8 @@ class StrategyRunner:
         self._reprice_frac = reprice_frac
         self._rebalance_frac = rebalance_frac
         self._lot_step = lot_step
+        self._equity_fn = equity_fn
+        self._risk_params = risk_params
 
         self.running = False
         self.last_decision: Decision | None = None
@@ -178,8 +182,16 @@ class StrategyRunner:
         price = bid if d.stance is Stance.LONG else ask
         if price is None or price <= 0:
             return None
-        qty = (self._weight(d) * self._budget_fn() / price).quantize(
-            self._lot_step, rounding=ROUND_DOWN)
+        if self._risk_params is not None and self._equity_fn is not None:
+            # Risk layer: size so a stop-out costs risk_pct·conviction of equity,
+            # capped by leverage — decoupled from a flat notional budget.
+            from sentinel.risk import atr, risk_sized_qty
+            raw = risk_sized_qty(
+                self._risk_params, equity=self._equity_fn(), price=price,
+                atr_value=atr(self._bars.candles), conviction=self._weight(d))
+        else:
+            raw = self._weight(d) * self._budget_fn() / price   # fixed-notional budget
+        qty = raw.quantize(self._lot_step, rounding=ROUND_DOWN)
         return -qty if d.stance is Stance.SHORT else qty
 
     def _feed(self, c: dict) -> Decision:
@@ -322,4 +334,27 @@ class StrategyRunner:
             "view": (view := self._view_spec()),
             "series": self._series(view),
             "interval": getattr(self._bars, "interval", None),
+            "risk": self._risk_view(),
+        }
+
+    def _risk_view(self) -> dict | None:
+        """What the risk layer is doing right now — for the UI. None when sizing
+        is the plain fixed-notional budget."""
+        p = self._risk_params
+        if p is None:
+            return None
+        from sentinel.risk import atr, stop_distance
+        candles = getattr(self._bars, "candles", [])
+        price = self._bid_fn() or self._ask_fn()
+        a = atr(candles)
+        sd = stop_distance(p, price, a) if price else None
+        return {
+            "mode": "risk-based",
+            "risk_pct": str(p.risk_pct),
+            "max_leverage": str(p.max_leverage),
+            "stop_atr_mult": str(p.stop_atr_mult),
+            "atr": str(a) if a is not None else None,
+            "stop_dist": str(sd) if sd is not None else None,
+            "stop_pct": (str((sd / price).quantize(Decimal("0.0001")))
+                         if sd is not None and price else None),
         }

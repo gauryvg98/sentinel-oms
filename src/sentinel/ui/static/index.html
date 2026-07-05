@@ -94,6 +94,15 @@
   #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
            border: 1px solid var(--green); border-radius: 8px; padding: 10px 14px;
            opacity: 0; transition: opacity .3s; max-width: 420px; font-size: 12px; }
+  #tabs { display: flex; gap: 6px; padding: 0 0 10px; }
+  .tab { background: transparent; border: 1px solid #223; color: #7c8aa0;
+         border-radius: 6px; padding: 5px 16px; cursor: pointer; font: inherit; }
+  .tab.active { background: #16201c; color: #dbe4f0; border-color: #2a5b46; }
+  #view-backtest label { display: flex; flex-direction: column; gap: 3px;
+         font-size: 11px; color: #7c8aa0; }
+  #view-backtest select, #view-backtest input { background: #0b0f17;
+         border: 1px solid #223; color: #dbe4f0; border-radius: 4px;
+         padding: 3px 6px; font: inherit; }
 </style>
 </head>
 <body>
@@ -107,6 +116,12 @@
   <span id="conn" class="dim"><span class="dot bad"></span> connecting…</span>
 </header>
 
+<div id="tabs">
+  <button class="tab active" data-tab="terminal" onclick="switchTab('terminal')">Terminal</button>
+  <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</button>
+</div>
+
+<div id="view-terminal">
 <div id="stats">
   <div class="stat"><span>Position (BTC)</span><b id="position">—</b></div>
   <div class="stat"><span>Avg Entry</span><b id="avg">—</b></div>
@@ -181,7 +196,7 @@
       </span></div>
     <button class="tf" id="strat-toggle" style="margin-top:8px;width:100%"
             onclick="toggleStrategy()">▶ start</button>
-    <button class="tf" style="margin-top:6px;width:100%" onclick="runBacktest()">
+    <button class="tf" style="margin-top:6px;width:100%" onclick="switchTab('backtest')">
       ↻ backtest on real data</button>
   </div>
 </div>
@@ -191,21 +206,27 @@
   <h2>Activity</h2>
   <div id="decisions"></div>
 </div>
-<div id="toast"></div>
+</div><!-- /view-terminal -->
 
-<div id="bt-modal" style="display:none;position:fixed;inset:0;z-index:50;
-     background:#000a;align-items:center;justify-content:center">
-  <div style="background:#101614;border:1px solid #223;border-radius:10px;
-       width:min(600px,92vw);max-height:88vh;overflow:auto;padding:16px;
-       box-shadow:0 10px 40px #000c">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <h2 style="margin:0">Backtest <span style="color:#7c8aa0;font-size:12px">
-        real mainnet data · Binance fees</span></h2>
-      <button class="tf" onclick="closeBacktest()">✕</button>
+<div id="view-backtest" style="display:none">
+  <div class="panel" style="max-width:940px;margin:8px auto">
+    <h2>Backtest <span class="pill">real mainnet data · Binance fees</span></h2>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin:12px 0">
+      <label>Strategy<select id="bt-strategy"></select></label>
+      <label>Interval<select id="bt-interval">
+        <option value="1h">1h</option><option value="4h">4h</option>
+        <option value="1d" selected>1d</option></select></label>
+      <label>Days<input id="bt-days" type="number" value="365" style="width:70px"></label>
+      <label>Cost bps<input id="bt-cost" type="number" value="10" style="width:64px"></label>
+      <label>Budget USDT<input id="bt-budget" type="number" value="1000" style="width:88px"></label>
+      <button class="tf" style="padding:5px 16px" onclick="runBacktestTab()">▶ run</button>
     </div>
-    <div id="bt-body" style="margin-top:10px"></div>
+    <div id="bt-result" style="color:#7c8aa0">
+      Pick a strategy and run a backtest on real mainnet history.</div>
   </div>
 </div>
+
+<div id="toast"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -329,22 +350,36 @@ async function selectStrategy(name) {
   await fetch("/strategy/select/" + encodeURIComponent(name), { method: "POST" });
 }
 
-function closeBacktest() { $("bt-modal").style.display = "none"; }
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === name));
+  $("view-terminal").style.display = name === "terminal" ? "" : "none";
+  $("view-backtest").style.display = name === "backtest" ? "" : "none";
+  if (name === "terminal")                         // chart was hidden -> re-fit
+    chart.applyOptions({ width: $("chart").clientWidth, height: $("chart").clientHeight });
+}
 
-async function runBacktest() {
-  $("bt-modal").style.display = "flex";
-  $("bt-body").innerHTML = `<div style="padding:24px;color:#7c8aa0">
-    running on real mainnet history… (first run fetches ~1y of bars)</div>`;
+async function runBacktestTab() {
+  const p = new URLSearchParams({
+    strategy: $("bt-strategy").value,
+    interval: $("bt-interval").value,
+    days: $("bt-days").value || "365",
+    cost_bps: $("bt-cost").value || "10",
+    budget: $("bt-budget").value || "1000",
+  });
+  $("bt-result").innerHTML = `<div style="padding:24px;color:#7c8aa0">
+    running on real mainnet history… (first run for a timeframe fetches the bars)</div>`;
   try {
-    const r = await fetch("/backtest?interval=1h&days=365&cost_bps=10", { method: "POST" });
+    const r = await fetch("/backtest?" + p.toString(), { method: "POST" });
     const d = await r.json();
+    $("bt-result").innerHTML = "";
     if (d.error) {
-      $("bt-body").innerHTML = `<div style="padding:24px;color:#f87171">${d.error}</div>`;
+      $("bt-result").innerHTML = `<div style="padding:24px;color:#f87171">${d.error}</div>`;
       return;
     }
     renderBacktest(d);
   } catch (e) {
-    $("bt-body").innerHTML = `<div style="padding:24px;color:#f87171">${e}</div>`;
+    $("bt-result").innerHTML = `<div style="padding:24px;color:#f87171">${e}</div>`;
   }
 }
 
@@ -383,7 +418,7 @@ function renderBacktest(d) {
     row("Trades", d.trades),
     row("Fees paid", d.fees.toFixed(2) + " USDT"),
   ].join("");
-  $("bt-body").innerHTML =
+  $("bt-result").innerHTML =
     `<div style="color:#7c8aa0;font-size:11px;margin-bottom:8px">${d.strategy} · ` +
     `${d.interval} · ${d.bars} bars · ${d.days}d · budget ${d.budget.toFixed(0)} USDT</div>` +
     btCurve(d.curve) + `<div style="margin-top:10px">${rows}</div>`;
@@ -410,11 +445,18 @@ function fmtRow(kind, val) {
 function renderStrategy(st) {
   if (!st) { $("strat-panel").style.display = "none"; return; }
   stratRunning = st.running;
-  const sel = $("strat-select");                   // available engines
-  if (st.available && sel.dataset.opts !== st.available.join(",")) {
-    sel.innerHTML = st.available.map(n => `<option value="${n}">${n}</option>`).join("");
-    sel.dataset.opts = st.available.join(",");
+  // Populate the engine dropdowns (live selector + backtest tab) once.
+  if (st.available) {
+    const opts = st.available.map(n => `<option value="${n}">${n}</option>`).join("");
+    for (const id of ["strat-select", "bt-strategy"]) {
+      const el = $(id);
+      if (el && el.dataset.opts !== st.available.join(",")) {
+        el.innerHTML = opts; el.dataset.opts = st.available.join(",");
+        if (id === "bt-strategy" && st.selected) el.value = st.selected;
+      }
+    }
   }
+  const sel = $("strat-select");
   if (st.selected && document.activeElement !== sel) sel.value = st.selected;
   $("strat-name").textContent = st.name;
   $("strat-state").textContent = st.running ? "RUNNING" : "paused";

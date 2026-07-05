@@ -459,13 +459,21 @@ def build_ui(app: SentinelApp, market: MarketData,
         return {"selected": name}
 
     @ui.post("/backtest")
-    async def backtest(interval: str = "1h", days: int = 365, cost_bps: str = "10"):
-        """Backtest the SELECTED strategy on real mainnet history — the same
-        pure strategy + plan_action the live path uses. Blocking work (data
+    async def backtest(interval: str = "1h", days: int = 365, cost_bps: str = "10",
+                       strategy: str | None = None, budget: str | None = None):
+        """Backtest a strategy on real mainnet history — the same pure strategy +
+        plan_action the live path uses. Defaults to the live-selected strategy
+        and entry size; the Backtest tab overrides both. Blocking work (data
         fetch + replay) runs off the event loop."""
-        if runner is None or current["name"] not in strategies:
+        name = strategy or current["name"]
+        if runner is None or name not in strategies:
             return {"error": "no strategy"}
-        factory, budget, symbol = strategies[current["name"]], size["usdt"], market.symbol
+        factory, symbol = strategies[name], market.symbol
+        try:
+            budget = Decimal(budget) if budget else size["usdt"]
+        except Exception:  # noqa: BLE001
+            return {"error": "invalid budget"}
+        name_for_report = name
 
         def _run():
             from sentinel.backtest.data import load_klines
@@ -488,7 +496,7 @@ def build_ui(app: SentinelApp, market: MarketData,
         except Exception as e:  # noqa: BLE001
             return {"error": f"backtest failed: {e}"}
         return {
-            "strategy": current["name"], "interval": interval, "days": days,
+            "strategy": name_for_report, "interval": interval, "days": days,
             "bars": r.bars, "trades": r.trades,
             "net_return": r.net_return, "gross_return": r.gross_return,
             "buy_hold_return": r.buy_hold_return, "sharpe": r.sharpe,

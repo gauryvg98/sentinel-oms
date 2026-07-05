@@ -20,14 +20,25 @@ from sentinel.ui.instruments import (
 
 BINANCE_FUT_BTC = {
     "symbol": "BTCUSDT",
+    "marginAsset": "USDT",
     "filters": [
         {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
         {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
         {"filterType": "MIN_NOTIONAL", "notional": "100"},
     ],
 }
+BINANCE_FUT_SOLUSDC = {
+    "symbol": "SOLUSDC",
+    "marginAsset": "USDC",
+    "filters": [
+        {"filterType": "PRICE_FILTER", "tickSize": "0.010"},
+        {"filterType": "LOT_SIZE", "stepSize": "0.01", "minQty": "0.01"},
+        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+    ],
+}
 BINANCE_SPOT_ETH = {
     "symbol": "ETHUSDT",
+    "quoteAsset": "USDT",
     "filters": [
         {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
         {"filterType": "LOT_SIZE", "stepSize": "0.0001", "minQty": "0.0001"},
@@ -36,6 +47,8 @@ BINANCE_SPOT_ETH = {
 }
 BYBIT_SOL = {
     "symbol": "SOLUSDT",
+    "settleCoin": "USDT",
+    "quoteCoin": "USDT",
     "lotSizeFilter": {"qtyStep": "0.1", "minOrderQty": "0.1",
                       "minNotionalValue": "5"},
     "priceFilter": {"tickSize": "0.010"},
@@ -66,6 +79,15 @@ def test_two_symbols_get_distinct_rules():
     btc = parse_binance_spec(BINANCE_FUT_BTC)
     eth = parse_binance_spec(BINANCE_SPOT_ETH)
     assert btc.lot_step != eth.lot_step and btc.price_tick != eth.price_tick
+
+
+def test_settlement_asset_parsed_per_symbol():
+    # A USDC perp must carry USDC as its settlement asset (Binance marginAsset),
+    # a USDT perp USDT — this is what confines sizing to the right margin pool.
+    assert parse_binance_spec(BINANCE_FUT_BTC).quote_asset == "USDT"
+    assert parse_binance_spec(BINANCE_FUT_SOLUSDC).quote_asset == "USDC"
+    assert parse_binance_spec(BINANCE_SPOT_ETH).quote_asset == "USDT"   # spot: quoteAsset
+    assert parse_bybit_spec(BYBIT_SOL).quote_asset == "USDT"
 
 
 # ---- quantization / eligibility -------------------------------------------

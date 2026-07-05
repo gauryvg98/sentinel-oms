@@ -45,7 +45,9 @@ MAX_NOTIONAL = Decimal(os.environ.get("SENTINEL_MAX_NOTIONAL", "5000"))
 # rules (lot/tick/mins) are fetched from the exchange when it's added, and the
 # add is refused if the exchange doesn't list it.
 PERP_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-                "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT")
+                "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT",
+                # USDC-margined perps (need USDC collateral / multi-asset margin)
+                "BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC")
 SPOT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "LTCUSDT")
 
 
@@ -183,6 +185,11 @@ async def _serve() -> None:
     margin_env = os.environ.get("SENTINEL_MARGIN_ASSETS")
     margin_assets = ({a.strip().upper() for a in margin_env.split(",") if a.strip()}
                      if margin_env else None)
+    # Does the exchange cross-collateralize (Binance "Multi-Asset Margin" ON)?
+    # OFF (default) -> each perp is confined to its OWN settlement-asset balance,
+    # so a USDC perp can't borrow USDT margin and sizing must not sum the pools.
+    multi_asset_margin = os.environ.get(
+        "SENTINEL_MULTI_ASSET_MARGIN", "false").strip().lower() in ("1", "true", "yes")
     # Risk-based sizing (opt-in): size each trade so a stop-out costs RISK_PCT of
     # equity, capped by MAX_LEVERAGE, stop at STOP_ATR_MULT×ATR. Enabled when
     # SENTINEL_RISK_PCT is set; otherwise the fixed-notional budget is used.
@@ -199,6 +206,8 @@ async def _serve() -> None:
         print(f"  SIZING: risk-based · {risk_params.risk_pct} equity/trade · "
               f"{risk_params.max_leverage}x max lev · stop {risk_params.stop_atr_mult}×ATR "
               f"· TP {risk_params.rr}R", flush=True)
+        print(f"  MARGIN: {'multi-asset (pooled)' if multi_asset_margin else 'single-asset (per settlement pool)'} "
+              f"· each bot sizes off its share of its pool", flush=True)
     else:
         print("  SIZING: fixed-notional budget  "
               "(set SENTINEL_RISK_PCT to enable risk-based sizing)", flush=True)
@@ -211,6 +220,7 @@ async def _serve() -> None:
         initial_symbols=initial,
         margin_assets=margin_assets,
         risk_params=risk_params,
+        multi_asset_margin=multi_asset_margin,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

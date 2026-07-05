@@ -38,6 +38,8 @@ class InstrumentSpec:
     price_tick: Decimal      # price must be a multiple of this
     min_qty: Decimal         # smallest allowed order qty
     min_notional: Decimal    # smallest allowed price*qty
+    quote_asset: str = ""    # settlement/margin asset (USDT, USDC, …) — sizing
+                             # draws on THIS balance; empty if the venue omits it
 
     def round_qty(self, qty: Decimal) -> Decimal:
         """Floor a quantity onto the lot grid (never round up past a target).
@@ -75,6 +77,8 @@ def parse_binance_spec(info: dict) -> InstrumentSpec:
         price_tick=Decimal(price.get("tickSize", "0.00000001")),
         min_qty=Decimal(lot.get("minQty", "0")),
         min_notional=Decimal(amt),
+        # USD-M futures margin in `marginAsset`; spot has only `quoteAsset`.
+        quote_asset=info.get("marginAsset") or info.get("quoteAsset", ""),
     )
 
 
@@ -88,6 +92,7 @@ def parse_bybit_spec(item: dict) -> InstrumentSpec:
         price_tick=Decimal(price.get("tickSize", "0.00000001")),
         min_qty=Decimal(lot.get("minOrderQty", "0")),
         min_notional=Decimal(lot.get("minNotionalValue", "0")),
+        quote_asset=item.get("settleCoin") or item.get("quoteCoin", ""),
     )
 
 

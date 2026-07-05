@@ -489,7 +489,8 @@ class InstrumentManager:
 
     def __init__(self, app: SentinelApp, venue: Venue, strategies: dict, *,
                  default_strategy: str, default_usdt: Decimal, caps: dict,
-                 margin_assets: set[str] | None = None, risk_params=None) -> None:
+                 margin_assets: set[str] | None = None, risk_params=None,
+                 multi_asset_margin: bool = False) -> None:
         self.app = app
         self.venue = venue
         self.strategies = strategies
@@ -499,6 +500,11 @@ class InstrumentManager:
         # Which balances count as margin collateral. Multi-asset mode -> all
         # stablecoins; single-asset USDT-M -> just {"USDT"}.
         self.margin_assets = margin_assets or set(_STABLES)
+        # Does the EXCHANGE cross-collateralize (multiAssetsMargin=ON)? If so all
+        # collateral is one pool a USDC perp can draw USDT from; if OFF (Binance
+        # default) each perp is confined to its OWN settlement asset's balance —
+        # summing pools would over-size and get -2019 Margin insufficient.
+        self.multi_asset_margin = multi_asset_margin
         self.risk_params = risk_params         # None -> fixed-notional budget sizing
         self.bots: dict[str, Bot] = {}
         # Initial-load progress for the boot loading screen: reveal the grid only
@@ -508,10 +514,43 @@ class InstrumentManager:
         self._lock = asyncio.Lock()
 
     def account_cash(self) -> Decimal:
-        """Stablecoin collateral — the equity base for risk-based sizing. Cheap
-        (stream-fed balances), so it's safe to call on every sizing decision."""
+        """Total stablecoin collateral across all pools — for the account-level
+        equity display only. NOT for sizing (that must respect per-asset pools);
+        use equity_for(symbol)."""
         return sum((v for a, v in self.app.latest_balances.items()
                     if a in self.margin_assets), Decimal(0))
+
+    def _settle_asset(self, symbol: str) -> str:
+        """The asset a symbol's margin/PnL settle in (USDT for *USDT perps, USDC
+        for *USDC). From the exchange-fetched spec — falls back to a suffix match
+        on the known collateral assets when the venue omits it."""
+        bot = self.bots.get(symbol)
+        qa = getattr(bot.spec, "quote_asset", "") if bot is not None else ""
+        if qa:
+            return qa
+        for a in sorted(self.margin_assets, key=len, reverse=True):
+            if symbol.endswith(a):
+                return a
+        return "USDT"
+
+    def equity_for(self, symbol: str) -> Decimal:
+        """Sizing equity for ONE bot: its SHARE of the margin pool it actually
+        draws on. Single-asset margin -> only the symbol's settlement-asset
+        balance; multi-asset -> all collateral summed. Divided across the bots
+        that compete for the SAME pool, so N bots can't each size against the
+        whole account (the bug that placed ~3x-equity orders per bot and drew a
+        flood of -2019 rejects)."""
+        bal = self.app.latest_balances
+        if self.multi_asset_margin:
+            pool = sum((v for a, v in bal.items() if a in self.margin_assets),
+                       Decimal(0))
+            sharers = len(self.bots) or 1
+        else:
+            asset = self._settle_asset(symbol)
+            pool = bal.get(asset, Decimal(0))
+            sharers = sum(1 for s in self.bots
+                          if self._settle_asset(s) == asset) or 1
+        return pool / sharers
 
     def get(self, symbol: str) -> Bot | None:
         return self.bots.get(symbol.upper())
@@ -535,22 +574,27 @@ class InstrumentManager:
                 return {"error": f"could not fetch {symbol} rules: {e}"}
             market = self.venue.make_market(symbol)
             bars = self.venue.make_bars(symbol, self.venue.default_interval)
+            # Each bot sizes off its OWN share of the settlement-asset pool
+            # (equity_for), never the whole account — bound at construction to
+            # this symbol.
             bot = Bot(self.app, self.venue, symbol, market, bars, spec,
                       self.strategies, default_strategy=self.default_strategy,
                       size_usdt=self.default_usdt,
-                      equity_fn=self.account_cash, risk_params=self.risk_params)
+                      equity_fn=functools.partial(self.equity_for, symbol),
+                      risk_params=self.risk_params)
             await bot.spawn()                       # loads history -> a mark exists
+            self.bots[symbol] = bot                 # register BEFORE cap so it
+                                                    # counts in its own pool share
             mark = market.latest(symbol)
             price = mark.price if mark else None
             # Hard per-symbol exposure backstop. With risk-based sizing the cap is
-            # the leverage limit (equity·maxLev/price) so it never clips a
+            # the leverage limit (equity_share·maxLev/price) so it never clips a
             # correctly-risk-sized position; otherwise the venue's notional cap.
             if self.risk_params is not None and price:
                 self.caps[symbol] = spec.round_qty(
-                    self.account_cash() * self.risk_params.max_leverage / price)
+                    self.equity_for(symbol) * self.risk_params.max_leverage / price)
             else:
                 self.caps[symbol] = self.venue.cap_for(spec, price)
-            self.bots[symbol] = bot
         await self.app.changes.bump("roster")
         await self.app.changes.bump(symbol)
         return {"added": symbol}
@@ -636,7 +680,8 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
              caps: dict | None = None,
              initial_symbols: tuple[str, ...] = (),
              margin_assets: set[str] | None = None,
-             risk_params=None) -> FastAPI:
+             risk_params=None,
+             multi_asset_margin: bool = False) -> FastAPI:
     strategies = strategies or {}
     default_strategy = default_strategy or next(iter(strategies), None)
     caps = caps if caps is not None else {}
@@ -645,7 +690,8 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
                             default_strategy=default_strategy,
                             default_usdt=strategy_usdt, caps=caps,
                             risk_params=risk_params,
-                            margin_assets=margin_assets)
+                            margin_assets=margin_assets,
+                            multi_asset_margin=multi_asset_margin)
     ui.state.manager = mgr
 
     @ui.on_event("startup")

@@ -259,7 +259,7 @@ const signed = v => { const n=parseFloat(v); return isNaN(n)?'—':(n>0?'+':'')+
 let account = {};
 const cards = {};                    // symbol -> {data, el, refs}
 let activeSym = null;                 // which bot the terminal view shows (null = overview)
-let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLine=null;
+let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLine=null, pegLines=[];
 
 // ------------------------------------------------------------------ websocket
 function connect(){
@@ -405,7 +405,7 @@ function openTerminal(sym){
     timeScale:{ timeVisible:true }, height:420 });
   cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
     wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
-  overlays = {}; chartInterval = null; slLine = null; tpLine = null;   // fresh chart
+  overlays = {}; chartInterval = null; slLine = null; tpLine = null; pegLines = [];   // fresh chart
   paintTerminalAccount();
   if (cards[sym]) paintTerminalCard(cards[sym].data);
   refreshChart(sym);
@@ -505,6 +505,11 @@ function refreshChart(sym){
     // axis with their fine-grained points — cramming the coarse candles into a
     // corner. Only draw them when the intervals match; otherwise clear.
     const sameIv = d.interval === d.strategy?.interval;
+    // Drop overlay series that aren't in the CURRENT strategy's view — otherwise
+    // a switch (e.g. sma-ls -> regime) orphans the old fast/slow lines, whose
+    // stale strategy-interval points pollute the axis and cram the candles.
+    const curKeys = new Set((view.overlays||[]).filter(o=>(!o.kind||o.kind==='line')&&o.key).map(o=>o.key));
+    for(const k of Object.keys(overlays)){ if(!curKeys.has(k)){ chart.removeSeries(overlays[k]); delete overlays[k]; } }
     (view.overlays||[]).forEach(ov=>{
       if(ov.kind && ov.kind!=='line') return;   // bands etc. not drawn yet
       const key = ov.key; if(!key) return;
@@ -525,6 +530,17 @@ function refreshChart(sym){
       color:'#f87171', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'SL'});
     if(rk && rk.take_price) tpLine = cseries.createPriceLine({price:parseFloat(rk.take_price),
       color:'#22e07b', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'TP'});
+    // Pending pegs: resting limit orders shown as DOTTED lines at their price
+    // (⋯ prefix) — distinct from filled markers (solid arrows) and SL/TP
+    // (dashed). They move as the peg reprices and vanish when filled/canceled.
+    pegLines.forEach(l=>cseries.removePriceLine(l)); pegLines=[];
+    (d.working||[]).forEach(o=>{
+      if(o.limit_price==null) return;               // market orders have no resting price
+      const buy=o.side==='BUY';
+      pegLines.push(cseries.createPriceLine({ price:parseFloat(o.limit_price),
+        color: buy?'#2ea36a':'#c25d5d', lineWidth:1, lineStyle:1,   // dotted = pending
+        axisLabelVisible:true, title:`⋯ ${buy?'LONG':'SHORT'} ${o.qty}` }));
+    });
     $("o-work").innerHTML = (d.working||[]).length
       ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>
           <b><span class="link" onclick="post('/${sym}/cancel/${o.key}')">${o.state} ✕</span></b></div>`).join('')

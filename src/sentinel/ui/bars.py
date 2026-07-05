@@ -24,17 +24,19 @@ HISTORY = 300  # enough to warm the longest strategy window (Donchian 55, etc.)
 
 class BarFeed:
     def __init__(self, symbol: str, interval: str, *,
-                 rest_base: str = REST_BASE, stream_base: str = STREAM_BASE) -> None:
+                 rest_base: str = REST_BASE, stream_base: str = STREAM_BASE,
+                 kline_path: str = "/api/v3/klines") -> None:
         self.symbol = symbol
         self.interval = interval
         self._rest = rest_base
         self._stream = stream_base
+        self._kline_path = kline_path          # /fapi/v1/klines on futures
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
 
     async def load_history(self) -> None:
         async with httpx.AsyncClient(base_url=self._rest, timeout=10) as http:
             resp = await http.get(
-                "/api/v3/klines",
+                self._kline_path,
                 params={"symbol": self.symbol, "interval": self.interval,
                         "limit": HISTORY},
             )

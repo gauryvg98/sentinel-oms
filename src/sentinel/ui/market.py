@@ -41,10 +41,12 @@ MAX_BOOK_AGE_S = 15.0
 
 class MarketData:
     def __init__(self, symbol: str, *, rest_base: str = REST_BASE,
-                 stream_base: str = STREAM_BASE) -> None:
+                 stream_base: str = STREAM_BASE,
+                 kline_path: str = "/api/v3/klines") -> None:
         self.symbol = symbol
         self._rest = rest_base
         self._stream = stream_base
+        self._kline_path = kline_path          # /fapi/v1/klines on futures
         self.interval = "1m"
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
         self._price: Decimal | None = None
@@ -104,7 +106,7 @@ class MarketData:
     async def load_history(self) -> None:
         async with httpx.AsyncClient(base_url=self._rest, timeout=10) as http:
             resp = await http.get(
-                "/api/v3/klines",
+                self._kline_path,
                 params={"symbol": self.symbol, "interval": self.interval,
                         "limit": HISTORY},
             )

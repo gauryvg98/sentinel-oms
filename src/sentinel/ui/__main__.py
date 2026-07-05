@@ -18,14 +18,37 @@ from pathlib import Path
 import asyncpg
 import uvicorn
 
-from sentinel.broker.binance import BinanceSpotAdapter
+from sentinel.broker.binance import BinanceFuturesAdapter, BinanceSpotAdapter
 from sentinel.ledger import apply_migrations
 from sentinel.runtime import SentinelApp
+from sentinel.ui.bars import BarFeed
 from sentinel.ui.market import MarketData
 from sentinel.ui.server import build_ui
 
 DEFAULT_DB = "postgresql://sentinel:sentinel@127.0.0.1:5433/sentinel"
 SYMBOL = os.environ.get("SENTINEL_SYMBOL", "BTCUSDT")
+FUT_REST = "https://testnet.binancefuture.com"
+FUT_STREAM = "wss://fstream.binancefuture.com"
+
+
+def _venue():
+    """Select spot (long/flat) or USDT-M futures (long/short) by SENTINEL_VENUE.
+    Returns (adapter, market, bar_feed, max_position, allow_short)."""
+    interval = os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m")
+    if os.environ.get("SENTINEL_VENUE") == "futures":
+        adapter = BinanceFuturesAdapter(
+            os.environ["BINANCE_FUTURES_KEY"], os.environ["BINANCE_FUTURES_SECRET"],
+            symbols=(SYMBOL,), leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")))
+        mkt = MarketData(SYMBOL, rest_base=FUT_REST, stream_base=FUT_STREAM,
+                         kline_path="/fapi/v1/klines")
+        bars = BarFeed(SYMBOL, interval, rest_base=FUT_REST, stream_base=FUT_STREAM,
+                       kline_path="/fapi/v1/klines")
+        cap = Decimal(os.environ.get("SENTINEL_MAX_POSITION", "0.05"))  # hard exposure cap
+        return adapter, mkt, bars, cap, True
+    adapter = BinanceSpotAdapter(
+        os.environ["BINANCE_TESTNET_KEY"], os.environ["BINANCE_TESTNET_SECRET"],
+        symbols=(SYMBOL,))
+    return adapter, MarketData(SYMBOL), BarFeed(SYMBOL, interval), None, False
 
 
 def load_env() -> None:
@@ -61,33 +84,24 @@ def _build_registry() -> dict:
 
 async def _serve() -> None:
     load_env()
-    key = os.environ["BINANCE_TESTNET_KEY"]
-    secret = os.environ["BINANCE_TESTNET_SECRET"]
-
     dsn = os.environ.get("DATABASE_URL", DEFAULT_DB)
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=6)
     async with pool.acquire() as conn:
         await apply_migrations(conn)
 
-    adapter = BinanceSpotAdapter(key, secret, symbols=(SYMBOL,))
+    adapter, market, strategy_bars, max_position, allow_short = _venue()
     # dsn -> single-writer enforcement: refuse to boot if another process
-    # already owns this account/database.
-    app = SentinelApp(pool, adapter, dsn=dsn)
-    market = MarketData(SYMBOL)
+    # already owns this account/database. max_position caps futures exposure.
+    app = SentinelApp(pool, adapter, dsn=dsn, max_position=max_position)
 
-    registry = _build_registry()
-    # The strategy decides on its OWN fixed interval (its windows are calibrated
-    # to one), independent of the chart timeframe the operator flips around.
-    from sentinel.ui.bars import BarFeed
-    strategy_bars = BarFeed(
-        SYMBOL, os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m"))
     ui = build_ui(
         app, market,
         trade_qty=Decimal(os.environ.get("SENTINEL_TRADE_QTY", "0.0002")),
-        strategies=registry,
+        strategies=_build_registry(),
         default_strategy=os.environ.get("SENTINEL_STRATEGY", "sma"),
         strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
         strategy_bars=strategy_bars,
+        allow_short=allow_short,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

@@ -21,3 +21,9 @@ class DuplicateEntryBlocked(PlacementBlocked):
 class NothingToExit(PlacementBlocked):
     """R1.10: no reconciled position remains for a protective exit to close
     (position minus already-committed exit quantity is zero or negative)."""
+
+
+class PositionLimitReached(PlacementBlocked):
+    """The signed exposure cap (futures) is already reached — an open that would
+    push |position| past the authorized maximum is refused. The perps analogue
+    of never-over-exit: never over-EXPOSE."""

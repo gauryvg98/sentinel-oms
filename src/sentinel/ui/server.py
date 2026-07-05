@@ -221,14 +221,17 @@ class Terminal:
                 qty = pos * frac
         return qty.quantize(LOT_STEP, rounding=ROUND_DOWN)
 
-    async def trade(self, side: str, *, usdt=None, btc=None, pct=None) -> dict:
-        """BUY opens/extends (ENTRY); SELL reduces (PROTECTIVE_EXIT, clamped
-        by the never-over-exit guard — selling flat is refused, not shorted)."""
+    async def trade(self, side: str, *, usdt=None, btc=None, pct=None,
+                    authority: Authority | None = None) -> dict:
+        """BUY opens/extends (ENTRY); SELL reduces (PROTECTIVE_EXIT). On futures
+        a cover (BUY that REDUCES a short) passes authority=PROTECTIVE_EXIT so it
+        is clamped by never-over-exit, not treated as a fresh open."""
         qty = await self._size(side, usdt, btc, pct)
         if qty <= 0:
             return {"blocked": "ZeroSize",
                     "reason": "nothing to trade at that size"}
-        authority = Authority.ENTRY if side == "BUY" else Authority.PROTECTIVE_EXIT
+        if authority is None:
+            authority = Authority.ENTRY if side == "BUY" else Authority.PROTECTIVE_EXIT
         try:
             with self.app.metrics.timer("place_ms"):
                 stored = await self.app.gateway.place(
@@ -315,7 +318,7 @@ def build_ui(app: SentinelApp, market: MarketData,
              strategies: dict | None = None,
              default_strategy: str | None = None,
              strategy_usdt: Decimal = Decimal("15"),
-             strategy_bars=None) -> FastAPI:
+             strategy_bars=None, allow_short: bool = False) -> FastAPI:
     # Strategies are a registry the operator selects from at runtime (not an
     # env-only boot choice). The runner starts on the default and swaps live.
     # strategies is a registry of FACTORIES ({name: () -> Strategy}); each call
@@ -358,19 +361,22 @@ def build_ui(app: SentinelApp, market: MarketData,
 
     runner = None
     if strategy is not None:
-        # Spot venue: long/flat only. allow_short=False clamps a SHORT stance to
-        # FLAT and the short-side callables are absent (perps wire them, Stage 2).
+        # allow_short is False on spot (a SHORT stance clamps to FLAT and the
+        # short-side callables are never invoked) and True on perps.
         runner = StrategyRunner(
             strategy, bars,
             position_fn=lambda: app.store.get_position(market.symbol),
             open_entry_fn=lambda: app.store.open_entry(market.symbol),
             place_entry_fn=lambda qty, price: terminal.place_limit("BUY", qty, price),
-            reduce_sell_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # market
+            reduce_sell_fn=lambda qty: terminal.trade("SELL", btc=float(qty)),  # trim long
+            place_short_fn=lambda qty, price: terminal.place_limit("SELL", qty, price),  # open short
+            reduce_buy_fn=lambda qty: terminal.trade(                            # cover short
+                "BUY", btc=float(qty), authority=Authority.PROTECTIVE_EXIT),
             cancel_fn=lambda key: terminal.cancel(key),
             bid_fn=_bid, ask_fn=_ask,
             budget_fn=lambda: size["usdt"],                    # risk budget (100% conviction)
             on_change=app.changes.bump,
-            allow_short=False,
+            allow_short=allow_short,
         )
 
     @ui.on_event("startup")

@@ -14,6 +14,7 @@ on this path AT ALL (R1.3): the code that could blind-resubmit was never written
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sentinel.broker import (
@@ -49,11 +50,13 @@ class OrderEngine:
         store: LedgerStore,
         broker: BrokerAdapter,
         coordinator: WriterCoordinator | None = None,
+        *,
+        max_position: Decimal | None = None,
     ) -> None:
         self._store = store
         self._broker = broker
         self._coord = coordinator or WriterCoordinator()
-        self._guards = ExposureGuards(store)
+        self._guards = ExposureGuards(store, max_position=max_position)
         # client_order_ids awaiting reconciliation (consumed by recon layer).
         self.needs_reconcile: asyncio.Queue[str] = asyncio.Queue()
 

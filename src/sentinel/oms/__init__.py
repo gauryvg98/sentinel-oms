@@ -6,6 +6,7 @@ from .errors import (
     InstrumentHeld,
     NothingToExit,
     PlacementBlocked,
+    PositionLimitReached,
 )
 from .gateway import CommandGateway
 from .guards import ExposureGuards
@@ -19,5 +20,6 @@ __all__ = [
     "NothingToExit",
     "OrderEngine",
     "PlacementBlocked",
+    "PositionLimitReached",
     "WriterCoordinator",
 ]

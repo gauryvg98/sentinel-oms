@@ -68,13 +68,15 @@ class SentinelApp:
         event_queue_size: int = 1024,
         dsn: str | None = None,
         account: str = "sentinel",
+        max_position: Decimal | None = None,
     ) -> None:
         # dsn set -> enforce single-writer: this process must win an
         # account-scoped advisory lock at start() or refuse to boot.
         self._writer_lock = SingleWriterLock(dsn, account) if dsn else None
         self.store = LedgerStore(pool)
         self.coordinator = WriterCoordinator()
-        self.engine = OrderEngine(self.store, broker, self.coordinator)
+        self.engine = OrderEngine(self.store, broker, self.coordinator,
+                                  max_position=max_position)
         self.gateway = CommandGateway(self.store, self.engine)
         self.recon = Reconciler(self.store, broker, self.coordinator)
         self.protect = ProtectiveExitSupervisor(self.store, self.engine)

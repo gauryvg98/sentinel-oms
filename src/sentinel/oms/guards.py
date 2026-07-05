@@ -10,20 +10,32 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
-from sentinel.domain import Authority, EconomicOrderIntent
+from sentinel.domain import Authority, EconomicOrderIntent, Side
 from sentinel.ledger import LedgerStore
 
-from .errors import DuplicateEntryBlocked, InstrumentHeld, NothingToExit
+from .errors import (
+    DuplicateEntryBlocked,
+    InstrumentHeld,
+    NothingToExit,
+    PositionLimitReached,
+)
 
 
 class ExposureGuards:
-    def __init__(self, store: LedgerStore) -> None:
+    def __init__(self, store: LedgerStore, *,
+                 max_position: Decimal | None = None) -> None:
         self._store = store
+        # Signed exposure cap (base units). None on spot (budget bounds size,
+        # and you can't short anyway); futures sets a hard cap so a bad strategy
+        # can never open more than the authorized |position|, in EITHER direction.
+        self._max = max_position
 
-    async def check_entry(self, intent: EconomicOrderIntent) -> None:
+    async def check_entry(self, intent: EconomicOrderIntent) -> EconomicOrderIntent:
         """Entries are refused while the instrument holds unprovable state
         (R1.4) or an entry is already live (R1.9). Exits are exempt from both:
         protection must keep working precisely when entries are blocked (R1.13).
+        With a position cap set, an open is also CLAMPED so |resulting position|
+        never exceeds the maximum (never over-expose — the perps never-over-exit).
         """
         if await self._store.has_unresolved(intent.instrument):
             raise InstrumentHeld(
@@ -33,6 +45,18 @@ class ExposureGuards:
             raise DuplicateEntryBlocked(
                 f"{intent.instrument}: a live ENTRY order already exists"
             )
+        if self._max is None:
+            return intent
+        position = await self._store.get_position(intent.instrument)
+        signed = intent.qty if intent.side is Side.BUY else -intent.qty
+        if abs(position + signed) <= self._max:
+            return intent
+        headroom = self._max - abs(position)          # room to grow |exposure|
+        if headroom <= 0:
+            raise PositionLimitReached(
+                f"{intent.instrument}: position {position} at cap {self._max}"
+            )
+        return replace(intent, qty=min(intent.qty, Decimal(headroom)))
 
     async def clamp_exit(self, intent: EconomicOrderIntent) -> EconomicOrderIntent:
         """R1.10: an exit may never target more than the reconciled position
@@ -51,6 +75,5 @@ class ExposureGuards:
 
     async def apply(self, intent: EconomicOrderIntent) -> EconomicOrderIntent:
         if intent.authority is Authority.ENTRY:
-            await self.check_entry(intent)
-            return intent
+            return await self.check_entry(intent)
         return await self.clamp_exit(intent)

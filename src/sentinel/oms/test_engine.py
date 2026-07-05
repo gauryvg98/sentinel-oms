@@ -18,6 +18,7 @@ from sentinel.oms import (
     InstrumentHeld,
     NothingToExit,
     OrderEngine,
+    PositionLimitReached,
 )
 
 
@@ -120,6 +121,34 @@ async def test_second_live_entry_is_blocked(pool):
     await gateway.place(uuid4(), intent(key="K1"))
     with pytest.raises(DuplicateEntryBlocked):
         await gateway.place(uuid4(), intent(key="K2"))
+
+
+# --------------------------------------------- futures: never over-EXPOSE
+
+
+async def test_position_cap_clamps_and_then_refuses_opens(pool):
+    """The perps analogue of never-over-exit: an open may not push |position|
+    past the authorized cap. Beyond the headroom it is clamped; at the cap it
+    is refused."""
+    script = BrokerScript()
+    script.fill("K1", qty="4", price="4.20", at_step=1)
+    script.fill("K2", qty="1", price="4.20", at_step=2)       # the clamped remainder
+    store = LedgerStore(pool)
+    sim = ScriptedBroker(script)
+    engine = OrderEngine(store, sim, max_position=Decimal("5"))
+    gateway = CommandGateway(store, engine)
+
+    await gateway.place(uuid4(), intent(key="K1", qty="4"))    # buy 4
+    await pump(sim, engine, steps=1)
+    assert await store.get_position("IDX-OPT") == 4            # at 4 of a 5 cap
+
+    clamped = await gateway.place(uuid4(), intent(key="K2", qty="4"))  # +4 -> 8 > 5
+    assert clamped.core.qty == Decimal("1")                   # clamped to headroom (5-4)
+    await pump(sim, engine, steps=1)                          # K2 fills -> position 5, terminal
+    assert await store.get_position("IDX-OPT") == 5
+
+    with pytest.raises(PositionLimitReached):                 # at the cap, no headroom
+        await gateway.place(uuid4(), intent(key="K3", qty="1"))
 
 
 # ------------------------------------------------------------- fills + cancel

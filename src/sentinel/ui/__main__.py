@@ -98,6 +98,7 @@ def _venue() -> Venue:
                                             kline_path="/fapi/v1/klines"),
             fetch_spec=lambda s: fetch_binance_spec(rest, "/fapi/v1/exchangeInfo", s),
             cap_for=_notional_cap,
+            leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")),
         )
 
     adapter = BinanceSpotAdapter(
@@ -165,6 +166,11 @@ async def _serve() -> None:
         for s in os.environ.get("SENTINEL_SYMBOLS", SYMBOL).split(",")
         if s.strip()
     )
+    # Margin collateral: default multi-asset (all stablecoins count). For a
+    # single-asset USDT-M account set SENTINEL_MARGIN_ASSETS=USDT.
+    margin_env = os.environ.get("SENTINEL_MARGIN_ASSETS")
+    margin_assets = ({a.strip().upper() for a in margin_env.split(",") if a.strip()}
+                     if margin_env else None)
     ui = build_ui(
         app, venue,
         strategies=_build_registry(),
@@ -172,6 +178,7 @@ async def _serve() -> None:
         strategy_usdt=Decimal(os.environ.get("SENTINEL_STRATEGY_USDT", "15")),
         caps=caps,
         initial_symbols=initial,
+        margin_assets=margin_assets,
     )
     config = uvicorn.Config(
         ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),

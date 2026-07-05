@@ -19,6 +19,7 @@ is empty may the system accept new commands.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import uuid4
@@ -32,6 +33,8 @@ from sentinel.domain import (
 )
 from sentinel.ledger import FillOutcome, LedgerStore, StoredOrder
 from sentinel.oms import WriterCoordinator
+
+log = logging.getLogger("sentinel.recon")
 
 
 class ReconciliationDivergence(Exception):
@@ -111,10 +114,30 @@ class Reconciler:
                 if result is not FillOutcome.DUPLICATE:
                     stored = result
 
-            if stored.core.filled_qty != view.filled_qty:
+            booked, broker, qty = (stored.core.filled_qty, view.filled_qty,
+                                   stored.core.qty)
+            if booked > broker:
+                # We've recorded MORE than the broker shows — we invented
+                # exposure the exchange doesn't hold. The dangerous direction:
+                # halt, do not absorb.
                 raise ReconciliationDivergence(
-                    f"{client_order_id}: filled {stored.core.filled_qty} local "
-                    f"vs {view.filled_qty} broker after backfill"
+                    f"{client_order_id}: local filled {booked} > broker {broker}"
+                )
+            if booked < min(broker, qty):
+                # Fills that SHOULD fit in the order are still missing after
+                # backfill — a genuine gap, not a mere over-match. Halt.
+                raise ReconciliationDivergence(
+                    f"{client_order_id}: filled {booked} local vs {broker} broker "
+                    f"after backfill"
+                )
+            if broker > qty:
+                # The venue matched a resting order past its size (demo-fapi
+                # over-match). The order is booked to its qty and the fills carry
+                # true position — log the excess, never halt.
+                log.warning(
+                    "%s: venue over-match — broker filled %s > order qty %s; "
+                    "booked to qty, position tracks the fills",
+                    client_order_id, broker, qty,
                 )
 
             resolved = await self._store.apply_event(

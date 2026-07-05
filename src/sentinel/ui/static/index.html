@@ -99,6 +99,15 @@
               padding: 10px 14px; min-height: 80px; }
   #activity h2 { font-size: 10px; color: var(--dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
   .aline { padding: 2px 0; font-size: 12px; border-bottom: 1px dotted var(--edge); }
+  .bt label { display: flex; flex-direction: column; gap: 3px; font-size: 11px;
+              color: var(--dim); }
+  #loader { position: fixed; inset: 0; background: var(--bg); z-index: 100;
+            display: flex; align-items: center; justify-content: center; }
+  .loadbox { text-align: center; width: 340px; }
+  .loadbox .brand { font-size: 22px; letter-spacing: 4px; }
+  .lbar { height: 8px; background: var(--panel); border: 1px solid var(--edge);
+          border-radius: 6px; overflow: hidden; margin-top: 18px; }
+  .lfill { height: 100%; width: 0; background: var(--green); transition: width .35s ease; }
   #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
            border: 1px solid var(--green); border-radius: 8px; padding: 10px 14px;
            display: none; max-width: 420px; font-size: 12px; z-index: 60; }
@@ -106,19 +115,56 @@
 </head>
 <body>
 
+<div id="loader">
+  <div class="loadbox">
+    <div class="brand">SENTINEL</div>
+    <div class="dim" style="margin-top:8px" id="lmsg">starting up…</div>
+    <div class="lbar"><div class="lfill" id="lfill"></div></div>
+    <div style="margin-top:10px;font-size:15px;font-weight:700" id="lpct">0%</div>
+    <div class="dim" style="font-size:11px;margin-top:4px" id="lcount"></div>
+  </div>
+</div>
+
 <!-- ============================================================ OVERVIEW -->
 <div id="overview">
   <div class="ovhead">
     <span class="brand">SENTINEL</span>
     <span class="pill" id="venue">multi-bot</span>
-    <div class="stat0"><b id="equity">—</b><span>equity</span></div>
-    <div class="stat0"><b id="cash">—</b><span>usdt</span></div>
+    <div class="stat0"><b id="equity">—</b><span>equity (usdt)</span></div>
+    <div class="stat0"><b id="avail">—</b><span>available</span></div>
+    <div class="stat0"><b id="committed">—</b><span>committed</span></div>
+    <div class="stat0"><b id="h-run">—</b><span>running p&l</span></div>
+    <div class="stat0"><b id="h-net">—</b><span>net p&l</span></div>
     <div class="stat0"><b><span class="dot" id="oms-dot"></span> <span id="oms">—</span></b><span>oms</span></div>
     <div class="stat0"><b id="fails">0</b><span>task fails</span></div>
     <div class="grow"></div>
+    <button class="btn" onclick="showBacktest()">◧ backtest</button>
     <button class="btn add" id="addbtn">+ add instrument</button>
   </div>
   <div id="grid"></div>
+</div>
+
+<!-- ============================================================ BACKTEST -->
+<div id="backtest" style="display:none">
+  <div class="tmhead">
+    <button class="btn" onclick="showOverview()">‹ all bots</button>
+    <span class="brand">SENTINEL</span>
+    <span class="chip">BACKTEST · real mainnet data · Binance fees</span>
+  </div>
+  <div class="panel bt">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+      <label>Symbol<select id="bt-symbol"></select></label>
+      <label>Strategy<select id="bt-strategy"></select></label>
+      <label>Interval<select id="bt-interval">
+        <option value="1h">1h</option><option value="4h">4h</option>
+        <option value="1d" selected>1d</option></select></label>
+      <label>Days<input id="bt-days" type="number" value="365" style="width:70px"></label>
+      <label>Cost bps<input id="bt-cost" type="number" value="10" style="width:64px"></label>
+      <label>Budget USDT<input id="bt-budget" type="number" value="1000" style="width:96px"></label>
+      <button class="tf" style="padding:8px 20px" onclick="runBacktest()">▶ run backtest</button>
+    </div>
+    <div id="bt-result" class="dim">Pick a symbol and strategy, then run it on real mainnet history.</div>
+  </div>
 </div>
 <div id="picker"></div>
 
@@ -135,9 +181,9 @@
   </div>
   <div id="stats">
     <div class="stat"><span>Position</span><b id="position">—</b></div>
-    <div class="stat"><span>Avg Entry</span><b id="avg">—</b></div>
-    <div class="stat"><span>Unrealized P&amp;L</span><b id="unreal">—</b></div>
-    <div class="stat"><span>Realized P&amp;L</span><b id="real">—</b></div>
+    <div class="stat"><span>Net P&amp;L (USDT)</span><b id="net">—</b></div>
+    <div class="stat"><span>ROE %</span><b id="roe">—</b></div>
+    <div class="stat"><span>Realized · Unrealized</span><b id="ru" style="font-size:16px">—</b></div>
   </div>
   <div id="tfbar">
     <button class="tf" data-tf="1m">1m</button><button class="tf" data-tf="5m">5m</button>
@@ -148,8 +194,11 @@
   <div id="chart"></div>
   <div id="sys">
     <div class="panel">
-      <h2>Wallet</h2>
+      <h2>Wallet <span class="pill">USDT-M margin</span></h2>
       <div class="kv"><span>Equity</span><b id="w-eq">—</b></div>
+      <div class="kv"><span>Available</span><b id="w-avail">—</b></div>
+      <div class="kv"><span>Committed (margin)</span><b id="w-comm">—</b></div>
+      <div class="kv"><span>Unrealized</span><b id="w-unr">—</b></div>
       <div id="w-bal"></div>
     </div>
     <div class="panel">
@@ -191,7 +240,10 @@
       <button class="tf" id="st-toggle" style="margin-top:8px;width:100%" onclick="toggleStrat()">▶ start</button>
     </div>
   </div>
-  <div id="activity"><h2>Activity</h2><div id="decisions"></div></div>
+  <div id="sys" style="grid-template-columns:1fr 1fr">
+    <div id="activity"><h2>Activity</h2><div id="decisions"></div></div>
+    <div id="activity"><h2>Recent Trades</h2><table id="trades"></table></div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -222,9 +274,24 @@ function connect(){
 
 function onAccount(a){
   account = a;
-  // overview top bar
-  $("equity").textContent = a.wallet.equity ? a.wallet.equity+' '+a.wallet.quote : '—';
-  $("cash").textContent = a.wallet.balances[a.wallet.quote] || '0';
+  // boot loading screen — hold the grid until every bot is up and live
+  const sd = a.seeding || {done:true};
+  if (sd.done){ $("loader").style.display='none'; }
+  else {
+    const pct = sd.target ? Math.round(sd.ready/sd.target*100) : 0;
+    $("lfill").style.width = pct+'%';
+    $("lpct").textContent = pct+'%';
+    $("lmsg").textContent = 'loading bots · fetching live state…';
+    $("lcount").textContent = `${sd.ready} / ${sd.target||'?'} bots ready`;
+    $("loader").style.display='flex';
+  }
+  // overview top bar — futures margin figures
+  const w = a.wallet;
+  $("equity").textContent = w.equity ?? '—';
+  $("avail").textContent = w.available ?? '—';
+  $("committed").textContent = w.committed ?? '—';
+  $("h-run").textContent = w.running==null?'—':signed(w.running); $("h-run").className = parseFloat(w.running)>=0?'pos':'neg';
+  $("h-net").textContent = w.net==null?'—':signed(w.net); $("h-net").className = parseFloat(w.net)>=0?'pos':'neg';
   $("oms").textContent = a.halted ? 'HALTED' : (a.accepting ? 'LIVE' : 'starting');
   $("oms").className = a.halted ? 'neg' : 'good';
   $("oms-dot").className = 'dot ' + (a.halted ? 'bad' : 'ok');
@@ -250,8 +317,8 @@ function makeCard(sym){
     <canvas class="spark" width="300" height="40" data-spark></canvas>
     <div class="row"><span class="badge none" data-stance>—</span>
       <div class="kvv"><b data-pos>0</b><span>position</span></div>
-      <div class="kvv"><b data-rpnl>—</b><span>realized</span></div>
-      <div class="kvv"><b data-upnl>—</b><span>unreal</span></div></div>
+      <div class="kvv" style="text-align:right"><b data-ppnl>—</b><span>position p&l · running</span></div>
+      <div class="kvv" style="text-align:right"><b data-npnl>—</b><span>net p&l · total</span></div></div>
     <div class="ctl"><select data-strat></select><button class="btn" data-go>start</button></div>
     <div class="sizerow"><input data-size type="number" step="10" min="10"/>
       <button class="btn" data-setsize>set usdt</button>
@@ -260,7 +327,7 @@ function makeCard(sym){
   $("grid").appendChild(el);
   const q = s => el.querySelector(s);
   cards[sym] = { data:{}, el, refs:{ px:q('[data-px]'), spark:q('[data-spark]'), stance:q('[data-stance]'),
-    pos:q('[data-pos]'), rpnl:q('[data-rpnl]'), upnl:q('[data-upnl]'), strat:q('[data-strat]'),
+    pos:q('[data-pos]'), ppnl:q('[data-ppnl]'), npnl:q('[data-npnl]'), strat:q('[data-strat]'),
     go:q('[data-go]'), size:q('[data-size]'), last:q('[data-last]'), work:q('[data-work]') }};
   q('[data-x]').onclick = () => closeBot(sym);
   q('[data-go]').onclick = () => post(`/${sym}/strategy/${cards[sym].data.running?'stop':'start'}`);
@@ -279,9 +346,14 @@ function paintCard(c){
   r.stance.textContent = c.stance || 'FLAT'; r.stance.className = 'badge '+(c.stance||'FLAT');
   r.pos.textContent = c.position;
   r.pos.className = parseFloat(c.position)>0?'pos':parseFloat(c.position)<0?'neg':'';
-  r.rpnl.textContent = signed(c.realized); r.rpnl.className = parseFloat(c.realized)>=0?'pos':'neg';
-  r.upnl.textContent = c.unrealized===null?'—':signed(c.unrealized);
-  r.upnl.className = parseFloat(c.unrealized)>=0?'pos':'neg';
+  const pnlCell = (usd, pct) => {
+    if (usd===null||usd===undefined) return '<span class="dim">—</span>';
+    const cls = parseFloat(usd)>=0?'pos':'neg';
+    const p = (pct===null||pct===undefined) ? '' : ` <span style="font-size:11px">(${signed(pct)}%)</span>`;
+    return `<span class="${cls}">${signed(usd)}${p}</span>`;
+  };
+  r.ppnl.innerHTML = pnlCell(c.unrealized, c.roe);   // open position, running
+  r.npnl.innerHTML = pnlCell(c.net, c.net_roe);      // realized + unrealized
   if (r.strat.options.length !== (c.available||[]).length)
     r.strat.innerHTML = (c.available||[]).map(n=>`<option>${n}</option>`).join('');
   r.strat.value = c.selected; r.go.textContent = c.running?'stop':'start';
@@ -338,8 +410,18 @@ function openTerminal(sym){
   refreshChart(sym);
 }
 function showOverview(){
-  activeSym=null; $("terminal").style.display='none'; $("overview").style.display='block';
+  activeSym=null; $("terminal").style.display='none'; $("backtest").style.display='none';
+  $("overview").style.display='block';
   if(chart){ chart.remove(); chart=null; }
+}
+function showBacktest(){
+  activeSym=null; $("overview").style.display='none'; $("terminal").style.display='none';
+  if(chart){ chart.remove(); chart=null; }
+  $("backtest").style.display='block';
+  if (!$("bt-symbol").options.length)
+    $("bt-symbol").innerHTML = (account.predefined||[]).map(s=>`<option>${s}</option>`).join('');
+  if (!$("bt-strategy").options.length)
+    $("bt-strategy").innerHTML = (account.strategies||[]).map(s=>`<option>${s}</option>`).join('');
 }
 $("tfbar").addEventListener('click', e => {
   const iv = e.target.dataset.tf; if(!iv||!activeSym) return;
@@ -348,8 +430,13 @@ $("tfbar").addEventListener('click', e => {
 function fmtLat(x){ return x ? `${x.p50} · ${x.p95} · ${x.p99} ms` : '—'; }
 function paintTerminalAccount(){
   const a=account, m=a.metrics||{}, c=m.counters||{}, l=m.latency||{}, g=m.gauges||{};
-  $("w-eq").textContent = a.wallet.equity ? a.wallet.equity+' '+a.wallet.quote : '—';
-  $("w-bal").innerHTML = Object.entries(a.wallet.balances||{}).map(([k,v])=>
+  const w = a.wallet;
+  $("w-eq").textContent = w.equity ? w.equity+' '+w.quote : '—';
+  $("w-avail").textContent = w.available ?? '—';
+  $("w-comm").textContent = w.committed ?? '—';
+  $("w-unr").textContent = w.unrealized==null?'—':signed(w.unrealized);
+  $("w-unr").className = parseFloat(w.unrealized)>=0?'pos':'neg';
+  $("w-bal").innerHTML = Object.entries(w.balances||{}).map(([k,v])=>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
   $("s-status").textContent = a.halted?'HALTED':'LIVE'; $("s-status").className = a.halted?'neg':'good';
   $("sdot").className = 'dot '+(a.halted?'bad':'ok');
@@ -372,10 +459,10 @@ function paintTerminalCard(c){
   $("tprice").textContent = c.price ? Number(c.price).toLocaleString() : '—';
   $("position").textContent = c.position;
   $("position").className = parseFloat(c.position)>0?'pos':parseFloat(c.position)<0?'neg':'';
-  $("avg").textContent = c.avg_cost || '—';
-  $("unreal").textContent = c.unrealized===null?'—':signed(c.unrealized);
-  $("unreal").className = parseFloat(c.unrealized)>=0?'pos':'neg';
-  $("real").textContent = signed(c.realized); $("real").className = parseFloat(c.realized)>=0?'pos':'neg';
+  $("net").textContent = c.net==null?'—':signed(c.net); $("net").className = parseFloat(c.net)>=0?'pos':'neg';
+  $("roe").textContent = c.roe==null?'—':signed(c.roe)+'%'; $("roe").className = parseFloat(c.roe)>=0?'pos':'neg';
+  $("ru").innerHTML = `<span class="${parseFloat(c.realized)>=0?'pos':'neg'}">${signed(c.realized)}</span>` +
+    ` · <span class="${parseFloat(c.unrealized)>=0?'pos':'neg'}">${c.unrealized==null?'—':signed(c.unrealized)}</span>`;
   $("s-age").textContent = c.price_age!=null ? c.price_age+' s' : '—';
   // strategy panel
   $("st-name").textContent = c.strategy || '—';
@@ -415,7 +502,63 @@ function refreshChart(sym){
     $("decisions").innerHTML = (d.decisions||[]).map(x=>
       `<div class="aline"><span class="dim">${(x.at||'').slice(11,19)}</span> ${x.actor||''} · ${x.decision||''}</div>`).join('')
       || '<div class="dim">no activity yet</div>';
+    const tt = t => new Date(t*1000).toISOString().slice(11,19);
+    $("trades").innerHTML = (d.trades||[]).length
+      ? '<tr><th>time</th><th>side</th><th>qty</th><th>price</th></tr>' +
+        d.trades.map(f=>`<tr><td class="dim">${tt(f.t)}</td>
+          <td class="${f.side==='BUY'?'pos':'neg'}">${f.side}</td>
+          <td>${f.qty}</td><td>${f.price}</td></tr>`).join('')
+      : '<tr><td class="dim">no trades yet</td></tr>';
   });
+}
+
+// ------------------------------------------------------------------ backtest
+async function runBacktest(){
+  const sym = $("bt-symbol").value, strat = $("bt-strategy").value;
+  if (!sym) return;
+  const p = new URLSearchParams({ symbol: sym, strategy: strat,
+    interval: $("bt-interval").value, days: $("bt-days").value,
+    cost_bps: $("bt-cost").value, budget: $("bt-budget").value });
+  $("bt-result").innerHTML = `<div class="dim" style="padding:16px">running ${strat} on ${sym} · ${$("bt-days").value}d…</div>`;
+  try {
+    const d = await (await fetch("/backtest?"+p.toString(), {method:"POST"})).json();
+    if (d.error){ $("bt-result").innerHTML = `<div class="neg" style="padding:16px">${d.error}</div>`; return; }
+    renderBacktest(d);
+  } catch(e){ $("bt-result").innerHTML = `<div class="neg" style="padding:16px">${e}</div>`; }
+}
+function btCurve(curve){
+  if (!curve || !curve.length) return "";
+  const W=560, H=170, pad=4;
+  const t0=curve[0].t, t1=curve[curve.length-1].t;
+  const vals=curve.flatMap(p=>[p.net,p.hold]);
+  const lo=Math.min(...vals), hi=Math.max(...vals);
+  const x=t=>pad+(t1===t0?0:(t-t0)/(t1-t0))*(W-2*pad);
+  const y=v=>pad+(1-(hi===lo?0:(v-lo)/(hi-lo)))*(H-2*pad);
+  const line=(k,c)=>`<polyline fill="none" stroke="${c}" stroke-width="1.5" points="${
+    curve.map(p=>x(p.t).toFixed(1)+","+y(p[k]).toFixed(1)).join(" ")}"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:#0b100e;border:1px solid var(--edge);border-radius:6px">
+    ${line("hold","#6b7280")}${line("net","#fbbf24")}</svg>
+    <div style="display:flex;gap:16px;font-size:11px;margin-top:4px">
+      <span style="color:#fbbf24">━ strategy (net)</span>
+      <span style="color:#6b7280">━ buy &amp; hold</span></div>`;
+}
+function renderBacktest(d){
+  const pct=x=>(x*100>=0?"+":"")+(x*100).toFixed(2)+"%";
+  const edge=d.net_return-d.buy_hold_return;
+  const row=(l,v,c)=>`<div class="kv"><span>${l}</span><b class="${c||''}">${v}</b></div>`;
+  const rows=[
+    row("Net return", pct(d.net_return), d.net_return>=0?"pos":"neg"),
+    row("Buy &amp; hold", pct(d.buy_hold_return), d.buy_hold_return>=0?"pos":"neg"),
+    row("Edge vs hold", pct(edge)+" · "+(edge>0?"beats":"loses to")+" hold", edge>0?"pos":"neg"),
+    row("Gross return", pct(d.gross_return)),
+    row("Sharpe (net)", d.sharpe.toFixed(2), d.sharpe>=0?"pos":"neg"),
+    row("Max drawdown", (d.max_drawdown*100).toFixed(1)+"%", "neg"),
+    row("Trades", d.trades),
+    row("Fees paid", d.fees.toFixed(2)+" USDT"),
+  ].join("");
+  $("bt-result").innerHTML =
+    `<div class="dim" style="font-size:11px;margin-bottom:8px">${d.strategy} · ${d.symbol} · ${d.interval} · ${d.bars} bars · ${d.days}d · budget ${d.budget.toFixed(0)} USDT</div>` +
+    btCurve(d.curve) + `<div style="margin-top:10px">${rows}</div>`;
 }
 
 connect();

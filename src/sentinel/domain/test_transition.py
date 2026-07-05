@@ -140,10 +140,20 @@ def test_cancel_only_from_live_states():
 # --------------------------------------------------------- R1.10 never over
 
 
-def test_overfill_raises_never_absorbed():
-    o = order(OrderState.PARTIAL, filled="3")
+def test_venue_overmatch_clamps_to_qty_never_over_books():
+    # A resting maker matched past its qty (fill granularity / demo over-match):
+    # the order COMPLETES, clamped to qty — the order book never exceeds what we
+    # asked. The fill row still carries the real qty into the position, so
+    # exposure tracks the exchange without the order booking more than ordered.
+    o = transition(order(OrderState.PARTIAL, qty="4", filled="3"), fill("2"))
+    assert o.state is OrderState.FILLED and o.filled_qty == Decimal("4")
+
+
+def test_gross_overfill_still_halts():
+    # A broker report beyond a sane multiple of the order qty can't be a mere
+    # over-match — it's a double-submit / parse bug. Never absorbed: halt.
     with pytest.raises(OverfillViolation):
-        transition(o, fill("2"))
+        transition(order(OrderState.WORKING, qty="4", filled="0"), fill("9"))
 
 
 def test_zero_or_negative_fill_rejected():
@@ -185,10 +195,18 @@ def test_reconciling_ingests_fills_without_concluding():
     assert o.filled_qty == 4
 
 
-def test_reconciling_backfill_cannot_overfill():
-    o = order(OrderState.RECONCILING, filled="3")
+def test_reconciling_backfill_overmatch_clamps_to_qty():
+    # Backfilling a venue over-match: the order's booked fill clamps to qty and
+    # stays RECONCILING (only resolution concludes). Never over-books.
+    o = order(OrderState.RECONCILING, qty="4", filled="3")
+    o = transition(o, fill("2"))
+    assert o.state is OrderState.RECONCILING and o.filled_qty == Decimal("4")
+
+
+def test_reconciling_backfill_gross_overfill_halts():
+    o = order(OrderState.RECONCILING, qty="4", filled="0")
     with pytest.raises(OverfillViolation):
-        transition(o, fill("2"))
+        transition(o, fill("9"))
 
 
 # ------------------------------------------------- R1.11/R1.12 reconciliation
@@ -236,17 +254,22 @@ def test_resolution_conclusively_absent_becomes_canceled_unexposed():
     assert o.state is OrderState.CANCELED and o.filled_qty == 0
 
 
-def test_resolution_cannot_exceed_order_qty():
-    o = order(OrderState.RECONCILING)
+def test_resolution_overmatch_clamps_to_qty():
+    # Broker reports a resting order matched past its qty: resolution books it
+    # to qty (order invariant holds); the fills carry true position.
+    o = order(OrderState.RECONCILING, qty="4")
+    o = transition(o, ReconcileResolved(
+        resolved_state=OrderState.FILLED, broker_order_id="B9",
+        filled_qty=Decimal("4.1")))
+    assert o.state is OrderState.FILLED and o.filled_qty == Decimal("4")
+
+
+def test_resolution_gross_overfill_halts():
+    o = order(OrderState.RECONCILING, qty="4")
     with pytest.raises(OverfillViolation):
-        transition(
-            o,
-            ReconcileResolved(
-                resolved_state=OrderState.FILLED,
-                broker_order_id="B9",
-                filled_qty=Decimal("5"),
-            ),
-        )
+        transition(o, ReconcileResolved(
+            resolved_state=OrderState.FILLED, broker_order_id="B9",
+            filled_qty=Decimal("9")))
 
 
 def test_resolution_only_from_reconciling():

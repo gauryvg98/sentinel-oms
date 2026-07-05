@@ -31,6 +31,8 @@ from .market import MarketData
 from .strategy_runner import StrategyRunner
 
 STATIC = Path(__file__).parent / "static"
+# Stablecoins counted 1:1 as dollar margin collateral for the equity model.
+_STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
 
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -277,6 +279,7 @@ class Venue:
     # fixed max notional becomes the right qty for BTC, ETH or DOGE alike.
     cap_for: Callable[[InstrumentSpec, "Decimal | None"], "Decimal | None"]
     default_interval: str = "1m"
+    leverage: int = 1               # margin = notional / leverage (equity model)
 
 
 class Bot:
@@ -400,6 +403,18 @@ class Bot:
         q = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
         working = [o for o in await self.app.store.recent_orders(20, self.symbol)
                    if o["state"] not in ("FILLED", "CANCELED", "REJECTED")]
+        # Two P&L views on the position's cost basis (== margin at 1x):
+        #   running (roe)  — unrealized only: how the OPEN position is doing now
+        #   net (net_roe)  — realized + unrealized: total incl. closed trades
+        net = roe = net_roe = None
+        if pnl:
+            net = (pnl.realized or Decimal(0)) + (pnl.unrealized or Decimal(0))
+            basis = (abs(pnl.avg_cost * pnl.position)
+                     if pnl.avg_cost and pnl.position else None)
+            if basis and basis > 0:
+                if pnl.unrealized is not None:
+                    roe = pnl.unrealized / basis * 100
+                net_roe = net / basis * 100
         return {
             "type": "card",
             "symbol": self.symbol,
@@ -418,6 +433,9 @@ class Bot:
             "avg_cost": q(pnl.avg_cost) if pnl else None,
             "realized": q(pnl.realized) if pnl else "0.00",
             "unrealized": q(pnl.unrealized) if pnl else None,
+            "net": q(net),
+            "roe": str(round(roe, 2)) if roe is not None else None,
+            "net_roe": str(round(net_roe, 2)) if net_roe is not None else None,
             "working": len(working),
             "spark": self._spark(),
             "spec": {"lot_step": str(self.spec.lot_step),
@@ -444,6 +462,7 @@ class Bot:
                 interval_seconds(self.market.interval)),
             "working": [o for o in await self.app.store.recent_orders(30, self.symbol)
                         if o["state"] not in ("FILLED", "CANCELED", "REJECTED")],
+            "trades": await self.app.store.recent_fills(self.symbol, limit=25),
             "decisions": await self.app.store.recent_decisions(8, self.symbol),
             "strategy": {**s, "entry_usdt": format(self.size["usdt"], "f")},
         }
@@ -457,14 +476,22 @@ class InstrumentManager:
     the shared caps dict feeds the exposure guard's per-symbol resolver."""
 
     def __init__(self, app: SentinelApp, venue: Venue, strategies: dict, *,
-                 default_strategy: str, default_usdt: Decimal, caps: dict) -> None:
+                 default_strategy: str, default_usdt: Decimal, caps: dict,
+                 margin_assets: set[str] | None = None) -> None:
         self.app = app
         self.venue = venue
         self.strategies = strategies
         self.default_strategy = default_strategy
         self.default_usdt = default_usdt
         self.caps = caps                       # {symbol: cap} read by the guard
+        # Which balances count as margin collateral. Multi-asset mode -> all
+        # stablecoins; single-asset USDT-M -> just {"USDT"}.
+        self.margin_assets = margin_assets or set(_STABLES)
         self.bots: dict[str, Bot] = {}
+        # Initial-load progress for the boot loading screen: reveal the grid only
+        # once every bot is up and in its correct live state.
+        self.seed_target = 0
+        self.seed_done = False
         self._lock = asyncio.Lock()
 
     def get(self, symbol: str) -> Bot | None:
@@ -473,12 +500,15 @@ class InstrumentManager:
     def roster(self) -> list[str]:
         return list(self.bots)
 
-    async def add(self, symbol: str) -> dict:
+    async def add(self, symbol: str, *, allow_unlisted: bool = False) -> dict:
+        # allow_unlisted: bring up a bot for a symbol OUTSIDE the predefined
+        # menu — used on boot to surface a symbol that already carries an open
+        # position, so a live trade is never left without a card.
         symbol = symbol.upper()
         async with self._lock:
             if symbol in self.bots:
                 return {"error": "already added"}
-            if symbol not in self.venue.predefined:
+            if not allow_unlisted and symbol not in self.venue.predefined:
                 return {"error": f"{symbol} not in the predefined list"}
             try:
                 spec = await self.venue.fetch_spec(symbol)
@@ -512,23 +542,42 @@ class InstrumentManager:
 
     async def account_snapshot(self) -> dict:
         """Account-wide state every card shares (topic 'account'/'roster'):
-        liveness, metrics, order totals, invariants, roster, wallet + equity.
-        Equity prices each active base at its own bot's mark."""
+        liveness, metrics, order totals, invariants, roster, wallet.
+
+        USDT-M futures margin model (matches Binance): cash is the USDT wallet
+        balance; each open position ties up initial margin (notional / leverage)
+        and carries unrealized P&L.
+            equity    = cash + Σ unrealized      (Binance 'margin balance')
+            committed = Σ position margin         (initial margin in use)
+            available = cash − committed          (free to open more)
+        Non-USDT balances aren't marked into equity — on single-asset USDT-M
+        they don't exist; pricing a stray demo dust asset only misleads."""
         balances = self.app.latest_balances
         quote = "USDT"
         q = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
-        equity = balances.get(quote, Decimal(0))
-        bases = {quote}
+        # Dollar collateral = every stablecoin balance at ~1:1 (multi-asset
+        # margin holds USDT AND USDC/etc.). Counting only USDT would understate
+        # equity vs what the exchange shows when both are funded.
+        cash = sum((v for a, v in balances.items() if a in self.margin_assets),
+                   Decimal(0))
+        unrealized = Decimal(0)     # running: open positions, mark-to-market
+        realized = Decimal(0)       # locked in from closed trades
+        committed = Decimal(0)
+        lev = Decimal(self.venue.leverage or 1)
         for bot in self.bots.values():
-            base = bot.symbol[:-len(quote)] if bot.symbol.endswith(quote) else None
-            if not base:
+            pnl = await bot._pnl()
+            if pnl is None:
                 continue
-            bases.add(base)
-            mark = bot.market.latest(bot.symbol)
-            if mark and balances.get(base):
-                equity += balances[base] * mark.price
+            if pnl.unrealized is not None:
+                unrealized += pnl.unrealized
+            realized += pnl.realized or Decimal(0)
+            if pnl.avg_cost and pnl.position:
+                committed += abs(pnl.avg_cost * pnl.position) / lev
+        net = realized + unrealized     # total P&L across the whole account
+        equity = cash + unrealized
+        available = cash - committed
         shown = {a: format(v.normalize(), "f")
-                 for a, v in sorted(balances.items()) if a in bases and v}
+                 for a, v in sorted(balances.items()) if v}
         return {
             "type": "account",
             "accepting": self.app.accepting,
@@ -539,7 +588,18 @@ class InstrumentManager:
             "invariants": await check_invariants(self.app),
             "roster": self.roster(),
             "predefined": list(self.venue.predefined),
-            "wallet": {"balances": shown, "equity": q(equity), "quote": quote},
+            "strategies": list(self.strategies),
+            "seeding": {"ready": len(self.bots), "target": self.seed_target,
+                        "done": self.seed_done},
+            "wallet": {
+                "balances": shown, "quote": quote,
+                "cash": q(cash), "equity": q(equity),
+                "committed": q(committed), "available": q(available),
+                "unrealized": q(unrealized),
+                "running": q(unrealized),     # portfolio running P&L (open)
+                "realized": q(realized),
+                "net": q(net),                # portfolio net P&L (realized+unreal)
+            },
         }
 
 
@@ -547,14 +607,16 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
              default_strategy: str | None = None,
              strategy_usdt: Decimal = Decimal("15"),
              caps: dict | None = None,
-             initial_symbols: tuple[str, ...] = ()) -> FastAPI:
+             initial_symbols: tuple[str, ...] = (),
+             margin_assets: set[str] | None = None) -> FastAPI:
     strategies = strategies or {}
     default_strategy = default_strategy or next(iter(strategies), None)
     caps = caps if caps is not None else {}
     ui = FastAPI(title="sentinel-terminal")
     mgr = InstrumentManager(app, venue, strategies,
                             default_strategy=default_strategy,
-                            default_usdt=strategy_usdt, caps=caps)
+                            default_usdt=strategy_usdt, caps=caps,
+                            margin_assets=margin_assets)
     ui.state.manager = mgr
 
     @ui.on_event("startup")
@@ -565,8 +627,52 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
         except AnotherWriterActive as e:
             print(f"\n  REFUSING TO START: {e}\n", flush=True)
             os._exit(1)
-        for sym in initial_symbols:
-            await mgr.add(sym)
+        # Seed the roster in the BACKGROUND so the page binds immediately and
+        # cards stream in as each bot's history loads — booting N bots serially
+        # in the startup hook would otherwise hold the port for tens of seconds.
+        app.supervisor.spawn("seed-roster", _seed_roster, restart=False)
+
+    async def _seed_roster() -> None:
+        async def _try_add(sym: str, **kw) -> None:
+            try:
+                await mgr.add(sym, **kw)
+            except Exception as e:  # noqa: BLE001 — one bad symbol mustn't halt
+                print(f"  could not add {sym}: {e!r}", flush=True)
+
+        # Full target up front (configured roster + every symbol already holding
+        # a position, recovered from the durable ledger) so the loading screen
+        # can show real progress.
+        positions = await app.store.load_positions()
+        target = list(dict.fromkeys([*initial_symbols, *positions]))
+        mgr.seed_target = len(target)
+        await app.changes.bump("account")
+
+        for sym in target:
+            if mgr.get(sym) is None:
+                await _try_add(sym, allow_unlisted=sym not in initial_symbols)
+            await app.changes.bump("account")           # advance the % bar
+
+        # An open position MUST be managed: auto-start its bot (instant — just
+        # flips the runner on) BEFORE we reveal, so each card shows its true live
+        # state, never a stale "off". Unmanaged exposure is naked risk.
+        for sym in positions:
+            bot = mgr.get(sym)
+            if bot is not None and not bot.runner.running:
+                bot.start()
+                await app.changes.bump(sym)
+
+        mgr.seed_done = True
+        await app.changes.bump("account")               # reveal the grid
+
+        # Reconcile positions to their strategy target in the background, AFTER
+        # the page is live — this does network I/O and must not gate the reveal.
+        for sym in positions:
+            bot = mgr.get(sym)
+            if bot is not None:
+                try:
+                    await bot.runner.reconcile_now()
+                except Exception:  # noqa: BLE001 — arming must never halt
+                    pass
 
     @ui.get("/")
     async def index():

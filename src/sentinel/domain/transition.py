@@ -29,6 +29,16 @@ from .events import (
 )
 from .states import ALLOWED, TERMINAL, OrderState
 
+# A resting maker can be matched by the venue for MORE than it asked — fill
+# granularity, or a demo engine that over-matches a resting order. The exchange
+# is the source of truth (R1.12): we clamp the ORDER's recorded fill to its qty
+# (the order invariant holds — filled never exceeds qty) while the fill rows
+# carry the real executed quantity into the POSITION, so our exposure tracks the
+# exchange rather than our order book. Only an ABSURD overfill — beyond this
+# multiple of the order qty — is treated as a genuine bug (double-submit,
+# broker/parse error) and HALTS; that can't be a mere over-match.
+_OVERFILL_GROSS = Decimal("2")   # > 2x the order qty = something is truly wrong
+
 
 @dataclass(frozen=True, slots=True)
 class OrderCore:
@@ -105,15 +115,19 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
             if fqty <= 0:
                 raise IllegalTransition(f"fill qty must be positive, got {fqty}")
             new_filled = order.filled_qty + fqty
-            if new_filled > order.qty:
+            if new_filled > order.qty * _OVERFILL_GROSS:
                 raise OverfillViolation(
                     f"fill of {fqty} takes filled to {new_filled} > order qty {order.qty}"
                 )
+            # Clamp the order's recorded fill to its qty: a tolerated overfill
+            # completes the order (filled never exceeds qty) while the fill row
+            # still carries the real quantity into the position projection.
+            recorded = min(new_filled, order.qty)
             if s is OrderState.RECONCILING:
                 # Reconciliation ingests evidence but never concludes from it:
                 # even a completing fill stays RECONCILING until resolution.
                 target = OrderState.RECONCILING
-            elif new_filled == order.qty:
+            elif recorded >= order.qty:
                 target = OrderState.FILLED
             elif s is OrderState.CANCEL_PENDING:
                 # Cancel is still open at the broker; the partial fill does not
@@ -122,7 +136,7 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
             else:
                 target = OrderState.PARTIAL
             _guard(s, target)
-            return replace(order, state=target, filled_qty=new_filled)
+            return replace(order, state=target, filled_qty=recorded)
 
         case CancelRequested():
             if s not in (OrderState.WORKING, OrderState.PARTIAL):
@@ -150,14 +164,16 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
             if s is not OrderState.RECONCILING:
                 raise IllegalTransition(f"resolve in {s.value}")
             _guard(s, rs)
-            if bfilled < 0 or bfilled > order.qty:
+            if bfilled < 0 or bfilled > order.qty * _OVERFILL_GROSS:
                 raise OverfillViolation(
                     f"broker filled_qty {bfilled} outside [0, {order.qty}]"
                 )
             # Broker truth REPLACES local belief (R1.12). The pre-reconcile
-            # snapshot remains in the ledger, so divergence is auditable.
+            # snapshot remains in the ledger, so divergence is auditable. A
+            # tolerated overfill is clamped to qty so order invariants hold.
             return replace(
-                order, state=rs, broker_order_id=bid, filled_qty=bfilled
+                order, state=rs, broker_order_id=bid,
+                filled_qty=min(bfilled, order.qty),
             )
 
     raise IllegalTransition(f"unhandled event {type(event).__name__} in {s.value}")

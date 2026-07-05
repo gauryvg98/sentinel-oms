@@ -35,7 +35,21 @@ def _venue():
     """Select spot (long/flat) or USDT-M futures (long/short) by SENTINEL_VENUE.
     Returns (adapter, market, bar_feed, max_position, allow_short)."""
     interval = os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m")
-    if os.environ.get("SENTINEL_VENUE") == "futures":
+    venue = os.environ.get("SENTINEL_VENUE")
+    if venue == "bybit":
+        # Bybit V5 USDT-perp testnet for EXECUTION (generally open, faucet-funded).
+        # Market data stays on Binance public futures — BTC is BTC, and the peg
+        # only needs a near-market price (basis across testnets is small).
+        from sentinel.broker.bybit import BybitFuturesAdapter
+        adapter = BybitFuturesAdapter(
+            os.environ["BYBIT_KEY"], os.environ["BYBIT_SECRET"], symbols=(SYMBOL,))
+        mkt = MarketData(SYMBOL, rest_base=FUT_REST, stream_base=FUT_STREAM,
+                         kline_path="/fapi/v1/klines")
+        bars = BarFeed(SYMBOL, interval, rest_base=FUT_REST, stream_base=FUT_STREAM,
+                       kline_path="/fapi/v1/klines")
+        cap = Decimal(os.environ.get("SENTINEL_MAX_POSITION", "0.05"))
+        return adapter, mkt, bars, cap, True
+    if venue == "futures":
         # Default: Binance Demo Trading (demo-fapi). Override for the classic
         # auto-funded testnet: SENTINEL_FUT_REST=https://testnet.binancefuture.com
         # SENTINEL_FUT_STREAM=wss://fstream.binancefuture.com

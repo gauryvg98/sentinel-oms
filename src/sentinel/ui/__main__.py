@@ -36,12 +36,18 @@ def _venue():
     Returns (adapter, market, bar_feed, max_position, allow_short)."""
     interval = os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m")
     if os.environ.get("SENTINEL_VENUE") == "futures":
+        # Default: Binance Demo Trading (demo-fapi). Override for the classic
+        # auto-funded testnet: SENTINEL_FUT_REST=https://testnet.binancefuture.com
+        # SENTINEL_FUT_STREAM=wss://fstream.binancefuture.com
+        rest = os.environ.get("SENTINEL_FUT_REST", FUT_REST)
+        stream = os.environ.get("SENTINEL_FUT_STREAM", FUT_STREAM)
         adapter = BinanceFuturesAdapter(
             os.environ["BINANCE_FUTURES_KEY"], os.environ["BINANCE_FUTURES_SECRET"],
-            symbols=(SYMBOL,), leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")))
-        mkt = MarketData(SYMBOL, rest_base=FUT_REST, stream_base=FUT_STREAM,
+            symbols=(SYMBOL,), base_url=rest, ws_base=stream,
+            leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")))
+        mkt = MarketData(SYMBOL, rest_base=rest, stream_base=stream,
                          kline_path="/fapi/v1/klines")
-        bars = BarFeed(SYMBOL, interval, rest_base=FUT_REST, stream_base=FUT_STREAM,
+        bars = BarFeed(SYMBOL, interval, rest_base=rest, stream_base=stream,
                        kline_path="/fapi/v1/klines")
         cap = Decimal(os.environ.get("SENTINEL_MAX_POSITION", "0.05"))  # hard exposure cap
         return adapter, mkt, bars, cap, True

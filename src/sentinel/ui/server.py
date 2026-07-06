@@ -27,6 +27,7 @@ from sentinel.oms import PlacementBlocked
 from sentinel.runtime import SentinelApp
 
 from .instruments import InstrumentSpec
+from .logbuffer import LogRing
 from .market import MarketData
 from .strategy_runner import StrategyRunner
 
@@ -37,6 +38,7 @@ _STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 _LIQ_SAFETY_S = 20.0   # slow safety re-anchor for cross-margin liq drift; the
                        # real refresh is event-driven off account changes
+_LOGS_PUSH_MIN_S = 2.0   # max cadence for pushing the logs frame over the WS
 
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
@@ -533,7 +535,8 @@ class InstrumentManager:
     def __init__(self, app: SentinelApp, venue: Venue, strategies: dict, *,
                  default_strategy: str, default_usdt: Decimal, caps: dict,
                  margin_assets: set[str] | None = None, risk_params=None,
-                 multi_asset_margin: bool = False) -> None:
+                 multi_asset_margin: bool = False,
+                 log_ring: LogRing | None = None) -> None:
         self.app = app
         self.venue = venue
         self.strategies = strategies
@@ -548,6 +551,7 @@ class InstrumentManager:
         # default) each perp is confined to its OWN settlement asset's balance —
         # summing pools would over-size and get -2019 Margin insufficient.
         self.multi_asset_margin = multi_asset_margin
+        self.log_ring = log_ring               # recent server log records (logs page)
         self.risk_params = risk_params         # None -> fixed-notional budget sizing
         self.bots: dict[str, Bot] = {}
         # Initial-load progress for the boot loading screen: reveal the grid only
@@ -757,6 +761,14 @@ class InstrumentManager:
             },
         }
 
+    async def logs_snapshot(self) -> dict:
+        """Feed for the logs page: the operational SYSTEM log (in-memory ring)
+        and the durable EVENT ledger (order lifecycle). Both newest-first for the
+        UI. Cheap enough to push every couple of seconds over the WS."""
+        events = await self.app.store.recent_events(80)
+        system = list(reversed(self.log_ring.tail(200))) if self.log_ring else []
+        return {"type": "logs", "system": system, "events": events}
+
 
 def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
              default_strategy: str | None = None,
@@ -770,12 +782,15 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
     default_strategy = default_strategy or next(iter(strategies), None)
     caps = caps if caps is not None else {}
     ui = FastAPI(title="sentinel-terminal")
+    from .logbuffer import install as install_log_ring
+    log_ring = install_log_ring()          # capture sentinel.* logs for the UI
     mgr = InstrumentManager(app, venue, strategies,
                             default_strategy=default_strategy,
                             default_usdt=strategy_usdt, caps=caps,
                             risk_params=risk_params,
                             margin_assets=margin_assets,
-                            multi_asset_margin=multi_asset_margin)
+                            multi_asset_margin=multi_asset_margin,
+                            log_ring=log_ring)
     ui.state.manager = mgr
 
     @ui.on_event("startup")
@@ -853,23 +868,40 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
             if bot is not None:
                 await websocket.send_text(json.dumps(await bot.card()))
 
-        try:
+        async def send_account() -> None:
             await websocket.send_text(json.dumps(await mgr.account_snapshot()))
+
+        async def send_logs() -> None:
+            await websocket.send_text(json.dumps(await mgr.logs_snapshot()))
+
+        try:
+            import asyncio as _aio
+            await send_account()
             for sym in mgr.roster():
                 await send_card(sym)
+            await send_logs()
             seen = app.changes.revision
+            last_logs = _aio.get_event_loop().time()
             while True:
                 nxt = await app.changes.wait_past(seen, timeout=2.0)
                 topics = app.changes.topics_since(seen)
                 seen = nxt
                 if not topics:                        # heartbeat (dead-quiet)
-                    await websocket.send_text(json.dumps(await mgr.account_snapshot()))
-                    continue
-                for topic in topics:
-                    if topic in ("account", "roster"):
-                        await websocket.send_text(json.dumps(await mgr.account_snapshot()))
-                    else:
-                        await send_card(topic)
+                    await send_account()
+                else:
+                    for topic in topics:
+                        if topic in ("account", "roster"):
+                            await send_account()
+                        else:
+                            await send_card(topic)
+                # Logs (system ring + event ledger) — pushed on any wake but rate-
+                # limited: a 2s tail is plenty and keeps the recent_events query
+                # off the hot path. The 2s heartbeat guarantees it refreshes even
+                # when idle. Server-pushed, never polled by the browser.
+                now = _aio.get_event_loop().time()
+                if now - last_logs >= _LOGS_PUSH_MIN_S:
+                    await send_logs()
+                    last_logs = now
         except WebSocketDisconnect:
             pass
 

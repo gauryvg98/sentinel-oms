@@ -111,6 +111,20 @@
   #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
            border: 1px solid var(--green); border-radius: 8px; padding: 10px 14px;
            display: none; max-width: 420px; font-size: 12px; z-index: 60; }
+  /* metrics + logs pages */
+  .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+           gap: 12px; }
+  .lgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 860px) { .lgrid { grid-template-columns: 1fr; } }
+  .logfeed { font-size: 11px; line-height: 1.7; max-height: 72vh; overflow-y: auto;
+             overflow-x: auto; }
+  .logrow { display: flex; gap: 8px; white-space: nowrap; padding: 1px 0;
+            border-bottom: 1px solid var(--bg); }
+  .logrow .ts { color: var(--dim); }
+  .logrow .lv { width: 44px; flex: none; }
+  .lv.WARNING, .lv.WARN { color: var(--amber); } .lv.ERROR, .lv.CRITICAL { color: var(--red); }
+  .lv.INFO { color: var(--dim); }
+  .ekind { color: var(--violet); } .esym { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -139,10 +153,45 @@
     <div class="stat0"><b><span class="dot" id="oms-dot"></span> <span id="oms">—</span></b><span>oms</span></div>
     <div class="stat0"><b id="fails">0</b><span>task fails</span></div>
     <div class="grow"></div>
+    <button class="btn" onclick="showMetrics()">◧ metrics</button>
+    <button class="btn" onclick="showLogs()">◧ logs</button>
     <button class="btn" onclick="showBacktest()">◧ backtest</button>
     <button class="btn add" id="addbtn">+ add instrument</button>
   </div>
   <div id="grid"></div>
+</div>
+
+<!-- ============================================================ METRICS -->
+<div id="metrics" style="display:none">
+  <div class="tmhead">
+    <button class="btn" onclick="showOverview()">‹ all bots</button>
+    <span class="brand">SENTINEL</span>
+    <span class="chip">METRICS · live</span>
+  </div>
+  <div class="mgrid">
+    <div class="panel"><h2>OMS</h2><div id="m-oms"></div></div>
+    <div class="panel"><h2>Margin</h2><div id="m-margin"></div></div>
+    <div class="panel"><h2>Orders</h2><div id="m-orders"></div></div>
+    <div class="panel"><h2>Invariants</h2><div id="m-inv"></div></div>
+    <div class="panel"><h2>Counters</h2><div id="m-counters"></div></div>
+    <div class="panel"><h2>Rates / sec</h2><div id="m-rates"></div></div>
+    <div class="panel"><h2>Latency · p50 · p95 · p99 (ms)</h2><div id="m-latency"></div></div>
+    <div class="panel"><h2>Gauges</h2><div id="m-gauges"></div></div>
+  </div>
+</div>
+
+<!-- ============================================================ LOGS -->
+<div id="logs" style="display:none">
+  <div class="tmhead">
+    <button class="btn" onclick="showOverview()">‹ all bots</button>
+    <span class="brand">SENTINEL</span>
+    <span class="chip">LOGS · live tail</span>
+    <span class="dim" id="lg-count"></span>
+  </div>
+  <div class="lgrid">
+    <div class="panel"><h2>Event ledger · order lifecycle</h2><div id="lg-events" class="logfeed dim">—</div></div>
+    <div class="panel"><h2>System log · sentinel.*</h2><div id="lg-system" class="logfeed dim">—</div></div>
+  </div>
 </div>
 
 <!-- ============================================================ BACKTEST -->
@@ -275,6 +324,7 @@ function connect(){
     const m = JSON.parse(ev.data);
     if (m.type === 'account') onAccount(m);
     else if (m.type === 'card') onCard(m);
+    else if (m.type === 'logs') onLogs(m);
   };
   ws.onclose = () => { clearInterval(wsWatchdog); $("conn").innerHTML='<span class="dot bad"></span> reconnecting'; setTimeout(connect,1000); };
   // Liveness watchdog (NOT a data poll): the server pushes at least an account
@@ -318,6 +368,7 @@ function onAccount(a){
   for (const sym of Object.keys(cards)) if (!a.roster.includes(sym)) dropCard(sym);
   renderPicker();
   if (activeSym) paintTerminalAccount();
+  if (curView==='metrics') paintMetrics();     // metrics page rides the live account frame
 }
 
 function onCard(c){
@@ -423,7 +474,7 @@ document.addEventListener('click', e => {
 // ------------------------------------------------------------------ terminal view
 function openTerminal(sym){
   activeSym = sym;
-  $("overview").style.display='none'; $("terminal").style.display='block';
+  setView('terminal');
   $("tsym").textContent = sym; $("of-scope").textContent = sym;
   $("chart").innerHTML='';
   chart = LightweightCharts.createChart($("chart"), {
@@ -437,20 +488,90 @@ function openTerminal(sym){
   if (cards[sym]) paintTerminalCard(cards[sym].data);
   refreshChart(sym);
 }
+let curView = 'overview';
+function setView(id){
+  curView = id;
+  for (const v of ['overview','terminal','backtest','metrics','logs'])
+    $(v).style.display = v===id ? 'block' : 'none';
+}
 function showOverview(){
-  activeSym=null; $("terminal").style.display='none'; $("backtest").style.display='none';
-  $("overview").style.display='block';
+  activeSym=null; setView('overview');
   if(chart){ chart.remove(); chart=null; }
 }
 function showBacktest(){
-  activeSym=null; $("overview").style.display='none'; $("terminal").style.display='none';
-  if(chart){ chart.remove(); chart=null; }
-  $("backtest").style.display='block';
+  activeSym=null; if(chart){ chart.remove(); chart=null; }
+  setView('backtest');
   if (!$("bt-symbol").options.length)
     $("bt-symbol").innerHTML = (account.predefined||[]).map(s=>`<option>${s}</option>`).join('');
   if (!$("bt-strategy").options.length)
     $("bt-strategy").innerHTML = (account.strategies||[]).map(s=>`<option>${s}</option>`).join('');
 }
+function showMetrics(){
+  activeSym=null; if(chart){ chart.remove(); chart=null; }
+  setView('metrics'); paintMetrics();
+}
+function showLogs(){
+  activeSym=null; if(chart){ chart.remove(); chart=null; }
+  setView('logs'); paintLogs();
+}
+
+// ---- metrics page (renders from the live account frame) -----------------
+function kvRows(obj, fmt){
+  const e = Object.entries(obj||{});
+  if (!e.length) return '<div class="kv dim"><span>—</span></div>';
+  return e.sort((a,b)=>a[0]<b[0]?-1:1).map(([k,v])=>
+    `<div class="kv"><span>${k}</span><b>${fmt?fmt(v):v}</b></div>`).join('');
+}
+function paintMetrics(){
+  if (curView!=='metrics' || !account) return;
+  const a=account, m=a.metrics||{}, w=a.wallet||{};
+  $("m-oms").innerHTML =
+    `<div class="kv"><span>status</span><b class="${a.halted?'neg':'good'}">${a.halted?'HALTED':'LIVE'}</b></div>`+
+    `<div class="kv"><span>accepting</span><b>${a.accepting?'yes':'no'}</b></div>`+
+    `<div class="kv"><span>task failures</span><b class="${a.task_failures?'neg':''}">${a.task_failures}</b></div>`;
+  $("m-margin").innerHTML =
+    `<div class="kv"><span>equity</span><b>${w.equity??'—'}</b></div>`+
+    `<div class="kv"><span>available</span><b>${w.available??'—'}</b></div>`+
+    `<div class="kv"><span>committed</span><b>${w.committed??'—'}</b></div>`+
+    `<div class="kv"><span>blocked</span><b>${w.blocked??'—'}</b></div>`+
+    `<div class="kv"><span>running p&l</span><b class="${parseFloat(w.running)>=0?'pos':'neg'}">${w.running==null?'—':signed(w.running)}</b></div>`+
+    `<div class="kv"><span>net p&l</span><b class="${parseFloat(w.net)>=0?'pos':'neg'}">${w.net==null?'—':signed(w.net)}</b></div>`;
+  const o=a.orders||{};
+  $("m-orders").innerHTML = kvRows(o.states||{}) +
+    `<div class="kv"><span>orders total</span><b>${o.orders_total??0}</b></div>`+
+    `<div class="kv"><span>fills total</span><b>${o.fills_total??0}</b></div>`;
+  const inv=a.invariants||{};
+  $("m-inv").innerHTML = Object.entries(inv).map(([k,v])=>
+    `<div class="kv"><span>${k}</span><b class="${v?'good':'neg'}">${v?'✓':'✗ FAIL'}</b></div>`).join('')
+    || '<div class="kv dim"><span>—</span></div>';
+  $("m-counters").innerHTML = kvRows(m.counters);
+  $("m-rates").innerHTML = kvRows(m.rates);
+  $("m-latency").innerHTML = kvRows(m.latency, v=> v&&v.p50!=null?`${v.p50} · ${v.p95} · ${v.p99}`:'—');
+  $("m-gauges").innerHTML = kvRows(m.gauges);
+}
+
+// ---- logs page (pushed 'logs' frame: system ring + event ledger) --------
+let logsData = null;
+function onLogs(m){ logsData = m; if (curView==='logs') paintLogs(); }
+function fmtClock(epoch){
+  const d = new Date(epoch*1000);
+  return d.toTimeString().slice(0,8) + '.' + String(d.getMilliseconds()).padStart(3,'0');
+}
+function paintLogs(){
+  if (curView!=='logs') return;
+  const d = logsData || {system:[], events:[]};
+  $("lg-events").innerHTML = (d.events||[]).length ? (d.events||[]).map(e=>
+    `<div class="logrow"><span class="ts">${e.seq}</span>`+
+    `<span class="ekind">${e.kind}</span>`+
+    `<span>${(e.from||'')}${e.from||e.to?'→':''}${(e.to||'')}</span>`+
+    `<span class="esym">${e.order||''}</span></div>`).join('') : '<span class="dim">no events yet</span>';
+  $("lg-system").innerHTML = (d.system||[]).length ? (d.system||[]).map(r=>
+    `<div class="logrow"><span class="ts">${fmtClock(r.t)}</span>`+
+    `<span class="lv ${r.level}">${r.level}</span>`+
+    `<span>${escapeHtml(r.msg)}</span></div>`).join('') : '<span class="dim">no log lines yet</span>';
+  $("lg-count").textContent = `${(d.events||[]).length} events · ${(d.system||[]).length} log lines`;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 $("tfbar").addEventListener('click', e => {
   const iv = e.target.dataset.tf; if(!iv||!activeSym) return;
   post(`/${activeSym}/timeframe/${iv}`).then(()=>refreshChart(activeSym)); });

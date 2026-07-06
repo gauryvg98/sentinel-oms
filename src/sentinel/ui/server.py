@@ -35,7 +35,8 @@ STATIC = Path(__file__).parent / "static"
 _STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
 
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
-_LIQ_POLL_S = 4.0    # how often to refresh liquidation/mark from the exchange
+_LIQ_SAFETY_S = 20.0   # slow safety re-anchor for cross-margin liq drift; the
+                       # real refresh is event-driven off account changes
 
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
@@ -318,7 +319,9 @@ class Bot:
         self.current = {"name": default_strategy}
         self.equity_fn = equity_fn        # account equity for risk-based sizing
         self.risk_params = risk_params    # None -> fixed-notional budget sizing
-        self.liq: dict | None = None      # {liq, mark, dist_pct} from the risk poll
+        self.liq_price: Decimal | None = None   # anchored liquidation price; the
+                                                 # live distance is derived per
+                                                 # mark tick in card()
         self.terminal = Terminal(app, market, spec)
         self.runner = self._build_runner(strategies[default_strategy]())
 
@@ -336,6 +339,18 @@ class Bot:
             return a
         m = self.market.latest(self.symbol)
         return m.price if m else None
+
+    def _liq_view(self, mark: Decimal | None) -> dict | None:
+        """Liquidation display for the card: the anchored liq price + its live
+        distance from the CURRENT mark. Pure/in-memory — recomputed on every mark
+        tick (this runs in card()), so the distance tracks price with zero fetch.
+        None when flat or no mark."""
+        if self.liq_price is None or mark is None or mark <= 0:
+            return None
+        dist = abs(self.liq_price - mark) / mark * 100
+        return {"liq": format(self.liq_price.normalize(), "f"),
+                "mark": format(mark.normalize(), "f"),
+                "dist_pct": str(round(dist, 1))}
 
     async def _notify_order_change(self) -> None:
         """The runner moved an order (placed / filled / canceled / bracket exit)
@@ -472,7 +487,10 @@ class Bot:
             "net": q(net),
             "roe": str(round(roe, 2)) if roe is not None else None,
             "net_roe": str(round(net_roe, 2)) if net_roe is not None else None,
-            "liq": self.liq,             # {liq, mark, dist_pct} or None when flat
+            # Distance to liquidation is derived HERE, off the streamed mark, so
+            # it moves live on every price tick with no extra fetch. The liq price
+            # itself is re-anchored reactively (liq_refresh_loop) on account changes.
+            "liq": self._liq_view(mark.price if mark else None),
             "working": len(working),
             "spark": self._spark(),
             "spec": {"lot_step": str(self.spec.lot_step),
@@ -577,32 +595,39 @@ class InstrumentManager:
                           if self._settle_asset(s) == asset) or 1
         return pool / sharers
 
-    async def poll_position_risk(self) -> None:
-        """Non-critical background poll: refresh each bot's liquidation + mark
-        from the exchange so the UI can show how far each leveraged position is
-        from liquidation. Swallows everything (a blip just skips a tick) — this
-        is display-only and must NEVER halt the account. Futures-only; a venue
-        without open_positions is silently skipped."""
+    async def liq_refresh_loop(self) -> None:
+        """Re-anchor each position's liquidation PRICE — event-driven, not a
+        timer poll. Wakes on the change stream and re-anchors only when the
+        ACCOUNT moved (an order filled / balance shifted → the liq price jumps);
+        plain mark ticks are ignored here because the live distance is derived
+        off the mark in Bot.card(). A slow safety wake (_LIQ_SAFETY_S) catches
+        the gradual cross-margin drift from OTHER positions' P&L.
+
+        Display-only and unsupervised: swallows everything, never halts. Futures-
+        only; a venue without open_positions is silently skipped."""
         adapter = self.venue.adapter
         if not hasattr(adapter, "open_positions"):
             return
+        seen = self.app.changes.revision
         while True:
+            nxt = await self.app.changes.wait_past(seen, timeout=_LIQ_SAFETY_S)
+            topics = self.app.changes.topics_since(seen)
+            seen = nxt
+            # Only the liq PRICE needs a refetch, and it only moves on an account
+            # change (fill/balance) — skip pure card/mark churn. Empty topics == a
+            # safety timeout, which we DO honour (cross-margin drift).
+            if topics and "account" not in topics:
+                continue
             try:
                 positions = await adapter.open_positions()
-                for sym, bot in list(self.bots.items()):
-                    bp = positions.get(sym)
-                    new = None
-                    if bp and bp.liq_price and bp.mark_price and bp.mark_price > 0:
-                        dist = abs(bp.liq_price - bp.mark_price) / bp.mark_price * 100
-                        new = {"liq": format(bp.liq_price.normalize(), "f"),
-                               "mark": format(bp.mark_price.normalize(), "f"),
-                               "dist_pct": str(round(dist, 1))}
-                    if new != bot.liq:
-                        bot.liq = new
-                        await self.app.changes.bump(sym)
-            except Exception:  # noqa: BLE001 — display poll, never propagate
-                pass
-            await asyncio.sleep(_LIQ_POLL_S)
+            except Exception:  # noqa: BLE001 — display only, never propagate
+                continue
+            for sym, bot in list(self.bots.items()):
+                bp = positions.get(sym)
+                anchor = bp.liq_price if bp else None
+                if anchor != bot.liq_price:
+                    bot.liq_price = anchor
+                    await self.app.changes.bump(sym)
 
     def get(self, symbol: str) -> Bot | None:
         return self.bots.get(symbol.upper())
@@ -765,10 +790,10 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
         # cards stream in as each bot's history loads — booting N bots serially
         # in the startup hook would otherwise hold the port for tens of seconds.
         app.supervisor.spawn("seed-roster", _seed_roster, restart=False)
-        # Liquidation/mark poll — display-only, self-healing, deliberately NOT
-        # supervised so a hiccup can't halt the account. Held on ui.state so the
-        # task isn't garbage-collected.
-        ui.state.liq_task = asyncio.create_task(mgr.poll_position_risk())
+        # Liquidation re-anchor — event-driven off the change stream, display-only,
+        # deliberately NOT supervised so a hiccup can't halt the account. Held on
+        # ui.state so the task isn't garbage-collected.
+        ui.state.liq_task = asyncio.create_task(mgr.liq_refresh_loop())
 
     async def _seed_roster() -> None:
         async def _try_add(sym: str, **kw) -> None:

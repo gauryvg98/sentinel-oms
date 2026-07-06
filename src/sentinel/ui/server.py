@@ -736,6 +736,11 @@ class InstrumentManager:
         net = realized + unrealized     # total P&L across the whole account
         equity = cash + unrealized
         available = cash - committed - blocked   # free to open more
+        # Leverage: the configured exchange setting (the 1x/2x/3x cap) vs. the
+        # EFFECTIVE leverage actually in use = gross position notional / equity.
+        # committed is notional/lev, so committed*lev recovers the gross notional.
+        gross_notional = committed * lev
+        eff_lev = (gross_notional / equity) if equity > 0 else Decimal(0)
         shown = {a: format(v.normalize(), "f")
                  for a, v in sorted(balances.items()) if v}
         return {
@@ -757,6 +762,8 @@ class InstrumentManager:
                 "cash": q(cash), "equity": q(equity),
                 "committed": q(committed), "blocked": q(blocked),
                 "available": q(available),
+                "leverage": str(int(lev)) if lev == lev.to_integral_value() else str(lev),
+                "eff_leverage": str(eff_lev.quantize(Decimal("0.01"))),
                 "unrealized": q(unrealized),
                 "running": q(unrealized),     # portfolio running P&L (open)
                 "realized": q(realized),

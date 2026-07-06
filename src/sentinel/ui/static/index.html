@@ -223,6 +223,7 @@
     <div class="stat0"><b id="avail">—</b><span>available</span></div>
     <div class="stat0"><b id="committed">—</b><span>committed</span></div>
     <div class="stat0"><b id="blocked">—</b><span>blocked (orders)</span></div>
+    <div class="stat0"><b id="lev">—</b><span>leverage</span></div>
     <div class="stat0"><b id="h-run">—</b><span>running p&l</span></div>
     <div class="stat0"><b id="h-net">—</b><span>net p&l</span></div>
     <div class="stat0"><b><span class="dot" id="oms-dot"></span> <span id="oms">—</span></b><span>oms</span></div>
@@ -331,6 +332,7 @@
       <div class="kv"><span>Available</span><b id="w-avail">—</b></div>
       <div class="kv"><span>Committed (margin)</span><b id="w-comm">—</b></div>
       <div class="kv"><span>Blocked (orders)</span><b id="w-blocked">—</b></div>
+      <div class="kv"><span>Leverage (max · effective)</span><b id="w-lev">—</b></div>
       <div class="kv"><span>Unrealized</span><b id="w-unr">—</b></div>
       <div id="w-bal"></div>
     </div>
@@ -449,6 +451,8 @@ function onAccount(a){
   $("avail").textContent = w.available ?? '—';
   $("committed").textContent = w.committed ?? '—';
   $("blocked").textContent = w.blocked ?? '—';
+  $("lev").innerHTML = w.leverage
+    ? `${w.leverage}×<span style="font-size:10px;color:var(--dim)"> · ${w.eff_leverage||'0'}× now</span>` : '—';
   $("h-run").textContent = w.running==null?'—':signed(w.running); $("h-run").className = parseFloat(w.running)>=0?'pos':'neg';
   $("h-net").textContent = w.net==null?'—':signed(w.net); $("h-net").className = parseFloat(w.net)>=0?'pos':'neg';
   $("oms").textContent = a.halted ? 'HALTED' : (a.accepting ? 'LIVE' : 'starting');
@@ -761,6 +765,7 @@ function paintTerminalAccount(){
   $("w-avail").textContent = w.available ?? '—';
   $("w-comm").textContent = w.committed ?? '—';
   $("w-blocked").textContent = w.blocked ?? '—';
+  $("w-lev").textContent = w.leverage ? `${w.leverage}× · ${w.eff_leverage||'0'}×` : '—';
   $("w-unr").textContent = w.unrealized==null?'—':signed(w.unrealized);
   $("w-unr").className = parseFloat(w.unrealized)>=0?'pos':'neg';
   $("w-bal").innerHTML = Object.entries(w.balances||{}).map(([k,v])=>

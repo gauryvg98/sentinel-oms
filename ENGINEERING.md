@@ -97,14 +97,16 @@ the whole protocol is tested exhaustively before any real feed exists — and be
 The subtlety that separates a real OMS from a toy is what it does when it *doesn't know*.
 
 ```
- CREATED ─▶ SUBMITTING ─▶ WORKING ─▶ PARTIAL ─▶ FILLED
-                │            │  ╲       │  ╲
-   timeout ─────┤            │   ╲      │   ╲ fills first
-                ▼            ▼    ▼     ▼    ▼
-             UNKNOWN    CANCEL_PENDING ─▶ CANCELED        REJECTED
-                │            ▲  (also: unsolicited STP cancel from WORKING/PARTIAL)
-                ▼            │
-           RECONCILING ──────┴──▶ resolve → broker truth  (terminal states reopen only here)
+ LIVE      CREATED ──submit──▶ SUBMITTING ──acked──▶ WORKING ⇄ PARTIAL ──filled──▶ FILLED ┐
+                                   │                    │         │                        │
+                      timeout ─────┤              cancel│   cancel│                        │ TERMINAL
+                                   │                    ▼         ▼                        │ (reopen
+                                   │              CANCEL_PENDING ──confirmed──▶ CANCELED ───┤  only via
+                                   │              unsolicited STP cancel ──────▶ CANCELED   │  reconcile)
+                                   │              SUBMITTING ──reject──────────▶ REJECTED ──┘
+                                   ▼
+ RECOVERY  UNKNOWN ──reconcile──▶ RECONCILING ──resolve──▶ broker truth (any state)
+           (only reconciliation exits UNKNOWN or reopens a terminal state)
 ```
 
 - A submission that **times out** is not rejected — its outcome is unprovable, so it parks in
@@ -182,7 +184,33 @@ fixed-interval fetch.
 
 ---
 
-## 8. The live UI
+## 8. Strategies
+
+Strategies are **pure and edge-free**: each states a desired *stance* (`LONG` / `FLAT` /
+`SHORT`) every bar and, optionally, risk hooks in the decision `detail`. The runner reconciles
+the position toward that target; the risk layer turns intent into size and protection. Three
+ship today (the point of Sentinel is execution integrity, not alpha — so they're classic):
+
+| Strategy | Signal | Risk hook |
+|---|---|---|
+| `sma` | fast/slow SMA crossover — `LONG` when fast > slow, else `FLAT` (long-only) | emits `stop_dist` = distance to the slow SMA (the trend line), floored |
+| `sma-ls` | same crossover, stop-and-reverse — `SHORT` below the cross instead of `FLAT` (spot clamps `SHORT` → `FLAT`) | same `stop_dist` geometry |
+| `regime` | regime-gated: **Donchian** breakout armed only when **ADX** trends; a **z-score** mean-reversion overlay in *range* regimes | emits `target_weight` ∈ [0,1] — **vol-targeted** conviction (risk-budget / realized-vol) |
+
+Two hooks connect a strategy to the risk layer:
+
+- **`detail["stop_dist"]`** — *where the thesis breaks.* The risk layer sizes **and** enforces
+  the SL off the same distance, so size and stop can't disagree; absent, it falls back to an
+  ATR stop.
+- **`detail["target_weight"]`** — *how convinced*, in [0,1]. Scales the risk-sized quantity —
+  `regime` uses it to shrink size as volatility rises.
+
+A strategy owns the thesis and its stop; the risk layer owns the money. That seam lets the same
+sizing / bracket / margin machinery serve a trend follower and a mean-reverter unchanged.
+
+---
+
+## 9. The live UI
 
 FastAPI serves a single-page terminal; a **topic-based change signal** pushes only what
 changed — one bot card, or the account — over one WebSocket. The browser **polls nothing**.
@@ -193,7 +221,7 @@ Metrics and an event/system log stream over the same channel to a status page an
 
 ---
 
-## 9. Properties worth calling out
+## 10. Properties worth calling out
 
 - **The core is pure.** No I/O, no clock in the domain; the entire state machine and every
   guard are unit-tested before a broker or feed exists (**315 tests**).

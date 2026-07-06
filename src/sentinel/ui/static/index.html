@@ -215,10 +215,6 @@ body.readonly #robanner{display:flex;align-items:center;gap:8px;justify-content:
   padding:6px 12px;background:#1c2a24;color:#9fe7c4;border-bottom:1px solid #244;
   font-size:12px;letter-spacing:.02em}
 body.readonly #robanner b{color:#d8ffe9}
-body.readonly #addbtn,
-body.readonly [data-go],
-body.readonly [data-setsize],
-body.readonly [data-size],
 /* ============================ cool polish ============================ */
 /* ambient glow behind the header */
 body::before { content:""; position:fixed; inset:-20% 0 auto 0; height:340px; z-index:-1;
@@ -268,10 +264,17 @@ body::before { content:""; position:fixed; inset:-20% 0 auto 0; height:340px; z-
 #loader .shield { width:38px; height:38px; margin-bottom:6px; }
 @media (prefers-reduced-motion: reduce){ *,*::before{ animation:none !important; transition:none !important } }
 
-body.readonly [data-strat],
+/* read-only public demo: hide EVERY write control (overview cards + detail).
+   ONE complete rule — do not split this selector list with other CSS. */
+body.readonly #addbtn,
+body.readonly .ctl,
+body.readonly [data-size],
+body.readonly [data-setsize],
 body.readonly [data-x],
 body.readonly #tfbar,
-body.readonly .tf{display:none !important}
+body.readonly .tf,
+body.readonly #st-select,
+body.readonly #st-size { display:none !important }
 </style>
 </head>
 <body>

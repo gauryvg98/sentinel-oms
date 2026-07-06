@@ -213,6 +213,48 @@ body.readonly #addbtn,
 body.readonly [data-go],
 body.readonly [data-setsize],
 body.readonly [data-size],
+/* ============================ cool polish ============================ */
+/* ambient glow behind the header */
+body::before { content:""; position:fixed; inset:-20% 0 auto 0; height:340px; z-index:-1;
+  background: radial-gradient(680px 300px at 50% 0, rgba(34,224,123,.07), transparent 70%);
+  pointer-events:none; }
+/* gradient, glowing wordmark */
+.brand { background: linear-gradient(90deg,#22e07b,#8ff7c4 45%,#22e07b);
+  -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  color:transparent; text-shadow:0 0 22px rgba(34,224,123,.18); }
+.brandmark { display:inline-flex; align-items:center; gap:9px; }
+.brandmark svg path { stroke:var(--green); }
+.shield { filter:drop-shadow(0 0 5px rgba(34,224,123,.5)); animation:shieldpulse 3s ease-in-out infinite; }
+@keyframes shieldpulse { 0%,100%{opacity:.9; filter:drop-shadow(0 0 3px rgba(34,224,123,.4))}
+  50%{opacity:1; filter:drop-shadow(0 0 11px rgba(34,224,123,.85))} }
+/* pulsing live dot */
+.dot.ok { animation:livepulse 2.2s ease-out infinite; }
+@keyframes livepulse { 0%{box-shadow:0 0 0 0 rgba(34,224,123,.55)}
+  70%{box-shadow:0 0 0 7px rgba(34,224,123,0)} 100%{box-shadow:0 0 0 0 rgba(34,224,123,0)} }
+/* card entrance, hover lift, running "breathe" */
+.card { transition:transform .18s ease, box-shadow .18s ease, border-color .3s ease;
+  animation:cardin .42s cubic-bezier(.22,1,.36,1) both; will-change:transform; }
+@keyframes cardin { from{opacity:0; transform:translateY(12px) scale(.985)} to{opacity:1; transform:none} }
+.card:hover { transform:translateY(-3px);
+  box-shadow:0 10px 30px rgba(0,0,0,.45), 0 0 0 1px rgba(34,224,123,.22) inset; }
+.card.run { animation:cardin .42s cubic-bezier(.22,1,.36,1) both, breathe 4s ease-in-out .42s infinite; }
+@keyframes breathe { 0%,100%{box-shadow:0 0 0 1px rgba(34,224,123,.16) inset}
+  50%{box-shadow:0 0 0 1px rgba(34,224,123,.34) inset, 0 0 18px rgba(34,224,123,.09)} }
+/* stance-change flash (rare + meaningful, not every tick) */
+.card.flash { animation:cardflash .7s ease-out; }
+@keyframes cardflash { 0%{box-shadow:0 0 0 2px var(--green), 0 0 22px rgba(34,224,123,.5)} 100%{box-shadow:none} }
+/* smooth interactive elements */
+.btn,.tf,.x,.sym,.link,select,#picker div { transition:all .15s ease; }
+.btn:hover { box-shadow:0 0 14px rgba(34,224,123,.12); }
+.badge.LONG { box-shadow:0 0 11px rgba(34,224,123,.16); }
+.badge.SHORT { box-shadow:0 0 11px rgba(248,113,113,.16); }
+/* page fade-in on view switch */
+@keyframes viewin { from{opacity:0; transform:translateY(7px)} to{opacity:1; transform:none} }
+.viewin { animation:viewin .3s cubic-bezier(.22,1,.36,1) both; }
+/* loader shield */
+#loader .shield { width:38px; height:38px; margin-bottom:6px; }
+@media (prefers-reduced-motion: reduce){ *,*::before{ animation:none !important; transition:none !important } }
+
 body.readonly [data-strat],
 body.readonly [data-x],
 body.readonly #tfbar,
@@ -225,7 +267,8 @@ body.readonly .tf{display:none !important}
 
 <div id="loader">
   <div class="loadbox">
-    <div class="brand">SENTINEL</div>
+    <svg class="shield" viewBox="0 0 24 24" fill="none"><path d="M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12.2l2.4 2.4 4.6-5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div class="brand" style="font-size:26px;letter-spacing:6px">SENTINEL</div>
     <div class="dim" style="margin-top:8px" id="lmsg">starting up…</div>
     <div class="lbar"><div class="lfill" id="lfill"></div></div>
     <div style="margin-top:10px;font-size:15px;font-weight:700" id="lpct">0%</div>
@@ -236,7 +279,7 @@ body.readonly .tf{display:none !important}
 <!-- ============================================================ OVERVIEW -->
 <div id="overview">
   <div class="ovhead">
-    <span class="brand">SENTINEL</span>
+    <span class="brandmark"><svg class="shield" viewBox="0 0 24 24" fill="none" width="22" height="22"><path d="M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12.2l2.4 2.4 4.6-5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="brand" style="font-size:16px">SENTINEL</span></span>
     <span class="pill" id="venue">multi-bot</span>
     <div class="stat0"><b id="equity">—</b><span>equity (usdt)</span></div>
     <div class="stat0"><b id="avail">—</b><span>available</span></div>
@@ -532,6 +575,13 @@ function dropCard(sym){ cards[sym]?.el.remove(); delete cards[sym]; if(activeSym
 
 function paintCard(c){
   const k = cards[c.symbol]; if(!k) return; const r=k.refs;
+  // flash the card border when the STANCE flips (a real event — a crossover),
+  // not on every price tick, so the effect stays meaningful.
+  const ns = c.stance || 'FLAT';
+  if (k._stance !== undefined && k._stance !== ns){
+    k.el.classList.remove('flash'); void k.el.offsetWidth; k.el.classList.add('flash');
+  }
+  k._stance = ns;
   k.el.classList.toggle('run', !!c.running);
   r.px.textContent = c.price ? Number(c.price).toLocaleString() : '—';
   r.stance.textContent = c.stance || 'FLAT'; r.stance.className = 'badge '+(c.stance||'FLAT');
@@ -657,8 +707,13 @@ function fmtChartTime(t){ return new Date(t*1000).toTimeString().slice(0,8); }
 let curView = 'overview';
 function setView(id){
   curView = id;
-  for (const v of ['overview','terminal','backtest','metrics','logs'])
-    $(v).style.display = v===id ? 'block' : 'none';
+  for (const v of ['overview','terminal','backtest','metrics','logs']){
+    const el = $(v);
+    if (v===id){
+      el.style.display='block';
+      el.classList.remove('viewin'); void el.offsetWidth; el.classList.add('viewin'); // retrigger fade
+    } else el.style.display='none';
+  }
 }
 function showOverview(){
   activeSym=null; setView('overview');

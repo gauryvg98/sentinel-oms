@@ -505,7 +505,8 @@ class LedgerStore:
         the set to the visible window so a long history doesn't ship hundreds
         of off-screen fills every frame."""
         base = """
-            SELECT f.exec_id, f.qty, f.price, e.occurred_at, o.side, o.authority
+            SELECT f.exec_id, f.qty, f.price, e.occurred_at, o.side, o.authority,
+                   o.client_order_id
             FROM fills f
             JOIN events e ON e.seq = f.event_seq AND e.kind = 'FILL_APPLIED'
             JOIN orders o ON o.order_id = f.order_id
@@ -535,6 +536,9 @@ class LedgerStore:
                          else "LONG" if r["side"] == "BUY" else "SHORT"),
                 "qty": format(r["qty"].normalize(), "f"),
                 "price": format(r["price"].normalize(), "f"),
+                # the order this fill belongs to — lets the UI group a peg's many
+                # partial fills into one collapsible "bot action" row.
+                "order": r["client_order_id"],
             }
             for r in rows
         ]

@@ -66,6 +66,12 @@
   .chain { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 7px 2px 2px;
     font-size: 11px; color: var(--dim); border-top: 1px solid var(--edge); padding-top: 7px; }
   .chain span { white-space: nowrap; } .chain b { color: var(--ink); font-weight: 600; }
+  /* clubbed trades + event ledger */
+  .trow.xp { cursor: pointer; }
+  .trow.xp:hover td { background: rgba(34,224,123,.06); }
+  .tw { width: 16px; color: var(--dim); }
+  #trades .tsub td { color: var(--dim); font-size: 11px; }
+  .ecount { color: var(--amber); font-size: 10px; margin: 0 5px; }
   .sizerow { display: flex; gap: 6px; align-items: center; }
   .sizerow input { width: 84px; }
   .link { cursor: pointer; color: var(--dim); text-decoration: underline dotted; }
@@ -832,11 +838,24 @@ function fmtClock(epoch){
 function paintLogs(){
   if (curView!=='logs') return;
   const d = logsData || {system:[], events:[]};
-  $("lg-events").innerHTML = (d.events||[]).length ? (d.events||[]).map(e=>
-    `<div class="logrow"><span class="ts">${e.seq}</span>`+
-    `<span class="ekind">${e.kind}</span>`+
-    `<span>${(e.from||'')}${e.from||e.to?'→':''}${(e.to||'')}</span>`+
-    `<span class="esym">${e.order||''}</span></div>`).join('') : '<span class="dim">no events yet</span>';
+  // club consecutive identical events (a peg's stream of FILL_APPLIED
+  // PARTIAL→PARTIAL becomes one "fill ×11" row), humanize the kind, colour the
+  // state transition (green settles, red rejects/cancels).
+  const EK = { FILL_APPLIED:'fill', ORDER_PLACED:'placed', ORDER_ACKED:'acked',
+    CANCEL_REQUESTED:'cancel req', ORDER_CANCELED:'canceled', ORDER_REJECTED:'rejected',
+    ORDER_EXPIRED:'expired', RECONCILED:'reconciled' };
+  const evs=[]; (d.events||[]).forEach(e=>{ const r=evs[evs.length-1];
+    if(r && r.kind===e.kind && r.from===e.from && r.to===e.to && r.order===e.order) r.n++;
+    else evs.push({...e, n:1}); });
+  const tcls = to => to==='FILLED'?'pos':(to==='REJECTED'||to==='CANCELED'||to==='EXPIRED')?'neg':'dim';
+  $("lg-events").innerHTML = evs.length ? evs.map(e=>{
+    const k = EK[e.kind] || (e.kind||'').replace(/_/g,' ').toLowerCase();
+    const trans = (e.from||e.to) ? `<span class="${tcls(e.to)}">${e.from||'∅'}→${e.to||'∅'}</span>` : '';
+    const cnt = e.n>1 ? `<span class="ecount">×${e.n}</span>` : '';
+    return `<div class="logrow"><span class="ts">${e.seq}</span>`+
+      `<span class="ekind">${k}</span>${cnt} ${trans} `+
+      `<span class="esym dim">${e.order||''}</span></div>`;
+  }).join('') : '<span class="dim">no events yet</span>';
   $("lg-system").innerHTML = (d.system||[]).length ? (d.system||[]).map(r=>
     `<div class="logrow"><span class="ts">${fmtClock(r.t)}</span>`+
     `<span class="lv ${r.level}">${r.level}</span>`+
@@ -844,6 +863,14 @@ function paintLogs(){
   $("lg-count").textContent = `${(d.events||[]).length} events · ${(d.system||[]).length} log lines`;
 }
 function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function toggleTrade(i){
+  const subs=[...document.querySelectorAll(`#trades tr.tsub[data-grp="${i}"]`)];
+  if(!subs.length) return;
+  const show = subs[0].style.display==='none';
+  subs.forEach(r=>r.style.display = show?'':'none');
+  const tw = document.querySelectorAll('#trades tr.trow')[i]?.querySelector('.tw');
+  if(tw) tw.textContent = show?'▾':'▸';
+}
 $("tfbar").addEventListener('click', e => {
   const iv = e.target.dataset.tf; if(!iv||!activeSym) return;
   post(`/${activeSym}/timeframe/${iv}`).then(()=>refreshChart(activeSym)); });
@@ -993,16 +1020,48 @@ function refreshChart(sym){
       ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>
           <b><span class="link" onclick="post('/${sym}/cancel/${o.key}')">${o.state} ✕</span></b></div>`).join('')
       : '<div class="kv dim"><span>no working orders</span></div>';
-    $("decisions").innerHTML = (d.decisions||[]).map(x=>
-      `<div class="aline"><span class="dim">${(x.at||'').slice(11,19)}</span> ${x.actor||''} · ${x.decision||''}</div>`).join('')
-      || '<div class="dim">no activity yet</div>';
+    // Activity: plain-English labels + the detail the raw feed hides (qty/reason).
+    const DEC = {
+      ENTRY_PLACED:'Entry order placed', PROTECTIVE_EXIT_PLACED:'Stop / take-profit placed',
+      PARKED_UNKNOWN:'Order parked — awaiting exchange', PLACE_BLOCKED:'Order blocked by a guard',
+      RECONCILE_RESOLVED:'Reconciled with the exchange', RECONCILE_RETRY:'Re-checking the exchange',
+      RECONCILE_HALT:'Halted — ledger vs exchange divergence' };
+    const fdet = x => { const de=x.detail||{}, p=[];
+      if(de.message && x.decision==='PLACE_BLOCKED') return de.message;
+      if(de.qty) p.push(`qty ${de.qty}`);
+      if(de.requested_qty && de.requested_qty!==de.qty) p.push(`req ${de.requested_qty}`);
+      if(de.reason) p.push(de.reason);
+      return p.join(' · '); };
+    $("decisions").innerHTML = (d.decisions||[]).map(x=>{
+      const label = DEC[x.decision] || (x.decision||'').replace(/_/g,' ').toLowerCase();
+      const extra = fdet(x);
+      return `<div class="aline"><span class="dim">${(x.at||'').slice(11,19)}</span> <b>${label}</b>`
+        + (extra?` <span class="dim">· ${extra}</span>`:'')
+        + ` <span class="pill">${x.actor||''}</span></div>`;
+    }).join('') || '<div class="dim">no activity yet</div>';
+    // Recent trades: club a peg's many partial fills into ONE action row
+    // (total qty + VWAP + fill count); click a multi-fill row to expand it.
     const tt = t => new Date(t*1000).toISOString().slice(11,19);
     const kcls = k => k==='LONG'?'pos':k==='SHORT'?'neg':'warn';
-    $("trades").innerHTML = (d.trades||[]).length
-      ? '<tr><th>time</th><th>action</th><th>qty</th><th>price</th></tr>' +
-        d.trades.map(f=>`<tr><td class="dim">${tt(f.t)}</td>
-          <td class="${kcls(f.kind)}">${f.kind||f.side}</td>
-          <td>${f.qty}</td><td>${f.price}</td></tr>`).join('')
+    const num = (v,dp=4) => Number(v).toLocaleString(undefined,{maximumFractionDigits:dp});
+    const groups=[]; (d.trades||[]).forEach(f=>{ const g=groups[groups.length-1];
+      if(g && g.order===f.order && g.kind===f.kind) g.fills.push(f);
+      else groups.push({order:f.order, kind:f.kind, t:f.t, fills:[f]}); });
+    $("trades").innerHTML = groups.length
+      ? '<tr><th></th><th>time</th><th>action</th><th>qty</th><th>avg price</th><th>fills</th></tr>' +
+        groups.map((g,i)=>{
+          const tq=g.fills.reduce((s,f)=>s+parseFloat(f.qty),0);
+          const vw=g.fills.reduce((s,f)=>s+parseFloat(f.qty)*parseFloat(f.price),0)/(tq||1);
+          const multi=g.fills.length>1;
+          const head=`<tr class="trow${multi?' xp':''}"${multi?` onclick="toggleTrade(${i})"`:''}>`
+            +`<td class="tw dim">${multi?'▸':''}</td><td class="dim">${tt(g.t)}</td>`
+            +`<td class="${kcls(g.kind)}">${g.kind}</td><td>${num(tq)}</td><td>${num(vw,6)}</td>`
+            +`<td class="dim">${g.fills.length}</td></tr>`;
+          const subs=multi? g.fills.map(f=>`<tr class="tsub" data-grp="${i}" style="display:none">`
+            +`<td></td><td class="dim">${tt(f.t)}</td><td class="dim">${g.kind}</td>`
+            +`<td>${num(f.qty)}</td><td>${num(f.price,6)}</td><td></td></tr>`).join('') : '';
+          return head+subs;
+        }).join('')
       : '<tr><td class="dim">no trades yet</td></tr>';
   });
 }

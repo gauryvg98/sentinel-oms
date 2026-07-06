@@ -147,7 +147,14 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
             return replace(order, state=OrderState.CANCEL_PENDING)
 
         case CancelConfirmed():
-            if s is not OrderState.CANCEL_PENDING:
+            # A cancel confirmation is authoritative: the order is dead at the
+            # broker. Usually it follows OUR cancel (CANCEL_PENDING), but it can
+            # also be UNSOLICITED — the venue killed a resting or partly-filled
+            # order itself: self-trade prevention (STP -> EXPIRED_IN_MATCH) or an
+            # exchange-side cancel. Accept it from WORKING/PARTIAL too, keeping
+            # any fills already applied; the remainder is gone -> CANCELED.
+            if s not in (OrderState.CANCEL_PENDING, OrderState.WORKING,
+                         OrderState.PARTIAL):
                 raise IllegalTransition(f"cancel confirmed in {s.value}")
             _guard(s, OrderState.CANCELED)
             return replace(order, state=OrderState.CANCELED)

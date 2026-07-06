@@ -137,6 +137,29 @@ def test_cancel_only_from_live_states():
             transition(order(s), CancelRequested())
 
 
+def test_unsolicited_cancel_from_working_is_accepted():
+    """STP / exchange-side cancel of a resting order we never asked to cancel:
+    a CancelConfirmed arrives straight from WORKING (not CANCEL_PENDING). It's
+    authoritative — accept it -> CANCELED, don't halt."""
+    o = order(OrderState.WORKING)
+    o = transition(o, CancelConfirmed())
+    assert o.state is OrderState.CANCELED and o.filled_qty == 0
+
+
+def test_unsolicited_cancel_from_partial_keeps_fills():
+    """The exact halt we hit: EXPIRED_IN_MATCH expires the resting remainder of a
+    partly-filled peg. CancelConfirmed from PARTIAL -> CANCELED, fills retained."""
+    o = order(OrderState.PARTIAL, filled="2")
+    o = transition(o, CancelConfirmed())
+    assert o.state is OrderState.CANCELED and o.filled_qty == 2
+
+
+def test_cancel_confirm_still_illegal_from_non_live_states():
+    for s in (OrderState.CREATED, OrderState.SUBMITTING, OrderState.FILLED):
+        with pytest.raises(IllegalTransition):
+            transition(order(s), CancelConfirmed())
+
+
 # --------------------------------------------------------- R1.10 never over
 
 

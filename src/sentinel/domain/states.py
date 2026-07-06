@@ -51,6 +51,7 @@ ALLOWED: dict[OrderState, frozenset[OrderState]] = {
             OrderState.PARTIAL,
             OrderState.FILLED,
             OrderState.CANCEL_PENDING,
+            OrderState.CANCELED,   # UNSOLICITED cancel (STP / exchange-side)
             OrderState.RECONCILING,
         }
     ),
@@ -59,6 +60,7 @@ ALLOWED: dict[OrderState, frozenset[OrderState]] = {
             OrderState.PARTIAL,   # further partial fills
             OrderState.FILLED,
             OrderState.CANCEL_PENDING,
+            OrderState.CANCELED,   # UNSOLICITED cancel of the resting remainder
             OrderState.RECONCILING,
         }
     ),

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sentinel.broker import BrokerTimeout
 from sentinel.recon import ReconciliationDivergence
 from sentinel.runtime import app as app_module
 from sentinel.runtime.app import SentinelApp
@@ -79,6 +80,30 @@ async def test_transient_error_is_retried_not_stranded(monkeypatch):
     assert app.recon.calls == ["K1", "K1", "K1"]    # two retries then success
     assert app.metrics.counts.get("reconcile_retries") == 2
     assert app.metrics.counts.get("reconciliations") == 1
+
+
+async def test_broker_timeout_retries_forever_and_never_halts(monkeypatch):
+    """A pure connectivity timeout tells us nothing dangerous — halting would
+    only stop SL/TP management while still blind. It must retry past the cap,
+    never escalating to a halt."""
+    monkeypatch.setattr(app_module, "_RECON_BACKOFF_S", 0.0)
+    monkeypatch.setattr(app_module, "_RECON_MAX_RETRIES", 3)
+    # 10 straight timeouts — well past the cap — then success. Must not raise.
+    app = _fake([BrokerTimeout("GET /fapi/v1/order: ConnectTimeout")] * 10 + [None])
+    app.engine.needs_reconcile.put_nowait("K1")
+
+    task = asyncio.create_task(SentinelApp._reconcile_loop(app))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert app.recon.calls.count("K1") >= 11         # retried every timeout + resolved
+    assert app.metrics.counts.get("reconcile_timeouts", 0) >= 10
+    assert app.metrics.counts.get("reconciliations") == 1
+    assert "reconcile_retries" not in app.metrics.counts   # not the halt-counting path
 
 
 async def test_persistent_failure_escalates_to_halt(monkeypatch):

@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import asyncpg
 
-from sentinel.broker import BrokerAdapter, BrokerBalanceUpdate
+from sentinel.broker import BrokerAdapter, BrokerBalanceUpdate, BrokerTimeout
 from sentinel.ledger import LedgerStore
 from sentinel.metrics import MetricsRegistry
 from sentinel.oms import CommandGateway, OrderEngine, WriterCoordinator
@@ -187,11 +187,17 @@ class SentinelApp:
           exposure. This is the designated halt-and-scream condition ("halt,
           do not absorb"). Let it propagate — spawned restart=False, so the
           supervisor halts. NEVER swallow it.
-        - Transient (network blip, broker 5xx): re-enqueue the key and back
-          off, so the order is not stranded in RECONCILING (which would hold
-          the instrument forever via has_unresolved). reconcile_order is
-          idempotent (exec_id dedup), so retry is safe. Past the retry cap the
-          failure is escalated to fatal rather than looped on forever."""
+        - Connectivity (BrokerTimeout: connect/read timeout, transport error):
+          we learned NOTHING — no answer from the broker. Halting here is pure
+          downside: it stops SL/TP management while we STILL can't see the
+          broker, so it raises risk instead of reducing it. Retry indefinitely
+          with backoff; the order stays RECONCILING (which safely blocks new
+          orders on that symbol — correct while we're blind), and resolves the
+          moment the network returns. Only a real disagreement halts.
+        - Other transient (broker 5xx, unexpected shape): bounded retries then
+          escalate to fatal rather than looping on forever.
+
+        reconcile_order is idempotent (exec_id dedup), so every retry is safe."""
         attempts: dict[str, int] = {}
         while True:
             key = await self.engine.needs_reconcile.get()
@@ -199,6 +205,12 @@ class SentinelApp:
                 await self.recon.reconcile_order(key)
             except ReconciliationDivergence:
                 raise  # integrity-critical: propagate -> supervisor halts
+            except BrokerTimeout:
+                # Pure connectivity failure — do NOT count toward the halt cap.
+                self.metrics.inc("reconcile_timeouts")
+                await asyncio.sleep(_RECON_BACKOFF_S)
+                await self.engine.needs_reconcile.put(key)
+                continue
             except Exception:  # noqa: BLE001 — transient; do not strand
                 n = attempts.get(key, 0) + 1
                 if n > _RECON_MAX_RETRIES:

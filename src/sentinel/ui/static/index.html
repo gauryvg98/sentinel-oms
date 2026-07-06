@@ -265,15 +265,29 @@ let activeSym = null;                 // which bot the terminal view shows (null
 let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLine=null, pegLines=[];
 
 // ------------------------------------------------------------------ websocket
+let wsWatchdog = null;
 function connect(){
   const ws = new WebSocket(`ws://${location.host}/ws`);
+  let lastMsg = Date.now();
   ws.onopen = () => { $("conn").innerHTML = '<span class="dot ok"></span> live'; };
   ws.onmessage = ev => {
+    lastMsg = Date.now();
     const m = JSON.parse(ev.data);
     if (m.type === 'account') onAccount(m);
     else if (m.type === 'card') onCard(m);
   };
-  ws.onclose = () => { $("conn").innerHTML='<span class="dot bad"></span> reconnecting'; setTimeout(connect,1000); };
+  ws.onclose = () => { clearInterval(wsWatchdog); $("conn").innerHTML='<span class="dot bad"></span> reconnecting'; setTimeout(connect,1000); };
+  // Liveness watchdog (NOT a data poll): the server pushes at least an account
+  // heartbeat every ~2s, so prolonged silence means a half-open socket that
+  // fired no onclose — the page would freeze until a manual refresh. Force a
+  // reconnect instead. Fetches nothing; only checks the connection is alive.
+  clearInterval(wsWatchdog);
+  wsWatchdog = setInterval(() => {
+    if (Date.now() - lastMsg > 6000) {
+      $("conn").innerHTML = '<span class="dot bad"></span> stalled — reconnecting';
+      try { ws.close(); } catch (e) {}     // -> onclose -> reconnect
+    }
+  }, 2000);
 }
 
 function onAccount(a){

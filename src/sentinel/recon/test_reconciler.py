@@ -180,6 +180,66 @@ async def test_local_fills_with_absent_broker_order_halts(pool):
         await bad_recon.reconcile_order("K1")
 
 
+def _view(state, filled, fills):
+    from sentinel.broker.adapter import BrokerOrderView
+    return BrokerOrderView("K1", "B1", state, Decimal(filled), tuple(fills))
+
+
+def _fill(exec_id, qty, price="4.2"):
+    from sentinel.broker.adapter import BrokerFill
+    return BrokerFill("K1", exec_id, Decimal(qty), Decimal(price))
+
+
+async def test_backfill_retries_a_lagging_trades_feed_then_reconciles(pool, monkeypatch):
+    """A resting order still filling during recovery can report a broker
+    executedQty AHEAD of its own userTrades (the feed lags). The reconciler
+    re-queries and lets the trades catch up instead of halting on a phantom gap
+    — the boot-halt we hit twice (ADA, AVAX)."""
+    from sentinel.broker import BrokerOrderState
+    from sentinel.recon import reconciler as recon_module
+    monkeypatch.setattr(recon_module, "_FILL_BACKFILL_BACKOFF_S", 0.0)
+
+    e1, e2 = _fill("E1", "1"), _fill("E2", "2", "4.25")
+
+    class LaggingBroker:
+        def __init__(self): self.calls = 0
+        async def query_order(self, coid):
+            self.calls += 1
+            if self.calls == 1:           # executedQty 3, only 1 trade reported yet
+                return _view(BrokerOrderState.PARTIAL, "3", [e1])
+            return _view(BrokerOrderState.FILLED, "3", [e1, e2])   # trades caught up
+
+    store, sim, engine, gateway, recon = rig(pool)
+    await gateway.place(uuid4(), intent(qty="3"))
+    b = LaggingBroker()
+    resolved = await Reconciler(store, b, WriterCoordinator()).reconcile_order("K1")
+    assert resolved.core.filled_qty == 3      # reconciled, no halt
+    assert b.calls >= 2                        # it re-queried rather than halting
+
+
+async def test_persistent_fill_gap_still_halts_after_retries(pool, monkeypatch):
+    """If the trades NEVER catch up to executedQty, it's a genuine missing-fills
+    gap — halt after the retries, never absorb."""
+    from sentinel.broker import BrokerOrderState
+    from sentinel.recon import reconciler as recon_module
+    monkeypatch.setattr(recon_module, "_FILL_BACKFILL_BACKOFF_S", 0.0)
+
+    e1 = _fill("E1", "1")
+
+    class ShortBroker:
+        def __init__(self): self.calls = 0
+        async def query_order(self, coid):
+            self.calls += 1
+            return _view(BrokerOrderState.PARTIAL, "3", [e1])   # always 1 short
+
+    store, sim, engine, gateway, recon = rig(pool)
+    await gateway.place(uuid4(), intent(qty="3"))
+    b = ShortBroker()
+    with pytest.raises(ReconciliationDivergence):
+        await Reconciler(store, b, WriterCoordinator()).reconcile_order("K1")
+    assert b.calls == recon_module._FILL_BACKFILL_RETRIES + 1   # initial + retries
+
+
 # --------------------------------------------------------- startup recovery
 
 

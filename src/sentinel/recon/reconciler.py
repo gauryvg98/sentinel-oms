@@ -55,6 +55,13 @@ _STATE_MAP: dict[BrokerOrderState, OrderState] = {
     BrokerOrderState.REJECTED: OrderState.REJECTED,
 }
 
+# An actively-filling order can report a broker executedQty that momentarily runs
+# ahead of its own userTrades feed (seen on demo-fapi when recovering mid-fill).
+# Re-query a few times so the trades catch up before calling it a missing-fills
+# gap. Only the SAFE direction (booked < broker) retries; booked > broker halts.
+_FILL_BACKFILL_RETRIES = 3
+_FILL_BACKFILL_BACKOFF_S = 0.5
+
 
 @dataclass(slots=True)
 class RecoveryReport:
@@ -108,33 +115,46 @@ class Reconciler:
                     trace,
                 )
 
-            # Backfill executions we never received. The ledger's exec_id
-            # dedup makes this exactly-once no matter how often it reruns.
-            for f in view.fills:
-                result = await self._store.apply_event(
-                    stored,
-                    FillReceived(exec_id=f.exec_id, qty=f.qty, price=f.price),
-                    trace,
-                )
-                if result is not FillOutcome.DUPLICATE:
-                    stored = result
+            # Backfill executions we never received, then reconcile the count.
+            # The ledger's exec_id dedup makes replay exactly-once, so re-querying
+            # is safe. On each pass we apply whatever fills the broker now reports;
+            # if `booked` still trails `broker` it may just be the userTrades feed
+            # lagging executedQty on an actively-filling order — re-query and let
+            # it catch up. Only a gap that SURVIVES the retries is a genuine
+            # missing-fills halt. booked > broker (invented exposure) never
+            # retries; it halts at once.
+            for attempt in range(_FILL_BACKFILL_RETRIES + 1):
+                for f in view.fills:
+                    result = await self._store.apply_event(
+                        stored,
+                        FillReceived(exec_id=f.exec_id, qty=f.qty, price=f.price),
+                        trace,
+                    )
+                    if result is not FillOutcome.DUPLICATE:
+                        stored = result
 
-            booked, broker, qty = (stored.core.filled_qty, view.filled_qty,
-                                   stored.core.qty)
-            if booked > broker:
-                # We've recorded MORE than the broker shows — we invented
-                # exposure the exchange doesn't hold. The dangerous direction:
-                # halt, do not absorb.
-                raise ReconciliationDivergence(
-                    f"{client_order_id}: local filled {booked} > broker {broker}"
-                )
-            if booked < min(broker, qty):
-                # Fills that SHOULD fit in the order are still missing after
-                # backfill — a genuine gap, not a mere over-match. Halt.
-                raise ReconciliationDivergence(
-                    f"{client_order_id}: filled {booked} local vs {broker} broker "
-                    f"after backfill"
-                )
+                booked, broker, qty = (stored.core.filled_qty, view.filled_qty,
+                                       stored.core.qty)
+                if booked > broker:
+                    # Recorded MORE than the broker holds — exposure the exchange
+                    # doesn't have. The dangerous direction: halt, do not absorb.
+                    raise ReconciliationDivergence(
+                        f"{client_order_id}: local filled {booked} > broker {broker}"
+                    )
+                if booked < min(broker, qty):
+                    if attempt < _FILL_BACKFILL_RETRIES:
+                        await asyncio.sleep(_FILL_BACKFILL_BACKOFF_S)
+                        refetched = await self._broker.query_order(client_order_id)
+                        if refetched is not None:
+                            view = refetched
+                        continue
+                    # Still short after retries — a real gap, not a feed lag. Halt.
+                    raise ReconciliationDivergence(
+                        f"{client_order_id}: filled {booked} local vs {broker} "
+                        f"broker after backfill"
+                    )
+                break   # booked >= min(broker, qty): reconciled
+
             if broker > qty:
                 # The venue matched a resting order past its size (demo-fapi
                 # over-match). The order is booked to its qty and the fills carry

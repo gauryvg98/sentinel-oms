@@ -228,6 +228,13 @@ body::before { content:""; position:fixed; inset:-20% 0 auto 0; height:340px; z-
 .brand { background: linear-gradient(90deg,#22e07b,#8ff7c4 45%,#22e07b);
   -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
   color:transparent; text-shadow:0 0 22px rgba(34,224,123,.18); }
+/* shield mark auto-prepended to EVERY wordmark, so the logo is on every page
+   (overview, bot, metrics, logs, backtest) without touching each header */
+.brand::before { content:""; display:inline-block; width:1em; height:1em;
+  margin-right:.5em; vertical-align:-.14em; -webkit-text-fill-color:initial;
+  background:center/contain no-repeat url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path d='M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z' stroke='%2322e07b' stroke-width='1.6' stroke-linejoin='round'/><path d='M8.5 12.2l2.4 2.4 4.6-5' stroke='%2322e07b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  filter:drop-shadow(0 0 4px rgba(34,224,123,.5)); animation:shieldpulse 3s ease-in-out infinite; }
+#loader .brand::before { display:none; }   /* loader keeps its big centred shield */
 .brandmark { display:inline-flex; align-items:center; gap:9px; }
 .brandmark svg path { stroke:var(--green); }
 .shield { filter:drop-shadow(0 0 5px rgba(34,224,123,.5)); animation:shieldpulse 3s ease-in-out infinite; }
@@ -285,7 +292,7 @@ body.readonly .tf{display:none !important}
 <!-- ============================================================ OVERVIEW -->
 <div id="overview">
   <div class="ovhead">
-    <span class="brandmark"><svg class="shield" viewBox="0 0 24 24" fill="none" width="22" height="22"><path d="M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12.2l2.4 2.4 4.6-5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="brand" style="font-size:16px">SENTINEL</span></span>
+    <span class="brand" style="font-size:16px">SENTINEL</span>
     <span class="pill" id="venue">multi-bot</span>
     <div class="stat0"><b id="equity">—</b><span>equity (usdt)</span></div>
     <div class="stat0"><b id="avail">—</b><span>available</span></div>

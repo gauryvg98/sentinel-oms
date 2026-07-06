@@ -25,8 +25,15 @@
   header{padding:64px 0 40px;border-bottom:1px solid var(--edge);}
   .brandrow{display:flex;align-items:center;gap:12px;justify-content:space-between;margin-bottom:44px;
     font-family:var(--mono);font-size:13px;color:var(--dimr);}
-  .brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--head);letter-spacing:.02em}
-  .shield{width:22px;height:22px;flex:none}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.02em}
+  .wm{background:linear-gradient(90deg,#22e07b,#8ff7c4 45%,#22e07b);-webkit-background-clip:text;
+    background-clip:text;-webkit-text-fill-color:transparent;color:transparent;
+    text-shadow:0 0 22px rgba(34,224,123,.18)}
+  .shield{width:22px;height:22px;flex:none;filter:drop-shadow(0 0 5px rgba(34,224,123,.5));
+    animation:shieldpulse 3s ease-in-out infinite}
+  @keyframes shieldpulse{0%,100%{opacity:.9;filter:drop-shadow(0 0 3px rgba(34,224,123,.4))}
+    50%{opacity:1;filter:drop-shadow(0 0 11px rgba(34,224,123,.85))}}
+  @media (prefers-reduced-motion: reduce){.shield{animation:none}}
   h1{font-size:clamp(38px,6vw,60px);line-height:1.02;letter-spacing:-.03em;font-weight:800;
     color:var(--head);margin:16px 0 0;text-wrap:balance;}
   h1 .lo{color:var(--dimr);font-weight:800}
@@ -116,7 +123,7 @@
   <div class="brandrow">
     <span class="brand">
       <svg class="shield" viewBox="0 0 24 24" fill="none"><path d="M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z" stroke="#22e07b" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12.2l2.4 2.4 4.6-5" stroke="#22e07b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      SENTINEL
+      <span class="wm">SENTINEL</span>
     </span>
     <span>Engineering &middot; <b style="color:var(--dimr)">Yashvardhan&nbsp;Gaur</b></span>
   </div>

@@ -490,6 +490,17 @@ class Bot:
                 if pnl.unrealized is not None:
                     roe = pnl.unrealized / basis * 100
                 net_roe = net / basis * 100
+        # The margin chain, live: risk already sized the position; show what it
+        # costs in capital. equity_share = this bot's slice of its settlement
+        # pool; notional = |position|·mark; margin = notional / leverage setting;
+        # effective leverage = notional / equity_share; free = share − margin.
+        eq_share = self.equity_fn() if self.equity_fn else None
+        lev = Decimal(self.venue.leverage or 1)
+        notional = (abs(pnl.position) * mark.price
+                    if pnl and mark and pnl.position else Decimal(0))
+        margin_used = notional / lev if lev > 0 else Decimal(0)
+        eff_lev = (notional / eq_share) if eq_share and eq_share > 0 else Decimal(0)
+        free_margin = (eq_share - margin_used) if eq_share is not None else None
         return {
             "type": "card",
             "symbol": self.symbol,
@@ -515,6 +526,13 @@ class Bot:
             # it moves live on every price tick with no extra fetch. The liq price
             # itself is re-anchored reactively (liq_refresh_loop) on account changes.
             "liq": self._liq_view(mark.price if mark else None),
+            # margin chain (see above) — lets the UI show the whole sizing story
+            "equity_share": q(eq_share),
+            "notional": q(notional),
+            "margin": q(margin_used),
+            "free_margin": q(free_margin),
+            "eff_leverage": str(eff_lev.quantize(Decimal("0.01"))),
+            "lev_cap": str(int(lev)),
             "working": len(working),
             "spark": self._spark(),
             "spec": {"lot_step": str(self.spec.lot_step),
@@ -618,7 +636,10 @@ class InstrumentManager:
         else:
             asset = self._settle_asset(symbol)
             pool = bal.get(asset, Decimal(0))
-            sharers = sum(1 for s in self.bots
+            # snapshot the keys: this sync reader runs from card()/sizing while
+            # seeding concurrently adds bots — iterating the live dict races
+            # ("dictionary changed size"). list() is atomic under the GIL.
+            sharers = sum(1 for s in list(self.bots)
                           if self._settle_asset(s) == asset) or 1
         return pool / sharers
 
@@ -741,7 +762,9 @@ class InstrumentManager:
         committed = Decimal(0)      # margin tied up by open POSITIONS
         blocked = Decimal(0)        # margin reserved by resting (unfilled) ORDERS
         lev = Decimal(self.venue.leverage or 1)
-        for bot in self.bots.values():
+        # snapshot: there's an await inside, so a concurrent seed-time add() could
+        # otherwise mutate self.bots mid-iteration ("dictionary changed size").
+        for bot in list(self.bots.values()):
             pnl = await bot._pnl()
             if pnl is not None:
                 if pnl.unrealized is not None:
@@ -871,7 +894,11 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
     async def _seed_roster() -> None:
         async def _try_add(sym: str, **kw) -> None:
             try:
-                await mgr.add(sym, **kw)
+                r = await mgr.add(sym, **kw)
+                # add() RETURNS {"error": ...} (doesn't raise) for a rejected
+                # symbol — surface it, else a bad roster entry vanishes silently.
+                if isinstance(r, dict) and r.get("error"):
+                    print(f"  could not add {sym}: {r['error']}", flush=True)
             except Exception as e:  # noqa: BLE001 — one bad symbol mustn't halt
                 print(f"  could not add {sym}: {e!r}", flush=True)
 
@@ -885,7 +912,10 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
 
         for sym in target:
             if mgr.get(sym) is None:
-                await _try_add(sym, allow_unlisted=sym not in initial_symbols)
+                # Configured roster + recovered-position symbols are BOTH
+                # authoritative — bring them up even if not in the predefined
+                # menu (fetch_spec still validates against the live venue).
+                await _try_add(sym, allow_unlisted=True)
             await app.changes.bump("account")           # advance the % bar
 
         # Every bot runs by default — Sentinel is an always-on fleet, and an open

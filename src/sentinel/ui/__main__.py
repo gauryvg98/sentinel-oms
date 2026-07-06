@@ -47,7 +47,9 @@ MAX_NOTIONAL = Decimal(os.environ.get("SENTINEL_MAX_NOTIONAL", "5000"))
 PERP_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
                 "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT",
                 # USDC-margined perps (need USDC collateral / multi-asset margin)
-                "BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC")
+                "BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC",
+                "ADAUSDC", "AVAXUSDC", "LINKUSDC", "LTCUSDC", "SUIUSDC",
+                "NEARUSDC", "DOGEUSDC")
 SPOT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "LTCUSDT")
 
 

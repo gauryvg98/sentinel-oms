@@ -63,6 +63,9 @@
   .stopb { color: var(--red); border-color: var(--red); }
   .foot { font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; gap: 8px; }
   .last { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .chain { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 7px 2px 2px;
+    font-size: 11px; color: var(--dim); border-top: 1px solid var(--edge); padding-top: 7px; }
+  .chain span { white-space: nowrap; } .chain b { color: var(--ink); font-weight: 600; }
   .sizerow { display: flex; gap: 6px; align-items: center; }
   .sizerow input { width: 84px; }
   .link { cursor: pointer; color: var(--dim); text-decoration: underline dotted; }
@@ -500,6 +503,7 @@ function makeCard(sym){
       <div class="kvv"><b data-pos>0</b><span>position</span></div>
       <div class="kvv" style="text-align:right"><b data-ppnl>—</b><span>running · open</span></div>
       <div class="kvv" style="text-align:right"><b data-npnl>—</b><span>net · incl. closed</span></div></div>
+    <div class="chain" data-chain></div>
     <div class="ctl"><select data-strat></select><button class="btn" data-go>start</button></div>
     <div class="sizerow"><input data-size type="number" step="10" min="10"/>
       <button class="btn" data-setsize>set usdt</button>
@@ -510,7 +514,7 @@ function makeCard(sym){
   cards[sym] = { data:{}, el, refs:{ px:q('[data-px]'), spark:q('[data-spark]'), stance:q('[data-stance]'),
     pos:q('[data-pos]'), ppnl:q('[data-ppnl]'), npnl:q('[data-npnl]'), strat:q('[data-strat]'),
     go:q('[data-go]'), size:q('[data-size]'), last:q('[data-last]'), work:q('[data-work]'),
-    liq:q('[data-liq]') }};
+    liq:q('[data-liq]'), chain:q('[data-chain]') }};
   q('[data-x]').onclick = () => closeBot(sym);
   q('[data-go]').onclick = () => post(`/${sym}/strategy/${cards[sym].data.running?'stop':'start'}`);
   q('[data-strat]').onchange = e => post(`/${sym}/strategy/select/${encodeURIComponent(e.target.value)}`);
@@ -550,6 +554,16 @@ function paintCard(c){
     r.liq.title = `liquidation ${c.liq.liq} — ${c.liq.dist_pct}% from mark ${c.liq.mark}`;
     r.liq.style.color = col;
   } else { r.liq.textContent = ''; }
+  if (r.chain) {
+    // the sizing chain, live: notional the risk math sized, the margin it locks,
+    // effective leverage (vs the cap), and free collateral in this bot's share.
+    const money = v => (v==null) ? '—' : '$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:0});
+    const chip = (v,l) => `<span><b>${v}</b> ${l}</span>`;
+    r.chain.innerHTML = parseFloat(c.position)!==0
+      ? chip(money(c.notional),'notl') + chip(money(c.margin),'margin')
+        + chip(`${c.eff_leverage}×`,`eff/${c.lev_cap}×`) + chip(money(c.free_margin),'free')
+      : `<span class="dim">flat · ${money(c.free_margin)} free of ${money(c.equity_share)} share</span>`;
+  }
   r.work.textContent = c.working ? `${c.working} working` : '';
   drawSpark(r.spark, c.spark, c.stance==='SHORT'?'--red':c.stance==='LONG'?'--green':'--dim');
 }

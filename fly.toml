@@ -26,14 +26,14 @@ primary_region = "iad"
 
   # Non-secret trading config (mirror of .env, minus keys/DSN).
   SENTINEL_VENUE = "futures"
-  SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDC,SOLUSDC"
+  SENTINEL_SYMBOLS = "BTCUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,ETHUSDC,SOLUSDC,ADAUSDC,LTCUSDC,SUIUSDC,NEARUSDC"
   SENTINEL_STRATEGY = "sma-ls"
   SENTINEL_STRATEGY_INTERVAL = "1m"
   SENTINEL_STRATEGY_USDT = "200"
   SENTINEL_MAX_NOTIONAL = "5000"
   SENTINEL_LEVERAGE = "3"
   SENTINEL_MAX_LEVERAGE = "3"
-  SENTINEL_RISK_PCT = "0.0025"
+  SENTINEL_RISK_PCT = "0.005"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Trend-follow discipline: tight capped stop (1% of price), and rr=0 so the
   # position rides to the opposite cross instead of scalping out at a fixed TP.

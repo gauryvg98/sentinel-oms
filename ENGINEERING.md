@@ -90,6 +90,23 @@ encoding the entire legal state machine. Because it touches no clock, socket, or
 the whole protocol is tested exhaustively before any real feed exists — and because it's the
 *only* way state moves, a bad strategy can trade badly but can never corrupt the ledger.
 
+**The schema — safety in constraints, not code.** Eight tables in two groups: the durable log,
+and the projections folded from it. Each critical guarantee is a database constraint rather
+than a trusted code path.
+
+| Table | Role | Key invariant (enforced by the DB) |
+|---|---|---|
+| `commands` | intent log *(append-only)* | `command_id UNIQUE` → **idempotent** retries (R1.2) |
+| `events` | the event log *(append-only)* | the replay spine; `event_id UNIQUE` on ingest |
+| `orders` | projection: order state | `CHECK (filled_qty <= qty)` → **no overfill** |
+| `fills` | exposure ledger | `exec_id PRIMARY KEY` → **exactly-once** exposure (R1.5/1.7) |
+| `positions` | projection: net qty / instrument | continuously checked `= Σ fills` |
+| `decision_log` | *why* — incl. blocked / clamped trades | the audit of intent, not just outcome |
+| `checkpoints` | recovery cursors | where each consumer caught up to |
+
+Full per-column docs and an entity diagram are in the
+[design-docs low-level design](https://github.com/gauryvg98/design-docs/blob/main/sentinel-oms/lld.md).
+
 ---
 
 ## 4. The order state machine
@@ -184,29 +201,70 @@ fixed-interval fetch.
 
 ---
 
-## 8. Strategies
+## 8. Strategies are a plug-in interface, not a feature list
 
-Strategies are **pure and edge-free**: each states a desired *stance* (`LONG` / `FLAT` /
-`SHORT`) every bar and, optionally, risk hooks in the decision `detail`. The runner reconciles
-the position toward that target; the risk layer turns intent into size and protection. Three
-ship today (the point of Sentinel is execution integrity, not alpha — so they're classic):
+A strategy implements one narrow, **pure** contract:
 
-| Strategy | Signal | Risk hook |
-|---|---|---|
-| `sma` | fast/slow SMA crossover — `LONG` when fast > slow, else `FLAT` (long-only) | emits `stop_dist` = distance to the slow SMA (the trend line), floored |
-| `sma-ls` | same crossover, stop-and-reverse — `SHORT` below the cross instead of `FLAT` (spot clamps `SHORT` → `FLAT`) | same `stop_dist` geometry |
-| `regime` | regime-gated: **Donchian** breakout armed only when **ADX** trends; a **z-score** mean-reversion overlay in *range* regimes | emits `target_weight` ∈ [0,1] — **vol-targeted** conviction (risk-budget / realized-vol) |
+```
+evaluate a CLOSED bar  →  Decision(stance, detail)
+```
 
-Two hooks connect a strategy to the risk layer:
+`stance` is the desired position (`LONG` / `FLAT` / `SHORT` / `None`-while-warming); `detail`
+is an open dict carrying risk hooks. Two entry points exist today — `on_bar(close)` and the
+richer `on_bar_ohlcv(Bar{high, low, close})` — and the runner prefers whichever the strategy
+exposes. Strategies are **pure and deterministic** (no I/O, clock, or RNG): that's what buys
+unit-testing, replay-safety, and the guarantee that a strategy — however sophisticated — is
+reconciled through the same gateway a human is and can never bypass a guard or corrupt the
+ledger.
 
-- **`detail["stop_dist"]`** — *where the thesis breaks.* The risk layer sizes **and** enforces
-  the SL off the same distance, so size and stop can't disagree; absent, it falls back to an
-  ATR stop.
-- **`detail["target_weight"]`** — *how convinced*, in [0,1]. Scales the risk-sized quantity —
-  `regime` uses it to shrink size as volatility rises.
+The strategies that ship (`sma`, `sma-ls`, `regime`) are deliberately trivial — the point of
+Sentinel is execution integrity, not alpha. What matters is that the *interface* extends to
+arbitrarily rich signals **without touching the OMS**, along three axes.
 
-A strategy owns the thesis and its stop; the risk layer owns the money. That seam lets the same
-sizing / bracket / margin machinery serve a trend follower and a mean-reverter unchanged.
+**1 — Widen the input, not the interface.** Today a bar is OHLC — price only, not even volume
+yet. The runner already "prefers the richer method if the strategy exposes it"; that *is* the
+extension pattern. The same move adds a `FeatureBar` — volume, VWAP, realized volatility,
+funding, open interest, order-book imbalance, cross-asset features — behind an `on_features(…)`
+a strategy may expose; a price-only strategy ignores it. A strategy accumulates its own window
+and derives whatever it wants: `regime` already computes ATR, ADX, Donchian channels, z-scores
+and realized vol from the bar stream. *Accounting for volatility / volume* = feed the raw
+field, let the strategy compute the feature.
+
+**2 — The output already fits anything, including ML.** `Decision(stance, detail)` maps
+straight onto a model's outputs: predicted direction → `stance`; predicted edge / probability →
+`detail["target_weight"]` (conviction, `[0,1]`); predicted volatility or stop →
+`detail["stop_dist"]`. The risk layer consumes conviction and stop geometry **uniformly** — it
+never knows whether they came from a moving-average cross or a transformer.
+
+**3 — An ML model plugs in as a pure predictor.** Inference on fixed weights is deterministic —
+same features, same prediction — so an ML strategy satisfies the pure contract as long as (a)
+the weights load **once at construction**, not per bar; (b) inference is deterministic (no
+sampling / dropout at inference); (c) features come from the **fed inputs**, not a live fetch.
+The body is then `featurize(window) → model.predict(x) → map to Decision`. The model's "many
+parameters" are its weights plus a feature spec — strategy *construction* config, exactly like
+`RegimeTrendMR(Params(...))`; the registry builds `MLStrategy(model_path, feature_spec)` the
+same way it builds an SMA. **Nothing about the interface changes.**
+
+Two things stay **outside** the strategy, to keep it pure and replay-safe:
+
+- **Live external data** is fed *in* as features (assembled by the runtime and passed to the
+  strategy), never fetched mid-decision.
+- **Training is offline** — it produces weights that get loaded; the live system only ever
+  runs inference. (ML inference must be made numerically deterministic for exact replay,
+  otherwise the strategy layer is "approximately replayable" — and we'd say so.)
+
+**The payoff: risk is orthogonal to alpha.** However the signal is derived, a strategy only
+ever says *(stance, conviction, stop geometry)* through two hooks — `detail["stop_dist"]`
+(*where the thesis breaks*; the risk layer sizes **and** enforces the SL off the same distance)
+and `detail["target_weight"]` (*how convinced*; scales the size). The risk layer turns that into
+size, brackets and margin. Swap an SMA for a neural net and the sizing / execution /
+reconciliation machinery is untouched — the pluggability is the capability, and the trivial
+strategies are trivial precisely because they aren't the product.
+
+To actually run a feature-rich or ML strategy, the system adds: a `FeatureBar` + `on_features`
+entry point; a market feed that captures the extra fields (volume, order book, funding); a
+per-bar feature-assembly step in the runtime (so the strategy stays pure); deterministic-
+inference discipline; and an offline training pipeline (out of scope for the live OMS).
 
 ---
 

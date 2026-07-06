@@ -125,6 +125,15 @@
   .lv.WARNING, .lv.WARN { color: var(--amber); } .lv.ERROR, .lv.CRITICAL { color: var(--red); }
   .lv.INFO { color: var(--dim); }
   .ekind { color: var(--violet); } .esym { color: var(--dim); }
+  /* chart marker / peg hover tooltip */
+  #charttip { position: absolute; display: none; pointer-events: none; z-index: 40;
+              background: var(--panel); border: 1px solid var(--edge); border-radius: 6px;
+              padding: 7px 9px; font-size: 11px; max-width: 260px; line-height: 1.55;
+              box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+  #charttip .tt-h { font-weight: 600; margin-bottom: 2px; }
+  #charttip .tt-h + .tt-h { margin-top: 6px; }
+  #charttip .tt-r { color: var(--ink); font-variant-numeric: tabular-nums; }
+  #charttip .tt-r .ts { color: var(--dim); margin-right: 4px; }
 </style>
 </head>
 <body>
@@ -242,7 +251,7 @@
     <button class="tf" data-tf="4h">4h</button><button class="tf" data-tf="1d">1d</button>
     <span style="margin-left:auto" class="dim" id="specline"></span>
   </div>
-  <div id="chart"></div>
+  <div id="chartwrap" style="position:relative"><div id="chart"></div><div id="charttip"></div></div>
   <div id="sys">
     <div class="panel">
       <h2>Wallet <span class="pill">USDT-M margin</span></h2>
@@ -312,6 +321,7 @@ let account = {};
 const cards = {};                    // symbol -> {data, el, refs}
 let activeSym = null;                 // which bot the terminal view shows (null = overview)
 let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLine=null, pegLines=[];
+let chartMarkers=[], chartPegs=[];    // for the hover tooltip (fills / peg detail)
 
 // ------------------------------------------------------------------ websocket
 let wsWatchdog = null;
@@ -484,10 +494,46 @@ function openTerminal(sym){
   cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
     wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
   overlays = {}; chartInterval = null; slLine = null; tpLine = null; pegLines = [];   // fresh chart
+  chartMarkers = []; chartPegs = [];
+  chart.subscribeCrosshairMove(chartTooltip);
   paintTerminalAccount();
   if (cards[sym]) paintTerminalCard(cards[sym].data);
   refreshChart(sym);
 }
+
+// Hover detail: fills + avg cost for a marker (L/S/C), or fill progress for a
+// resting peg near the cursor. Reads the data refreshChart already stashed.
+function chartTooltip(param){
+  const tip = $("charttip");
+  if (!param || !param.point){ tip.style.display='none'; return; }
+  let html = '';
+  // markers sit ON a candle time — show every fill batch at that candle
+  if (param.time){
+    for (const m of chartMarkers.filter(m=>m.t===param.time)){
+      const cls = m.kind==='LONG'?'pos':m.kind==='SHORT'?'neg':'warn';
+      const word = m.kind==='LONG'?'LONG':m.kind==='SHORT'?'SHORT':'CLOSE';
+      html += `<div class="tt-h ${cls}">${word} ${m.qty} @ ${m.price} `+
+              `<span class="dim">avg${m.n>1?' · '+m.n+' fills':''}</span></div>`;
+      html += (m.detail||[]).map(f=>
+        `<div class="tt-r"><span class="ts">${fmtChartTime(f.t)}</span>${f.qty} @ ${f.price}</div>`).join('');
+    }
+  }
+  // pegs are horizontal lines — match on the cursor's Y (within ~6px)
+  for (const o of chartPegs){
+    const y = cseries.priceToCoordinate(parseFloat(o.limit_price));
+    if (y==null || Math.abs(y-param.point.y) > 6) continue;
+    const cls = o.side==='BUY'?'pos':'neg';
+    html += `<div class="tt-h ${cls}">⋯ ${o.side==='BUY'?'LONG':'SHORT'} peg ${o.qty} @ ${o.limit_price}</div>`+
+            `<div class="tt-r"><span class="ts">filled</span>${o.filled||0} / ${o.qty} · ${o.state}</div>`;
+  }
+  if (!html){ tip.style.display='none'; return; }
+  tip.innerHTML = html; tip.style.display='block';
+  const wrap = $("chartwrap").getBoundingClientRect();
+  let x = param.point.x + 16; if (x + 260 > wrap.width) x = param.point.x - 260 - 8;
+  tip.style.left = Math.max(4, x) + 'px';
+  tip.style.top = Math.max(4, Math.min(param.point.y + 10, wrap.height - 90)) + 'px';
+}
+function fmtChartTime(t){ return new Date(t*1000).toTimeString().slice(0,8); }
 let curView = 'overview';
 function setView(id){
   curView = id;
@@ -655,12 +701,15 @@ function refreshChart(sym){
       // empty right), so refit. Live ticks at the same interval keep the zoom.
       if(d.interval !== chartInterval){ chart.timeScale().fitContent(); chartInterval = d.interval; }
     }
-    cseries.setMarkers((d.markers||[]).map(m=>{
+    // Compact single-letter markers (L long · S short · C close) — colour + arrow
+    // already carry direction; the full fills + avg cost live in the hover tip.
+    chartMarkers = d.markers||[];
+    cseries.setMarkers(chartMarkers.map(m=>{
       const close=m.kind==='CLOSE', buy=m.side==='BUY';
       return { time:m.t, position:buy?'belowBar':'aboveBar',
         color: close?'#fbbf24':(m.kind==='LONG'?'#22e07b':'#f87171'),
         shape: buy?'arrowUp':'arrowDown',
-        text:(m.n>1?`${m.n}× `:'')+(m.kind||'')+' '+m.qty }; }));
+        text: m.kind==='LONG'?'L':m.kind==='SHORT'?'S':'C' }; }));
     const view=d.strategy?.view||{}, series=d.strategy?.series||{};
     // Overlays (SMA lines etc.) are sampled at the STRATEGY interval. Rendering
     // them when the chart is on a different interval pollutes the shared time
@@ -696,12 +745,12 @@ function refreshChart(sym){
     // (⋯ prefix) — distinct from filled markers (solid arrows) and SL/TP
     // (dashed). They move as the peg reprices and vanish when filled/canceled.
     pegLines.forEach(l=>cseries.removePriceLine(l)); pegLines=[];
-    (d.working||[]).forEach(o=>{
-      if(o.limit_price==null) return;               // market orders have no resting price
+    chartPegs = (d.working||[]).filter(o=>o.limit_price!=null);   // for the hover tip
+    chartPegs.forEach(o=>{
       const buy=o.side==='BUY';
       pegLines.push(cseries.createPriceLine({ price:parseFloat(o.limit_price),
         color: buy?'#2ea36a':'#c25d5d', lineWidth:1, lineStyle:1,   // dotted = pending
-        axisLabelVisible:true, title:`⋯ ${buy?'LONG':'SHORT'} ${o.qty}` }));
+        axisLabelVisible:true, title:`⋯ ${buy?'L':'S'}` }));
     });
     $("o-work").innerHTML = (d.working||[]).length
       ? d.working.map(o=>`<div class="kv"><span class="${o.side==='BUY'?'pos':'neg'}">${o.side} ${o.qty} @ ${o.limit_price||'mkt'}</span>

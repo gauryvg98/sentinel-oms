@@ -432,5 +432,6 @@ class StrategyRunner:
             "stop_pct": (str((sd / price).quantize(Decimal("0.0001")))
                          if sd is not None and price else None),
             "stop_price": str(b["stop"]) if b else None,
-            "take_price": str(b["take"]) if b else None,
+            # take may be None when rr<=0 (take-profit disabled — ride to flip).
+            "take_price": str(b["take"]) if b and b.get("take") is not None else None,
         }

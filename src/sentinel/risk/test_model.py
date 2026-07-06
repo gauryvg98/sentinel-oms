@@ -84,6 +84,20 @@ def test_brackets_long_and_short_are_mirrored():
         (Decimal("105"), Decimal("90"))
 
 
+def test_brackets_no_take_profit_when_rr_not_positive():
+    from sentinel.risk import breached, brackets
+    # rr=0 -> ride to the signal flip: a stop, but NO take-profit.
+    stop, take = brackets(Decimal("100"), True, Decimal("5"), Decimal("0"))
+    assert (stop, take) == (Decimal("95"), None)
+    stop, take = brackets(Decimal("100"), False, Decimal("5"), Decimal("0"))
+    assert (stop, take) == (Decimal("105"), None)
+    # with take=None only the stop can fire; upside never triggers a flatten.
+    assert breached(True, Decimal("94"), Decimal("95"), None) == "STOP"
+    assert breached(True, Decimal("1000"), Decimal("95"), None) is None
+    assert breached(False, Decimal("106"), Decimal("105"), None) == "STOP"
+    assert breached(False, Decimal("1"), Decimal("105"), None) is None
+
+
 def test_breach_detects_stop_and_take_for_both_sides():
     from sentinel.risk import breached
     # long, stop 95, take 110

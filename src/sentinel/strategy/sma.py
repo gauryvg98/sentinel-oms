@@ -20,18 +20,23 @@ from .base import Decision, Stance
 
 class SmaCross:
     def __init__(self, fast: int = 5, slow: int = 20, short: bool = False,
-                 stop_floor_pct: Decimal = Decimal("0.005")) -> None:
+                 stop_floor_pct: Decimal = Decimal("0.005"),
+                 stop_cap_pct: Decimal = Decimal("0.01")) -> None:
         if fast >= slow:
             raise ValueError("fast period must be shorter than slow")
         # short=True -> stop-and-reverse: SHORT below the cross instead of FLAT,
         # so the strategy is always in the market and can profit in a bear leg
         # (needs a venue that allows shorting; spot clamps SHORT to FLAT).
         self._short = short
-        # The strategy's protective stop is the SLOW SMA (the trend line): a long
-        # is wrong once price falls back to it. Floored so a near-cross entry
-        # (price hugging the SMA) doesn't hand the risk layer a ~0 stop and size
-        # itself into the leverage cap.
+        # The stop is anchored on the SLOW SMA (the trend line — a long is wrong
+        # once price falls back to it), but CLAMPED to a tight band of price:
+        #   floored so a near-cross entry doesn't hand the risk layer a ~0 stop
+        #   and size itself into the leverage cap;
+        #   capped so a trend that has run far from the SMA doesn't produce a 3–5%
+        #   stop — trend-following cuts losses short. Set stop_cap_pct=0 to
+        #   disable the cap and use the raw distance to the slow SMA.
         self._stop_floor = stop_floor_pct
+        self._stop_cap = stop_cap_pct
         self.name = f"sma-{'ls' if short else 'cross'}({fast}/{slow})"
         self.fast_period = fast     # public: the chart overlays these windows
         self.slow_period = slow
@@ -77,8 +82,12 @@ class SmaCross:
         detail = {"fast": str(round(fast, 2)), "slow": str(round(slow, 2))}
         if stance in (Stance.LONG, Stance.SHORT):
             # Stop geometry: distance from price back to the slow SMA (the trend
-            # line), floored at stop_floor_pct of price. The risk layer sizes and
-            # enforces the SL/TP off this.
+            # line), floored AND capped to a tight band of price so the SL stays
+            # tight even when the trend has run far from the line. The risk layer
+            # sizes and enforces the SL off this same distance.
             gap = abs(close - slow)
-            detail["stop_dist"] = str(max(gap, close * self._stop_floor))
+            sd = max(gap, close * self._stop_floor)
+            if self._stop_cap and self._stop_cap > 0:
+                sd = min(sd, close * self._stop_cap)
+            detail["stop_dist"] = str(sd)
         return Decision(stance, detail)

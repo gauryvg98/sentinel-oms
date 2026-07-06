@@ -19,8 +19,10 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+import hmac
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from sentinel.domain import Authority, EconomicOrderIntent, OrderState, Side
 from sentinel.marks.pnl import compute_pnl
@@ -40,6 +42,25 @@ _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 _LIQ_SAFETY_S = 20.0   # slow safety re-anchor for cross-margin liq drift; the
                        # real refresh is event-driven off account changes
 _LOGS_PUSH_MIN_S = 2.0   # max cadence for pushing the logs frame over the WS
+
+# --- public read-only mode (deployment) --------------------------------------
+# With SENTINEL_PUBLIC_READONLY set, every control (trade, start/stop, add/remove,
+# size, strategy, timeframe) is refused unless the request carries the admin
+# cookie. The live feed, charts, metrics, logs and backtest stay open to all.
+# Admin unlocks by visiting /admin?token=<SENTINEL_ADMIN_TOKEN>.
+_READONLY = os.environ.get("SENTINEL_PUBLIC_READONLY", "false").strip().lower() in (
+    "1", "true", "yes")
+_ADMIN_TOKEN = os.environ.get("SENTINEL_ADMIN_TOKEN", "")
+_ADMIN_COOKIE = "sentinel_admin"
+
+
+def _is_admin(request: "Request") -> bool:
+    """A request may write when the deployment isn't read-only, or it carries the
+    admin cookie matching SENTINEL_ADMIN_TOKEN (constant-time compare)."""
+    if not _READONLY:
+        return True
+    tok = request.cookies.get(_ADMIN_COOKIE, "")
+    return bool(_ADMIN_TOKEN) and hmac.compare_digest(tok, _ADMIN_TOKEN)
 
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
@@ -803,6 +824,33 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
                             log_ring=log_ring)
     ui.state.manager = mgr
 
+    @ui.middleware("http")
+    async def _readonly_guard(request: Request, call_next):
+        # In a public deployment, refuse every state-changing POST unless the
+        # caller is admin. /backtest is a pure read-only computation and /admin
+        # is the unlock itself, so both stay open.
+        if (_READONLY and request.method == "POST"
+                and request.url.path != "/backtest"
+                and not _is_admin(request)):
+            return JSONResponse(
+                {"error": "read-only demo — controls are disabled"},
+                status_code=403)
+        return await call_next(request)
+
+    @ui.get("/admin")
+    async def _admin(token: str = ""):
+        # Visit /admin?token=<SENTINEL_ADMIN_TOKEN> once to drop the admin cookie,
+        # then the controls unlock for this browser. No-op when not read-only.
+        resp = RedirectResponse("/", status_code=303)
+        if _READONLY and _ADMIN_TOKEN and hmac.compare_digest(token, _ADMIN_TOKEN):
+            resp.set_cookie(_ADMIN_COOKIE, _ADMIN_TOKEN, httponly=True,
+                            samesite="lax", max_age=30 * 86400)
+        return resp
+
+    @ui.get("/whoami")
+    async def _whoami(request: Request):
+        return {"readonly": _READONLY, "admin": _is_admin(request)}
+
     @ui.on_event("startup")
     async def _startup() -> None:
         from sentinel.runtime import AnotherWriterActive
@@ -840,10 +888,11 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
                 await _try_add(sym, allow_unlisted=sym not in initial_symbols)
             await app.changes.bump("account")           # advance the % bar
 
-        # An open position MUST be managed: auto-start its bot (instant — just
-        # flips the runner on) BEFORE we reveal, so each card shows its true live
-        # state, never a stale "off". Unmanaged exposure is naked risk.
-        for sym in positions:
+        # Every bot runs by default — Sentinel is an always-on fleet, and an open
+        # position MUST be managed regardless (unmanaged exposure is naked risk).
+        # Arm them all BEFORE we reveal, so each card shows its true live state,
+        # never a stale "off". Admin can stop or close individual bots at runtime.
+        for sym in target:
             bot = mgr.get(sym)
             if bot is not None and not bot.runner.running:
                 bot.start()
@@ -865,6 +914,11 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
     @ui.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
+
+    @ui.get("/engineering")
+    async def engineering():
+        # Long-form engineering write-up served in-app (linked from the footer).
+        return FileResponse(STATIC / "engineering.html")
 
     @ui.websocket("/ws")
     async def ws(websocket: WebSocket):

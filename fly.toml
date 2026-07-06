@@ -1,0 +1,63 @@
+# Sentinel OMS on Fly.io — ONE always-on machine.
+#
+# Single-writer safety: the account holds a Postgres advisory lock; a second
+# machine cannot write (it would fail to claim the lock and exit). So this app
+# must run exactly one machine — never `fly scale count 2`.
+#
+# Secrets are NOT here. Set them with `fly secrets set` (see DEPLOY.md):
+#   DATABASE_URL, BINANCE_FUTURES_KEY, BINANCE_FUTURES_SECRET, SENTINEL_ADMIN_TOKEN
+
+app = "sentinel-oms"
+primary_region = "iad"
+
+[build]
+
+# Recreate the single machine in place on deploy, so two writers never overlap.
+[deploy]
+  strategy = "immediate"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8000"
+
+  # Public read-only demo: every control is refused unless the browser carries
+  # the admin cookie (drop it once via /admin?token=$SENTINEL_ADMIN_TOKEN).
+  SENTINEL_PUBLIC_READONLY = "true"
+
+  # Non-secret trading config (mirror of .env, minus keys/DSN).
+  SENTINEL_VENUE = "futures"
+  SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDC,SOLUSDC"
+  SENTINEL_STRATEGY = "sma-ls"
+  SENTINEL_STRATEGY_INTERVAL = "1m"
+  SENTINEL_STRATEGY_USDT = "200"
+  SENTINEL_MAX_NOTIONAL = "5000"
+  SENTINEL_LEVERAGE = "3"
+  SENTINEL_MAX_LEVERAGE = "3"
+  SENTINEL_RISK_PCT = "0.01"
+  SENTINEL_MULTI_ASSET_MARGIN = "false"
+  # Trend-follow discipline: tight capped stop (1% of price), and rr=0 so the
+  # position rides to the opposite cross instead of scalping out at a fixed TP.
+  SENTINEL_SMA_STOP_CAP_PCT = "0.01"
+  SENTINEL_RR = "0"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Single writer → never auto-scale, never auto-stop; keep exactly one alive.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  # Liveness only: 200 means the process is up. We deliberately do NOT fail the
+  # check when the OMS is halted — halt is an intentional safety state, and
+  # restarting won't clear a genuine divergence (it would just crash-loop).
+  [[http_service.checks]]
+    method = "GET"
+    path = "/whoami"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

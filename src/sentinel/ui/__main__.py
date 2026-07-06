@@ -139,6 +139,10 @@ def _build_registry() -> dict:
     from sentinel.strategy import Params, RegimeTrendMR, SmaCross
     sma_fast = int(os.environ.get("SENTINEL_SMA_FAST", "5"))
     sma_slow = int(os.environ.get("SENTINEL_SMA_SLOW", "20"))
+    # Tight protective stop for the SMA: cap the distance to the slow SMA at this
+    # fraction of price (0 disables the cap → raw distance to the trend line).
+    sma_stop_floor = Decimal(os.environ.get("SENTINEL_SMA_STOP_FLOOR_PCT", "0.005"))
+    sma_stop_cap = Decimal(os.environ.get("SENTINEL_SMA_STOP_CAP_PCT", "0.01"))
     regime_params = Params(
         donchian_entry=int(os.environ.get("SENTINEL_DONCHIAN_ENTRY", "55")),
         donchian_exit=int(os.environ.get("SENTINEL_DONCHIAN_EXIT", "20")),
@@ -147,8 +151,12 @@ def _build_registry() -> dict:
         enable_mean_reversion=os.environ.get("SENTINEL_MR", "0") == "1",
     )
     return {
-        "sma": lambda: SmaCross(fast=sma_fast, slow=sma_slow),
-        "sma-ls": lambda: SmaCross(fast=sma_fast, slow=sma_slow, short=True),
+        "sma": lambda: SmaCross(fast=sma_fast, slow=sma_slow,
+                                stop_floor_pct=sma_stop_floor,
+                                stop_cap_pct=sma_stop_cap),
+        "sma-ls": lambda: SmaCross(fast=sma_fast, slow=sma_slow, short=True,
+                                   stop_floor_pct=sma_stop_floor,
+                                   stop_cap_pct=sma_stop_cap),
         "regime": lambda: RegimeTrendMR(regime_params),
     }
 
@@ -223,8 +231,10 @@ async def _serve() -> None:
         multi_asset_margin=multi_asset_margin,
     )
     config = uvicorn.Config(
-        ui, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")),
-        log_level="info",
+        # bind 127.0.0.1 locally; 0.0.0.0 in a container (Fly sets HOST=0.0.0.0)
+        ui, host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "8000")),
+        log_level="info", proxy_headers=True, forwarded_allow_ips="*",
     )
     await uvicorn.Server(config).serve()
 

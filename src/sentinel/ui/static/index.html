@@ -200,9 +200,25 @@
     #chart { height: 320px; }
     #sitefoot .fgrow { flex-basis: 100%; height: 0; }
   }
+/* read-only public demo: hide every write control, show a banner */
+#robanner{display:none}
+body.readonly #robanner{display:flex;align-items:center;gap:8px;justify-content:center;
+  padding:6px 12px;background:#1c2a24;color:#9fe7c4;border-bottom:1px solid #244;
+  font-size:12px;letter-spacing:.02em}
+body.readonly #robanner b{color:#d8ffe9}
+body.readonly #addbtn,
+body.readonly [data-go],
+body.readonly [data-setsize],
+body.readonly [data-size],
+body.readonly [data-strat],
+body.readonly [data-x],
+body.readonly #tfbar,
+body.readonly .tf{display:none !important}
 </style>
 </head>
 <body>
+
+<div id="robanner">read-only · <b>live demo</b> — real capital, controls disabled</div>
 
 <div id="loader">
   <div class="loadbox">
@@ -388,7 +404,7 @@
   <span class="fbrand">SENTINEL</span>
   <span>execution-integrity-first OMS</span>
   <span class="fgrow"></span>
-  <a href="https://github.com/gauryvg98/design-docs/tree/main/sentinel-oms" target="_blank" rel="noopener">engineering write-up ↗</a>
+  <a href="/engineering">engineering write-up →</a>
   <a href="https://github.com/gauryvg98/sentinel-oms" target="_blank" rel="noopener">source ↗</a>
 </footer>
 
@@ -408,7 +424,8 @@ let chartMarkers=[], chartPegs=[];    // for the hover tooltip (fills / peg deta
 // ------------------------------------------------------------------ websocket
 let wsWatchdog = null;
 function connect(){
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsScheme}://${location.host}/ws`);
   let lastMsg = Date.now();
   ws.onopen = () => { $("conn").innerHTML = '<span class="dot ok"></span> live'; };
   ws.onmessage = ev => {
@@ -867,9 +884,11 @@ function refreshChart(sym){
       return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
     const rk = d.strategy.risk;
     const px = v => Number(v).toLocaleString(undefined,{maximumFractionDigits:4});
+    const hasTP = rk && parseFloat(rk.rr) > 0;
     $("st-sizing").innerHTML = rk
-      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} (${rk.stop_source||'atr'}) · TP ${rk.rr}R`
-        + (rk.stop_price ? `<br><span class="neg">SL ${px(rk.stop_price)}</span> · <span class="pos">TP ${px(rk.take_price)}</span>` : '')
+      ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} (${rk.stop_source||'atr'}) · ${hasTP?`TP ${rk.rr}R`:'ride to flip'}`
+        + (rk.stop_price ? `<br><span class="neg">SL ${px(rk.stop_price)}</span>`
+             + (rk.take_price ? ` · <span class="pos">TP ${px(rk.take_price)}</span>` : ' · <span class="dim">no TP — rides to signal flip</span>') : '')
       : '<span class="dim">fixed budget</span>';
     // SL/TP price lines on the chart (redrawn each refresh; cleared when flat)
     if(slLine){ cseries.removePriceLine(slLine); slLine=null; }
@@ -955,6 +974,12 @@ function renderBacktest(d){
     `<div class="dim" style="font-size:11px;margin-bottom:8px">${d.strategy} · ${d.symbol} · ${d.interval} · ${d.bars} bars · ${d.days}d · budget ${d.budget.toFixed(0)} USDT</div>` +
     btCurve(d.curve) + `<div style="margin-top:10px">${rows}</div>`;
 }
+
+// public read-only demo: lock the UI to view-only unless this browser is admin
+// (admin drops a cookie by visiting /admin?token=<SENTINEL_ADMIN_TOKEN> once).
+fetch('/whoami').then(r => r.json()).then(w => {
+  if (w.readonly && !w.admin) document.body.classList.add('readonly');
+}).catch(() => {});
 
 connect();
 </script>

@@ -82,8 +82,10 @@ def test_decision_carries_sma_values_for_the_ui():
 
 def test_emits_stop_dist_when_directional():
     # In a clear uptrend the strategy wants LONG and reports a stop distance:
-    # the gap from price back to the slow SMA (floored at stop_floor_pct).
-    s = SmaCross(fast=2, slow=4, stop_floor_pct=Decimal("0.005"))
+    # the gap from price back to the slow SMA (floored at stop_floor_pct). Cap
+    # disabled here so the raw gap-to-SMA geometry is what's asserted.
+    s = SmaCross(fast=2, slow=4, stop_floor_pct=Decimal("0.005"),
+                 stop_cap_pct=Decimal("0"))
     d = None
     for p in [10, 11, 12, 13, 20]:            # strong uptrend
         d = s.on_bar(Decimal(str(p)))
@@ -93,6 +95,20 @@ def test_emits_stop_dist_when_directional():
     # stop distance = max(|price - slow|, 0.5% of price); here the gap dominates.
     assert sd == max(abs(Decimal("20") - slow), Decimal("20") * Decimal("0.005"))
     assert sd > 0
+
+
+def test_stop_dist_capped_in_a_strong_trend():
+    # When the trend has run far from the slow SMA, the tight cap bounds the stop
+    # instead of letting it blow out to the (wide) distance to the line.
+    s = SmaCross(fast=2, slow=4, stop_floor_pct=Decimal("0.005"),
+                 stop_cap_pct=Decimal("0.01"))
+    d = None
+    for p in [10, 11, 12, 13, 20]:            # price 20, slow SMA ~14 -> gap ~6
+        d = s.on_bar(Decimal(str(p)))
+    assert d.stance is Stance.LONG
+    sd = Decimal(d.detail["stop_dist"])
+    # raw gap (~6) far exceeds the 1% cap, so the stop is capped at 1% of price.
+    assert sd == Decimal("20") * Decimal("0.01")
 
 
 def test_stop_dist_floored_near_a_cross():

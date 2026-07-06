@@ -27,7 +27,10 @@ class RiskParams:
     max_leverage: Decimal      # cap: |notional| <= equity * max_leverage
     stop_atr_mult: Decimal     # stop distance = stop_atr_mult * ATR
     fallback_stop_pct: Decimal  # if ATR is unavailable: stop = fallback_stop_pct * price
-    rr: Decimal = Decimal("2")  # reward:risk — take-profit distance = rr * stop
+    rr: Decimal = Decimal("2")  # reward:risk — take-profit distance = rr * stop.
+    #                             rr <= 0 disables the fixed take-profit entirely:
+    #                             a trend-follower then rides to its own signal
+    #                             flip (opposite cross), protected only by the stop.
 
 
 def atr(candles: list[dict], period: int = 14) -> Decimal | None:
@@ -57,30 +60,35 @@ def stop_distance(params: RiskParams, price: Decimal,
 
 
 def brackets(entry: Decimal, is_long: bool, stop_dist: Decimal,
-             rr: Decimal) -> tuple[Decimal, Decimal]:
+             rr: Decimal) -> tuple[Decimal, Decimal | None]:
     """Protective (stop_loss, take_profit) PRICES for a position entered at
     `entry`. The stop is `stop_dist` on the losing side; the target is `rr ×
     stop_dist` on the winning side. Long stops below / targets above; short is
-    the mirror. Pure."""
+    the mirror. When `rr <= 0` there is NO take-profit (returns None) — the
+    thesis exits on its own signal, not at a fixed multiple. Pure."""
+    take_dist = rr * stop_dist if rr > 0 else None
     if is_long:
-        return entry - stop_dist, entry + rr * stop_dist
-    return entry + stop_dist, entry - rr * stop_dist
+        take = entry + take_dist if take_dist is not None else None
+        return entry - stop_dist, take
+    take = entry - take_dist if take_dist is not None else None
+    return entry + stop_dist, take
 
 
 def breached(is_long: bool, mark: Decimal, stop: Decimal,
-             take: Decimal) -> str | None:
+             take: Decimal | None) -> str | None:
     """Which bracket the mark has hit, if any: 'STOP', 'TAKE', or None. For a
     long, price falling to/through the stop or rising to/through the take; short
-    mirrors."""
+    mirrors. A None `take` means take-profit is disabled — only the stop can
+    fire, so a winner rides until the strategy itself flips."""
     if is_long:
         if mark <= stop:
             return "STOP"
-        if mark >= take:
+        if take is not None and mark >= take:
             return "TAKE"
     else:
         if mark >= stop:
             return "STOP"
-        if mark <= take:
+        if take is not None and mark <= take:
             return "TAKE"
     return None
 

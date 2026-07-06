@@ -336,6 +336,11 @@ body.readonly .tf{display:none !important}
     <div class="stat"><span>Running · ROE (open)</span><b id="d-run">—</b></div>
     <div class="stat"><span>Net · ROE (all)</span><b id="d-net">—</b></div>
     <div class="stat"><span>Liquidation</span><b id="liq">—</b></div>
+    <div class="stat"><span>Pool share</span><b id="d-share">—</b></div>
+    <div class="stat"><span>Notional</span><b id="d-notl">—</b></div>
+    <div class="stat"><span>Margin locked</span><b id="d-margin">—</b></div>
+    <div class="stat"><span>Eff. leverage</span><b id="d-efflev">—</b></div>
+    <div class="stat"><span>Free margin</span><b id="d-free">—</b></div>
   </div>
   <div id="tfbar">
     <button class="tf" data-tf="1m">1m</button><button class="tf" data-tf="5m">5m</button>
@@ -839,6 +844,13 @@ function paintTerminalCard(c){
     $("liq").textContent = `${Number(c.liq.liq).toLocaleString()} (${c.liq.dist_pct}% away)`;
     $("liq").style.color = d<5 ? 'var(--red)' : d<15 ? '#fbbf24' : '';
   } else { $("liq").textContent = '—'; $("liq").style.color = ''; }
+  // margin chain: pool share -> notional -> margin locked -> eff leverage -> free
+  const money = v => (v==null)?'—':'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
+  $("d-share").textContent = money(c.equity_share);
+  $("d-notl").textContent = money(c.notional);
+  $("d-margin").textContent = money(c.margin);
+  $("d-efflev").textContent = c.eff_leverage!=null ? `${c.eff_leverage}× / ${c.lev_cap}× cap` : '—';
+  $("d-free").textContent = money(c.free_margin);
   $("s-age").textContent = c.price_age!=null ? c.price_age+' s' : '—';
   // strategy panel
   $("st-name").textContent = c.strategy || '—';

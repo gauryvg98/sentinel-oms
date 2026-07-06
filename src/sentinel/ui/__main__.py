@@ -49,7 +49,7 @@ PERP_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
                 # USDC-margined perps (need USDC collateral / multi-asset margin)
                 "BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC",
                 "ADAUSDC", "AVAXUSDC", "LINKUSDC", "LTCUSDC", "SUIUSDC",
-                "NEARUSDC", "DOGEUSDC")
+                "NEARUSDC", "DOGEUSDC", "AAVEUSDC")
 SPOT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "LTCUSDT")
 
 

@@ -33,7 +33,7 @@ primary_region = "iad"
   SENTINEL_MAX_NOTIONAL = "5000"
   SENTINEL_LEVERAGE = "3"
   SENTINEL_MAX_LEVERAGE = "3"
-  SENTINEL_RISK_PCT = "0.005"
+  SENTINEL_RISK_PCT = "0.01"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Trend-follow discipline: tight capped stop (1% of price), and rr=0 so the
   # position rides to the opposite cross instead of scalping out at a fixed TP.

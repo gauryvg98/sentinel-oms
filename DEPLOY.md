@@ -21,7 +21,7 @@ fly auth login
 
 ```bash
 cd /path/to/sentinel-oms
-fly launch --no-deploy --copy-config --name sentinel-oms --region iad
+fly launch --no-deploy --copy-config --name sentinel-oms --region sin
 ```
 
 `--copy-config` keeps the committed `fly.toml`. If the name `sentinel-oms` is
@@ -31,7 +31,7 @@ taken, pick another and update `app = "..."` in `fly.toml` to match.
 
 ```bash
 # Single-node unmanaged Postgres — the cheap one. NOT "Managed Postgres" ($30+).
-fly postgres create --name sentinel-db --region iad \
+fly postgres create --name sentinel-db --region sin \
   --vm-size shared-cpu-1x --volume-size 1 --initial-cluster-size 1
 
 # Attach → this sets the DATABASE_URL secret on the app automatically.

@@ -120,6 +120,13 @@ class BinanceFuturesAdapter:
             headers={"X-MBX-APIKEY": api_key},
             timeout=timeout_s,
             transport=transport,
+            # Keep pooled TLS connections alive far longer than httpx's 5s default:
+            # orders on a 1-minute strategy are minutes apart, so a 5s-expiry
+            # connection is always cold and every order pays a full ~1s TLS
+            # handshake. A long expiry + the warm-ping in _keepalive() keeps a hot
+            # connection ready, cutting placement latency from ~1.2s to one RTT.
+            limits=httpx.Limits(max_connections=128, max_keepalive_connections=32,
+                                keepalive_expiry=120.0),
         )
 
     # ------------------------------------------------------------- plumbing
@@ -320,13 +327,26 @@ class BinanceFuturesAdapter:
                 backoff = min(backoff * 2, 30.0)
 
     async def _keepalive(self) -> None:
+        # Two jobs on one timer: (1) a cheap /time ping every 30s so the pooled
+        # REST TLS connection stays HOT for the next (minutes-apart) order — no
+        # per-order handshake; (2) refresh the user-stream listenKey (~60m life)
+        # every 30m. Best-effort: a warm-ping failure is ignored; only a
+        # listenKey failure returns (to force a stream reconnect).
+        since_listenkey = 0
         while True:
-            await asyncio.sleep(1800)          # listenKey lives 60m; refresh at 30m
+            await asyncio.sleep(30)
+            since_listenkey += 30
             try:
-                await self._keyed("PUT", "/fapi/v1/listenKey")
-            except Exception as e:  # noqa: BLE001
-                log.warning("listenKey keepalive failed: %r", e)
-                return
+                await self._http.get("/fapi/v1/time")   # keep the conn warm
+            except Exception:  # noqa: BLE001 — warmth is best-effort, never fatal
+                pass
+            if since_listenkey >= 1800:
+                since_listenkey = 0
+                try:
+                    await self._keyed("PUT", "/fapi/v1/listenKey")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("listenKey keepalive failed: %r", e)
+                    return
 
     # ------------------------------------------------------------- helpers
 

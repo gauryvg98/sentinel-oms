@@ -8,7 +8,9 @@
 #   DATABASE_URL, BINANCE_FUTURES_KEY, BINANCE_FUTURES_SECRET, SENTINEL_ADMIN_TOKEN
 
 app = "sentinel-oms"
-primary_region = "iad"
+# Singapore — close to Binance's servers (Asia) so order placement is one short
+# RTT (~5-50ms) instead of ~400ms from the US. Keep the DB in the same region.
+primary_region = "sin"
 
 [build]
 

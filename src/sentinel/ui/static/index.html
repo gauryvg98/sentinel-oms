@@ -182,9 +182,9 @@
   </div>
   <div id="stats">
     <div class="stat"><span>Position</span><b id="position">—</b></div>
-    <div class="stat"><span>Net P&amp;L (USDT)</span><b id="net">—</b></div>
-    <div class="stat"><span>ROE %</span><b id="roe">—</b></div>
-    <div class="stat"><span>Realized · Unrealized</span><b id="ru" style="font-size:16px">—</b></div>
+    <div class="stat"><span>Realized (closed)</span><b id="d-real">—</b></div>
+    <div class="stat"><span>Running · ROE (open)</span><b id="d-run">—</b></div>
+    <div class="stat"><span>Net · ROE (all)</span><b id="d-net">—</b></div>
     <div class="stat"><span>Liquidation</span><b id="liq">—</b></div>
   </div>
   <div id="tfbar">
@@ -322,8 +322,8 @@ function makeCard(sym){
     <canvas class="spark" width="300" height="40" data-spark></canvas>
     <div class="row"><span class="badge none" data-stance>—</span>
       <div class="kvv"><b data-pos>0</b><span>position</span></div>
-      <div class="kvv" style="text-align:right"><b data-ppnl>—</b><span>position p&l · running</span></div>
-      <div class="kvv" style="text-align:right"><b data-npnl>—</b><span>net p&l · total</span></div></div>
+      <div class="kvv" style="text-align:right"><b data-ppnl>—</b><span>running · open</span></div>
+      <div class="kvv" style="text-align:right"><b data-npnl>—</b><span>net · incl. closed</span></div></div>
     <div class="ctl"><select data-strat></select><button class="btn" data-go>start</button></div>
     <div class="sizerow"><input data-size type="number" step="10" min="10"/>
       <button class="btn" data-setsize>set usdt</button>
@@ -474,10 +474,18 @@ function paintTerminalCard(c){
   $("tprice").textContent = c.price ? Number(c.price).toLocaleString() : '—';
   $("position").textContent = c.position;
   $("position").className = parseFloat(c.position)>0?'pos':parseFloat(c.position)<0?'neg':'';
-  $("net").textContent = c.net==null?'—':signed(c.net); $("net").className = parseFloat(c.net)>=0?'pos':'neg';
-  $("roe").textContent = c.roe==null?'—':signed(c.roe)+'%'; $("roe").className = parseFloat(c.roe)>=0?'pos':'neg';
-  $("ru").innerHTML = `<span class="${parseFloat(c.realized)>=0?'pos':'neg'}">${signed(c.realized)}</span>` +
-    ` · <span class="${parseFloat(c.unrealized)>=0?'pos':'neg'}">${c.unrealized==null?'—':signed(c.unrealized)}</span>`;
+  // detail: the full breakdown — realized (closed), running (open, =unrealized)
+  // with its ROE, and net (realized+unrealized) with net ROE.
+  const roeSuffix = pct => (pct==null ? '' : ` (${signed(pct)}%)`);
+  const pnlB = (id, usd, pct) => {
+    const el = $(id);
+    if (usd==null){ el.textContent='—'; el.className=''; return; }
+    el.textContent = signed(usd) + roeSuffix(pct);
+    el.className = parseFloat(usd)>=0?'pos':'neg';
+  };
+  pnlB("d-real", c.realized, null);
+  pnlB("d-run", c.unrealized, c.roe);
+  pnlB("d-net", c.net, c.net_roe);
   if (c.liq) {
     const d = parseFloat(c.liq.dist_pct);
     $("liq").textContent = `${Number(c.liq.liq).toLocaleString()} (${c.liq.dist_pct}% away)`;

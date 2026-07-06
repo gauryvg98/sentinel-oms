@@ -77,10 +77,16 @@ BrokerEvent = OrderStreamEvent | BrokerBalanceUpdate
 class BrokerPosition:
     """An actual open position on the exchange — signed base qty (negative =
     short) and the exchange's entry price. The source of truth for POSITION
-    reconciliation (query_positions returns wallet BALANCES, not positions)."""
+    reconciliation (query_positions returns wallet BALANCES, not positions).
+
+    liq_price / mark_price are the venue's own liquidation and mark (for the UI's
+    liquidation display); optional because reconciliation doesn't need them and
+    not every venue supplies them."""
 
     qty: Decimal
     entry_price: Decimal
+    liq_price: Decimal | None = None
+    mark_price: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

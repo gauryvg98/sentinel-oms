@@ -185,6 +185,7 @@
     <div class="stat"><span>Net P&amp;L (USDT)</span><b id="net">—</b></div>
     <div class="stat"><span>ROE %</span><b id="roe">—</b></div>
     <div class="stat"><span>Realized · Unrealized</span><b id="ru" style="font-size:16px">—</b></div>
+    <div class="stat"><span>Liquidation</span><b id="liq">—</b></div>
   </div>
   <div id="tfbar">
     <button class="tf" data-tf="1m">1m</button><button class="tf" data-tf="5m">5m</button>
@@ -327,12 +328,13 @@ function makeCard(sym){
     <div class="sizerow"><input data-size type="number" step="10" min="10"/>
       <button class="btn" data-setsize>set usdt</button>
       <span class="link" data-chart style="margin-left:auto">open ›</span></div>
-    <div class="foot"><span class="last" data-last>—</span><span data-work></span></div>`;
+    <div class="foot"><span class="last" data-last>—</span><span data-liq></span><span data-work></span></div>`;
   $("grid").appendChild(el);
   const q = s => el.querySelector(s);
   cards[sym] = { data:{}, el, refs:{ px:q('[data-px]'), spark:q('[data-spark]'), stance:q('[data-stance]'),
     pos:q('[data-pos]'), ppnl:q('[data-ppnl]'), npnl:q('[data-npnl]'), strat:q('[data-strat]'),
-    go:q('[data-go]'), size:q('[data-size]'), last:q('[data-last]'), work:q('[data-work]') }};
+    go:q('[data-go]'), size:q('[data-size]'), last:q('[data-last]'), work:q('[data-work]'),
+    liq:q('[data-liq]') }};
   q('[data-x]').onclick = () => closeBot(sym);
   q('[data-go]').onclick = () => post(`/${sym}/strategy/${cards[sym].data.running?'stop':'start'}`);
   q('[data-strat]').onchange = e => post(`/${sym}/strategy/select/${encodeURIComponent(e.target.value)}`);
@@ -364,6 +366,14 @@ function paintCard(c){
   r.go.className = 'btn '+(c.running?'stopb':'go');
   if (document.activeElement !== r.size) r.size.value = c.entry_usdt;
   r.last.textContent = c.last_action || '—'; r.last.title = c.last_action||'';
+  if (c.liq) {
+    const d = parseFloat(c.liq.dist_pct);
+    // amber under 15% to liquidation, red under 5% — otherwise dim
+    const col = d<5 ? 'var(--red)' : d<15 ? '#fbbf24' : 'var(--dim)';
+    r.liq.textContent = `liq ${Number(c.liq.liq).toLocaleString()} · ${c.liq.dist_pct}%`;
+    r.liq.title = `liquidation ${c.liq.liq} — ${c.liq.dist_pct}% from mark ${c.liq.mark}`;
+    r.liq.style.color = col;
+  } else { r.liq.textContent = ''; }
   r.work.textContent = c.working ? `${c.working} working` : '';
   drawSpark(r.spark, c.spark, c.stance==='SHORT'?'--red':c.stance==='LONG'?'--green':'--dim');
 }
@@ -468,6 +478,11 @@ function paintTerminalCard(c){
   $("roe").textContent = c.roe==null?'—':signed(c.roe)+'%'; $("roe").className = parseFloat(c.roe)>=0?'pos':'neg';
   $("ru").innerHTML = `<span class="${parseFloat(c.realized)>=0?'pos':'neg'}">${signed(c.realized)}</span>` +
     ` · <span class="${parseFloat(c.unrealized)>=0?'pos':'neg'}">${c.unrealized==null?'—':signed(c.unrealized)}</span>`;
+  if (c.liq) {
+    const d = parseFloat(c.liq.dist_pct);
+    $("liq").textContent = `${Number(c.liq.liq).toLocaleString()} (${c.liq.dist_pct}% away)`;
+    $("liq").style.color = d<5 ? 'var(--red)' : d<15 ? '#fbbf24' : '';
+  } else { $("liq").textContent = '—'; $("liq").style.color = ''; }
   $("s-age").textContent = c.price_age!=null ? c.price_age+' s' : '—';
   // strategy panel
   $("st-name").textContent = c.strategy || '—';

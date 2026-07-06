@@ -74,6 +74,43 @@ async def test_submit_sets_oneway_mode_and_leverage_then_places_limit():
     assert "signature" in seen["order"]
 
 
+async def test_open_positions_carries_liq_and_mark():
+    """positionRisk -> BrokerPosition with signed qty, entry, liquidation and
+    mark. A zero liquidationPrice (cross, no liq) becomes None; flat rows are
+    dropped."""
+    def handler(request):
+        _, path, _ = route(request)
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        assert path == "/fapi/v2/positionRisk"
+        return ok([
+            {"symbol": "BTCUSDT", "positionAmt": "-0.078", "entryPrice": "63600",
+             "markPrice": "63590.9", "liquidationPrice": "126684.14"},
+            {"symbol": "SOLUSDC", "positionAmt": "0", "entryPrice": "0",
+             "markPrice": "81.4", "liquidationPrice": "0"},          # flat -> dropped
+        ])
+
+    a = adapter(handler)
+    pos = await a.open_positions()
+    assert set(pos) == {"BTCUSDT"}                    # flat row excluded
+    btc = pos["BTCUSDT"]
+    assert btc.qty == Decimal("-0.078") and btc.entry_price == Decimal("63600")
+    assert btc.liq_price == Decimal("126684.14")
+    assert btc.mark_price == Decimal("63590.9")
+
+
+async def test_open_positions_zero_liq_becomes_none():
+    def handler(request):
+        _, path, _ = route(request)
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        return ok([{"symbol": "BTCUSDT", "positionAmt": "1", "entryPrice": "100",
+                    "markPrice": "101", "liquidationPrice": "0"}])
+    pos = await adapter(handler).open_positions()
+    assert pos["BTCUSDT"].liq_price is None            # 0 = no liq, not price 0
+    assert pos["BTCUSDT"].mark_price == Decimal("101")
+
+
 async def test_submit_4xx_is_reject_5xx_is_timeout():
     def h4(request):
         _, path, _ = route(request)

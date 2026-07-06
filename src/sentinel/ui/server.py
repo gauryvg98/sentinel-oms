@@ -35,6 +35,7 @@ STATIC = Path(__file__).parent / "static"
 _STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "DAI", "TUSD"}
 
 _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+_LIQ_POLL_S = 4.0    # how often to refresh liquidation/mark from the exchange
 
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
@@ -317,6 +318,7 @@ class Bot:
         self.current = {"name": default_strategy}
         self.equity_fn = equity_fn        # account equity for risk-based sizing
         self.risk_params = risk_params    # None -> fixed-notional budget sizing
+        self.liq: dict | None = None      # {liq, mark, dist_pct} from the risk poll
         self.terminal = Terminal(app, market, spec)
         self.runner = self._build_runner(strategies[default_strategy]())
 
@@ -461,6 +463,7 @@ class Bot:
             "net": q(net),
             "roe": str(round(roe, 2)) if roe is not None else None,
             "net_roe": str(round(net_roe, 2)) if net_roe is not None else None,
+            "liq": self.liq,             # {liq, mark, dist_pct} or None when flat
             "working": len(working),
             "spark": self._spark(),
             "spec": {"lot_step": str(self.spec.lot_step),
@@ -564,6 +567,33 @@ class InstrumentManager:
             sharers = sum(1 for s in self.bots
                           if self._settle_asset(s) == asset) or 1
         return pool / sharers
+
+    async def poll_position_risk(self) -> None:
+        """Non-critical background poll: refresh each bot's liquidation + mark
+        from the exchange so the UI can show how far each leveraged position is
+        from liquidation. Swallows everything (a blip just skips a tick) — this
+        is display-only and must NEVER halt the account. Futures-only; a venue
+        without open_positions is silently skipped."""
+        adapter = self.venue.adapter
+        if not hasattr(adapter, "open_positions"):
+            return
+        while True:
+            try:
+                positions = await adapter.open_positions()
+                for sym, bot in list(self.bots.items()):
+                    bp = positions.get(sym)
+                    new = None
+                    if bp and bp.liq_price and bp.mark_price and bp.mark_price > 0:
+                        dist = abs(bp.liq_price - bp.mark_price) / bp.mark_price * 100
+                        new = {"liq": format(bp.liq_price.normalize(), "f"),
+                               "mark": format(bp.mark_price.normalize(), "f"),
+                               "dist_pct": str(round(dist, 1))}
+                    if new != bot.liq:
+                        bot.liq = new
+                        await self.app.changes.bump(sym)
+            except Exception:  # noqa: BLE001 — display poll, never propagate
+                pass
+            await asyncio.sleep(_LIQ_POLL_S)
 
     def get(self, symbol: str) -> Bot | None:
         return self.bots.get(symbol.upper())
@@ -726,6 +756,10 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
         # cards stream in as each bot's history loads — booting N bots serially
         # in the startup hook would otherwise hold the port for tens of seconds.
         app.supervisor.spawn("seed-roster", _seed_roster, restart=False)
+        # Liquidation/mark poll — display-only, self-healing, deliberately NOT
+        # supervised so a hiccup can't halt the account. Held on ui.state so the
+        # task isn't garbage-collected.
+        ui.state.liq_task = asyncio.create_task(mgr.poll_position_risk())
 
     async def _seed_roster() -> None:
         async def _try_add(sym: str, **kw) -> None:

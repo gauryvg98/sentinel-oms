@@ -280,8 +280,11 @@ class BinanceFuturesAdapter:
         for p in resp.json():
             amt = Decimal(p["positionAmt"])
             if amt != 0:
+                liq = Decimal(p["liquidationPrice"])
                 out[p["symbol"]] = BrokerPosition(
-                    qty=amt, entry_price=Decimal(p["entryPrice"]))
+                    qty=amt, entry_price=Decimal(p["entryPrice"]),
+                    liq_price=liq if liq > 0 else None,   # 0 = no liq (cross, safe)
+                    mark_price=Decimal(p["markPrice"]))
         return out
 
     # --------------------------------------------------------- user stream

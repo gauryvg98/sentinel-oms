@@ -12,6 +12,7 @@ import asyncio
 import functools
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -552,6 +553,7 @@ class InstrumentManager:
         # summing pools would over-size and get -2019 Margin insufficient.
         self.multi_asset_margin = multi_asset_margin
         self.log_ring = log_ring               # recent server log records (logs page)
+        self._started = time.time()            # for the status page's uptime
         self.risk_params = risk_params         # None -> fixed-notional budget sizing
         self.bots: dict[str, Bot] = {}
         # Initial-load progress for the boot loading screen: reveal the grid only
@@ -740,6 +742,7 @@ class InstrumentManager:
             "type": "account",
             "accepting": self.app.accepting,
             "halted": self.app.supervisor.halted.is_set(),
+            "uptime_s": round(time.time() - self._started),
             "task_failures": len(self.app.supervisor.failures),
             "metrics": self.app.metrics.snapshot(),
             "orders": await order_stats(self.app),

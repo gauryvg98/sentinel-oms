@@ -134,6 +134,34 @@
   #charttip .tt-h + .tt-h { margin-top: 6px; }
   #charttip .tt-r { color: var(--ink); font-variant-numeric: tabular-nums; }
   #charttip .tt-r .ts { color: var(--dim); margin-right: 4px; }
+  /* status page (metrics) */
+  .dot.warn { background: var(--amber); }   /* .warn alone is a text colour */
+  .ss-hero { display:flex; justify-content:space-between; align-items:flex-start; margin:10px 0 4px; }
+  .ss-title { font-size:40px; font-weight:800; letter-spacing:-1.5px; }
+  .ss-sub { color:var(--dim); font-size:13px; margin-top:6px; max-width:640px; }
+  .ss-live { text-align:right; font-size:12px; white-space:nowrap; }
+  .ss-live .dim { margin-top:4px; }
+  .ss-sec-title { font-size:11px; color:var(--dim); letter-spacing:2px; text-transform:uppercase; margin:26px 0 12px; }
+  .ss-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+  .ss-card { background:var(--panel); border:1px solid var(--edge); border-radius:14px; padding:18px 20px; }
+  .ss-ch { display:flex; justify-content:space-between; align-items:center; font-size:13px; font-weight:600; margin-bottom:12px; }
+  .ss-big { font-weight:800; font-size:38px; letter-spacing:-1px; line-height:1; margin-bottom:12px; color:var(--ink); }
+  .ss-big .ss-u { font-size:19px; font-weight:700; margin-left:1px; }
+  .ss-big .ss-lbl { font-size:13px; font-weight:500; color:var(--dim); margin-left:7px; }
+  .ss-big.g, .cg { color:var(--green); } .ss-big.a, .ca { color:var(--amber); } .ss-big.r, .cr { color:var(--red); }
+  .ss-spark { width:100%; height:46px; display:block; margin:2px 0 14px; }
+  .ss-spark .line { fill:none; stroke-width:1.6; }
+  .ss-spark .line.g { stroke:var(--green);} .ss-spark .line.a { stroke:var(--amber);} .ss-spark .line.r { stroke:var(--red);}
+  .ss-spark .fill { stroke:none; }
+  .ss-spark .fill.g { fill:rgba(34,224,123,.10);} .ss-spark .fill.a { fill:rgba(251,191,36,.10);} .ss-spark .fill.r { fill:rgba(248,113,113,.10);}
+  .ss-sub3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:12px; }
+  .ss-sub3 > div { background:var(--bg); border-radius:8px; padding:8px 4px; text-align:center; }
+  .ss-sub3 span { display:block; color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:1px; }
+  .ss-sub3 b { font-size:14px; font-variant-numeric:tabular-nums; }
+  .ss-foot { display:flex; justify-content:space-between; font-size:11px; color:var(--dim);
+             border-top:1px solid var(--bg); padding-top:10px; }
+  .ss-rows .kv { padding:4px 0; } .ss-rows .kv:not(:last-child){ border-bottom:1px solid var(--bg); }
+  .ss-legend { color:var(--dim); font-size:11px; text-align:center; margin:28px 0 12px; }
 </style>
 </head>
 <body>
@@ -175,18 +203,24 @@
   <div class="tmhead">
     <button class="btn" onclick="showOverview()">‹ all bots</button>
     <span class="brand">SENTINEL</span>
-    <span class="chip">METRICS · live</span>
   </div>
-  <div class="mgrid">
-    <div class="panel"><h2>OMS</h2><div id="m-oms"></div></div>
-    <div class="panel"><h2>Margin</h2><div id="m-margin"></div></div>
-    <div class="panel"><h2>Orders</h2><div id="m-orders"></div></div>
-    <div class="panel"><h2>Invariants</h2><div id="m-inv"></div></div>
-    <div class="panel"><h2>Counters</h2><div id="m-counters"></div></div>
-    <div class="panel"><h2>Rates / sec</h2><div id="m-rates"></div></div>
-    <div class="panel"><h2>Latency · p50 · p95 · p99 (ms)</h2><div id="m-latency"></div></div>
-    <div class="panel"><h2>Gauges</h2><div id="m-gauges"></div></div>
+  <div class="ss-hero">
+    <div>
+      <h1 class="ss-title">system status</h1>
+      <p class="ss-sub">Live OMS pipeline latency &amp; health — sampled in real time, pushed every 2s.</p>
+    </div>
+    <div class="ss-live">
+      <div><span class="dot ok" id="ss-dot"></span> <b id="ss-livetxt">Live</b></div>
+      <div class="dim" id="ss-uptime">uptime —</div>
+    </div>
   </div>
+  <div class="ss-sec-title">Pipeline latency</div>
+  <div class="ss-grid" id="ss-latency"></div>
+  <div class="ss-sec-title">Throughput</div>
+  <div class="ss-grid" id="ss-throughput"></div>
+  <div class="ss-sec-title">Health &amp; margin</div>
+  <div class="ss-grid" id="ss-health"></div>
+  <div class="ss-legend">Green &lt; 400ms · amber &lt; 1.5s · red ≥ 1.5s. Latencies are internal OMS timings; throughput shows lifetime counts with a rolling 10s rate.</div>
 </div>
 
 <!-- ============================================================ LOGS -->
@@ -562,39 +596,90 @@ function showLogs(){
 }
 
 // ---- metrics page (renders from the live account frame) -----------------
-function kvRows(obj, fmt){
-  const e = Object.entries(obj||{});
-  if (!e.length) return '<div class="kv dim"><span>—</span></div>';
-  return e.sort((a,b)=>a[0]<b[0]?-1:1).map(([k,v])=>
-    `<div class="kv"><span>${k}</span><b>${fmt?fmt(v):v}</b></div>`).join('');
+// ---- status page (ChadWallet-style bold cards, off the live account frame) ----
+const LAT_NAMES = { place_ms:'Order place · gateway', event_apply_ms:'Event apply · OMS',
+  reconcile_ms:'Reconcile', submit_ms:'Broker submit', query_ms:'Broker query' };
+const CTR_NAMES = { events_applied:'Events applied', orders_placed:'Orders placed',
+  orders_blocked:'Orders blocked', orders_rejected:'Orders rejected',
+  balance_updates:'Balance updates', reconciliations:'Reconciliations',
+  reconcile_retries:'Reconcile retries', reconcile_timeouts:'Reconcile timeouts',
+  fills:'Fills' };
+function nice(k, map){ return map[k] || k.replace(/_/g,' ').replace(/\b\w/g, c=>c.toUpperCase()); }
+function healthCls(ms){ return ms==null?'g' : ms<400?'g' : ms<1500?'a':'r'; }
+function bigMs(ms){ if(ms==null) return {n:'—',u:''};
+  return ms>=1000 ? {n:(ms/1000).toFixed(2),u:'s'} : {n:Math.round(ms).toString(),u:'ms'}; }
+function fmtMs(ms){ if(ms==null) return '—'; return ms>=1000?(ms/1000).toFixed(2)+'s':Math.round(ms)+'ms'; }
+function dotCls(c){ return c==='g'?'ok':c==='a'?'warn':'bad'; }
+function sparkSVG(vals, cls){
+  if(!vals || vals.length<2) return '<div class="ss-spark"></div>';
+  const W=240,H=46, mn=Math.min(...vals), mx=Math.max(...vals), rng=(mx-mn)||1;
+  const pt = vals.map((v,i)=>[ (i/(vals.length-1))*W, H-4-((v-mn)/rng)*(H-8) ]);
+  const line = pt.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  const area = 'M0 '+H+' '+pt.map(p=>'L'+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')+' L'+W+' '+H+' Z';
+  return `<svg class="ss-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`+
+    `<path class="fill ${cls}" d="${area}"/><path class="line ${cls}" d="${line}"/></svg>`;
+}
+function latencyCard(key, d){
+  const cls = healthCls(d.p50), b = bigMs(d.p50);
+  return `<div class="ss-card">
+    <div class="ss-ch"><span>${nice(key,LAT_NAMES)}</span><span class="dot ${dotCls(cls)}"></span></div>
+    <div class="ss-big ${cls}">${b.n}<span class="ss-u">${b.u}</span><span class="ss-lbl">p50</span></div>
+    ${sparkSVG(d.spark, cls)}
+    <div class="ss-sub3">
+      <div><span>avg</span><b>${fmtMs(d.avg)}</b></div>
+      <div><span>p95</span><b>${fmtMs(d.p95)}</b></div>
+      <div><span>max</span><b>${fmtMs(d.max)}</b></div>
+    </div>
+    <div class="ss-foot"><span>${(d.count||0).toLocaleString()} samples</span><span>p99 ${fmtMs(d.p99)}</span></div>
+  </div>`;
+}
+function statCard(name, valHtml, footL, footR){
+  return `<div class="ss-card"><div class="ss-ch"><span>${name}</span></div>
+    <div class="ss-big">${valHtml}</div>
+    <div class="ss-foot"><span>${footL||''}</span><span>${footR||''}</span></div></div>`;
 }
 function paintMetrics(){
   if (curView!=='metrics' || !account) return;
   const a=account, m=a.metrics||{}, w=a.wallet||{};
-  $("m-oms").innerHTML =
-    `<div class="kv"><span>status</span><b class="${a.halted?'neg':'good'}">${a.halted?'HALTED':'LIVE'}</b></div>`+
-    `<div class="kv"><span>accepting</span><b>${a.accepting?'yes':'no'}</b></div>`+
-    `<div class="kv"><span>task failures</span><b class="${a.task_failures?'neg':''}">${a.task_failures}</b></div>`;
-  $("m-margin").innerHTML =
-    `<div class="kv"><span>equity</span><b>${w.equity??'—'}</b></div>`+
-    `<div class="kv"><span>available</span><b>${w.available??'—'}</b></div>`+
-    `<div class="kv"><span>committed</span><b>${w.committed??'—'}</b></div>`+
-    `<div class="kv"><span>blocked</span><b>${w.blocked??'—'}</b></div>`+
-    `<div class="kv"><span>running p&l</span><b class="${parseFloat(w.running)>=0?'pos':'neg'}">${w.running==null?'—':signed(w.running)}</b></div>`+
-    `<div class="kv"><span>net p&l</span><b class="${parseFloat(w.net)>=0?'pos':'neg'}">${w.net==null?'—':signed(w.net)}</b></div>`;
-  const o=a.orders||{};
-  $("m-orders").innerHTML = kvRows(o.states||{}) +
-    `<div class="kv"><span>orders total</span><b>${o.orders_total??0}</b></div>`+
-    `<div class="kv"><span>fills total</span><b>${o.fills_total??0}</b></div>`;
-  const inv=a.invariants||{};
-  $("m-inv").innerHTML = Object.entries(inv).map(([k,v])=>
-    `<div class="kv"><span>${k}</span><b class="${v?'good':'neg'}">${v?'✓':'✗ FAIL'}</b></div>`).join('')
-    || '<div class="kv dim"><span>—</span></div>';
-  $("m-counters").innerHTML = kvRows(m.counters);
-  $("m-rates").innerHTML = kvRows(m.rates);
-  $("m-latency").innerHTML = kvRows(m.latency, v=> v&&v.p50!=null?`${v.p50} · ${v.p95} · ${v.p99}`:'—');
-  $("m-gauges").innerHTML = kvRows(m.gauges);
+  // header
+  $("ss-dot").className = 'dot '+(a.halted?'bad':'ok');
+  $("ss-livetxt").textContent = a.halted?'HALTED':'Live';
+  $("ss-livetxt").className = a.halted?'neg':'';
+  $("ss-uptime").textContent = 'uptime '+fmtUptime(a.uptime_s);
+  // latency cards
+  const lat = m.latency||{};
+  const latKeys = Object.keys(lat).filter(k=>lat[k]);
+  $("ss-latency").innerHTML = latKeys.length
+    ? latKeys.sort().map(k=>latencyCard(k, lat[k])).join('')
+    : '<div class="dim">no timed operations yet</div>';
+  // throughput cards (counters + 10s rate)
+  const ctr=m.counters||{}, rates=m.rates||{};
+  $("ss-throughput").innerHTML = Object.keys(ctr).length
+    ? Object.keys(ctr).sort().map(k=>statCard(nice(k,CTR_NAMES),
+        `<span class="ss-num">${(ctr[k]||0).toLocaleString()}</span>`,
+        (rates[k]||0)+' /s', 'total')).join('')
+    : '<div class="dim">no counters yet</div>';
+  // health & margin cards
+  const o=a.orders||{}, g=m.gauges||{}, inv=a.invariants||{};
+  const invRows = Object.entries(inv).map(([k,v])=>
+    `<div class="kv"><span>${k}</span><b class="${v?'good':'neg'}">${v?'✓':'✗ FAIL'}</b></div>`).join('');
+  const runCls = parseFloat(w.running)>=0?'cg':'cr';
+  $("ss-health").innerHTML =
+    statCard('OMS state', `<span class="${a.halted?'cr':'cg'}">${a.halted?'HALTED':'LIVE'}</span>`,
+             a.accepting?'accepting':'not accepting', 'queue '+(g.queue_depth??0)) +
+    statCard('Task failures', `<span class="${a.task_failures?'cr':'cg'}">${a.task_failures}</span>`,
+             'supervised tasks', '') +
+    statCard('Equity', `${w.equity??'—'} <span class="ss-lbl">USDT</span>`,
+             `avail ${w.available??'—'}`, `blocked ${w.blocked??'—'}`) +
+    statCard('Running P&L', `<span class="${runCls}">${w.running==null?'—':signed(w.running)}</span>`,
+             `net ${w.net==null?'—':signed(w.net)}`, `committed ${w.committed??'—'}`) +
+    statCard('Orders', `<span class="ss-num">${o.orders_total??0}</span>`,
+             `${o.fills_total??0} fills`, Object.entries(o.states||{}).map(([s,n])=>`${s} ${n}`).join(' · ')) +
+    `<div class="ss-card"><div class="ss-ch"><span>Invariants</span></div><div class="ss-rows">${invRows||'<div class="kv dim"><span>—</span></div>'}</div></div>`;
 }
+function fmtUptime(s){ if(s==null) return '—'; s=Math.floor(s);
+  const h=Math.floor(s/3600), mnt=Math.floor((s%3600)/60);
+  return h>=1 ? `${h}h ${mnt}m` : `${mnt}m ${s%60}s`; }
 
 // ---- logs page (pushed 'logs' frame: system ring + event ledger) --------
 let logsData = null;

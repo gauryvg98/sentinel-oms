@@ -337,6 +337,15 @@ class Bot:
         m = self.market.latest(self.symbol)
         return m.price if m else None
 
+    async def _notify_order_change(self) -> None:
+        """The runner moved an order (placed / filled / canceled / bracket exit)
+        — which changes the account-level wallet roll-up (blocked / committed /
+        available), not just this card. Bump BOTH topics so the wallet pushes
+        live over the WS instead of waiting for the dead-quiet heartbeat.
+        Price-only ticks still bump the symbol alone (via market.on_change)."""
+        await self.app.changes.bump(self.symbol)
+        await self.app.changes.bump("account")
+
     def _build_runner(self, strategy) -> StrategyRunner:
         t = self.terminal
         return StrategyRunner(
@@ -351,7 +360,7 @@ class Bot:
             cancel_fn=lambda key: t.cancel(key),
             bid_fn=self._bid, ask_fn=self._ask,
             budget_fn=lambda: self.size["usdt"],
-            on_change=functools.partial(self.app.changes.bump, self.symbol),
+            on_change=self._notify_order_change,
             allow_short=self.venue.allow_short,
             lot_step=self.spec.lot_step,
             equity_fn=self.equity_fn,

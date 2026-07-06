@@ -11,9 +11,10 @@
     --dim: #5e7268; --green: #22e07b; --red: #f87171; --amber: #fbbf24;
     --violet: #a78bfa; --mono: "SF Mono", ui-monospace, Menlo, monospace;
   }
-  * { box-sizing: border-box; margin: 0; }
+  * { box-sizing: border-box; margin: 0; min-width: 0; }
   body { background: var(--bg); color: var(--ink); font-family: var(--mono);
-         font-size: 13px; padding: 14px 18px 40px; }
+         font-size: 13px; padding: 14px 18px 0; overflow-x: hidden; }
+  main { min-height: calc(100vh - 90px); }
   .brand { color: var(--green); font-weight: 700; letter-spacing: 2px; }
   .chip { padding: 2px 8px; border-radius: 4px; font-size: 11px;
           color: var(--amber); border: 1px solid var(--amber); }
@@ -76,11 +77,14 @@
   .tmhead { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; padding-top: 4px; }
   #tprice { font-size: 22px; font-weight: 700; }
   .spacer { flex: 1; }
-  #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
-  .stat { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 14px; }
+  #stats { display: grid; gap: 10px; margin-bottom: 12px;
+           grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .stat { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+          padding: 10px 14px; overflow: hidden; }
   .stat span { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px;
-               display: block; margin-bottom: 4px; }
-  .stat b { font-size: 24px; font-weight: 700; }
+               display: block; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat b { font-size: clamp(17px, 2.4vw, 23px); font-weight: 700; line-height: 1.2;
+            font-variant-numeric: tabular-nums; display: block; }
   #tfbar { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
   .tf { font-family: var(--mono); font-size: 12px; color: var(--dim); background: var(--panel);
         border: 1px solid var(--edge); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
@@ -162,6 +166,40 @@
              border-top:1px solid var(--bg); padding-top:10px; }
   .ss-rows .kv { padding:4px 0; } .ss-rows .kv:not(:last-child){ border-bottom:1px solid var(--bg); }
   .ss-legend { color:var(--dim); font-size:11px; text-align:center; margin:28px 0 12px; }
+
+  /* --- overflow & value handling across screens/states --- */
+  /* numbers wrap only at spaces (never mid-digit); long prose wraps anywhere */
+  .card { overflow: hidden; }
+  .kv { gap: 10px; }
+  .kv > b { text-align: right; min-width: 0; }
+  .aline, .last { overflow-wrap: anywhere; }
+  /* wide tables scroll inside their own box, never the page body */
+  #trades, #o-work, #decisions, .ss-rows { overflow-x: auto; }
+  #trades table { min-width: 100%; }
+  #trades td, #trades th { white-space: nowrap; }
+  .badge { flex: none; }
+
+  /* --- footer (all views share it) --- */
+  #sitefoot { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap;
+              margin-top: 36px; padding: 16px 2px 24px; border-top: 1px solid var(--edge);
+              font-size: 11px; color: var(--dim); }
+  #sitefoot .fbrand { color: var(--green); font-weight: 700; letter-spacing: 1.5px; }
+  #sitefoot a { color: var(--dim); text-decoration: none; border-bottom: 1px solid transparent; }
+  #sitefoot a:hover { color: var(--green); border-bottom-color: var(--green); }
+  #sitefoot .fgrow { flex: 1; }
+
+  /* --- responsive --- */
+  @media (max-width: 620px) {
+    body { padding: 10px 12px 0; }
+    #terminal { max-width: 100%; }
+    .ovhead { gap: 10px 14px; }
+    #stats { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+    .ss-hero { flex-direction: column; gap: 12px; }
+    .ss-live { text-align: left; }
+    .ss-title { font-size: 30px; }
+    #chart { height: 320px; }
+    #sitefoot .fgrow { flex-basis: 100%; height: 0; }
+  }
 </style>
 </head>
 <body>
@@ -344,6 +382,14 @@
 
 <div id="toast"></div>
 
+<footer id="sitefoot">
+  <span class="fbrand">SENTINEL</span>
+  <span>execution-integrity-first OMS</span>
+  <span class="fgrow"></span>
+  <a href="https://github.com/gauryvg98/design-docs/tree/main/sentinel-oms" target="_blank" rel="noopener">engineering write-up ↗</a>
+  <a href="https://github.com/gauryvg98/sentinel-oms" target="_blank" rel="noopener">source ↗</a>
+</footer>
+
 <script>
 const $ = id => document.getElementById(id);
 const post = p => fetch(p, {method:'POST'}).then(r=>r.json());
@@ -524,7 +570,7 @@ function openTerminal(sym){
   chart = LightweightCharts.createChart($("chart"), {
     layout:{ background:{color:'#101614'}, textColor:'#8aa' },
     grid:{ vertLines:{color:'#17211d'}, horzLines:{color:'#17211d'} },
-    timeScale:{ timeVisible:true }, height:420 });
+    timeScale:{ timeVisible:true }, autoSize:true });   // track container width/height responsively
   cseries = chart.addCandlestickSeries({ upColor:'#22e07b', downColor:'#f87171',
     wickUpColor:'#22e07b', wickDownColor:'#f87171', borderVisible:false });
   overlays = {}; chartInterval = null; slLine = null; tpLine = null; pegLines = [];   // fresh chart
@@ -815,9 +861,10 @@ function refreshChart(sym){
     $("st-rows").innerHTML = (view.rows||[]).map(row=>{ const v=(d.strategy.detail||{})[row.key];
       return `<div class="kv"><span>${row.label}</span><b>${v===undefined?'—':v}</b></div>`; }).join('');
     const rk = d.strategy.risk;
+    const px = v => Number(v).toLocaleString(undefined,{maximumFractionDigits:4});
     $("st-sizing").innerHTML = rk
       ? `risk ${(parseFloat(rk.risk_pct)*100).toFixed(2)}% · ${rk.max_leverage}× · stop ${rk.stop_pct!=null?(parseFloat(rk.stop_pct)*100).toFixed(2)+'%':'—'} (${rk.stop_source||'atr'}) · TP ${rk.rr}R`
-        + (rk.stop_price ? `<br><span class="neg">SL ${rk.stop_price}</span> · <span class="pos">TP ${rk.take_price}</span>` : '')
+        + (rk.stop_price ? `<br><span class="neg">SL ${px(rk.stop_price)}</span> · <span class="pos">TP ${px(rk.take_price)}</span>` : '')
       : '<span class="dim">fixed budget</span>';
     // SL/TP price lines on the chart (redrawn each refresh; cleared when flat)
     if(slLine){ cseries.removePriceLine(slLine); slLine=null; }

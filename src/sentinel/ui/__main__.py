@@ -242,21 +242,32 @@ async def _serve() -> None:
         risk_params=risk_params,
         multi_asset_margin=multi_asset_margin,
     )
-    # Drop the benign "socket.send() raised exception." line the websockets lib
-    # emits when a push races a client that just closed — pure noise (the send
-    # simply targets a gone socket) that otherwise floods the logs. The real fix
-    # for the volume is the client holding ONE socket; this just quiets the tail.
+    # Drop the benign "socket.send() raised exception." line. Despite how it
+    # reads, this is NOT a websocket line — it is emitted by uvloop
+    # (handles/udp.pyx) on the "asyncio" logger when a UDP datagram send fails on
+    # a connected socket that has entered conn-lost state. In practice that is
+    # DNS: queries to Fly's internal resolver (fdaa::3) over UDP occasionally get
+    # an ICMP error, and every retried send past a threshold logs this WARNING.
+    # It is cosmetic — resolution succeeds on retry (Binance / DB / streams stay
+    # connected). An earlier attempt filtered "websockets"/"uvicorn.error", which
+    # never matched because the record originates on the "asyncio" logger; a
+    # filter added to that logger runs at emission (before propagation to root's
+    # handlers), so THIS is where it must go. Match on the message text only, so
+    # genuine asyncio warnings still get through.
     import logging as _logging
 
     class _DropSocketSendNoise(_logging.Filter):
         def filter(self, record):
             return "socket.send() raised exception" not in record.getMessage()
 
-    for _n in ("websockets", "websockets.server", "uvicorn.error"):
-        _logging.getLogger(_n).addFilter(_DropSocketSendNoise())
-    # the message is INFO on the per-connection websockets logger; raising the
-    # parent level suppresses it there too (level is inherited, filters aren't).
-    _logging.getLogger("websockets").setLevel(_logging.WARNING)
+    _noise_filter = _DropSocketSendNoise()
+    for _n in ("asyncio", "websockets", "websockets.server", "uvicorn.error"):
+        _logging.getLogger(_n).addFilter(_noise_filter)
+    # Belt-and-suspenders: also filter at the root's handlers, which see every
+    # propagated record regardless of originating logger (handler filters run
+    # per-record at output; logger filters only run on direct emission).
+    for _h in _logging.getLogger().handlers:
+        _h.addFilter(_noise_filter)
 
     config = uvicorn.Config(
         # bind 127.0.0.1 locally; 0.0.0.0 in a container (Fly sets HOST=0.0.0.0)

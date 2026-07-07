@@ -61,6 +61,10 @@ primary_region = "sin"
     timeout = "5s"
     grace_period = "30s"
 
+# 13 bots each hold outbound Binance websockets; on shared-cpu-1x the event loop
+# starved (~0.9 load), keepalive pings failed, and market streams dropped so
+# marks/PnL froze. shared-cpu-2x + 1GB gives the async loop real headroom.
+# (Proper fix is multiplexing all symbols onto ONE combined stream — see notes.)
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = "shared-cpu-2x"
+  memory = "1024mb"

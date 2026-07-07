@@ -28,20 +28,27 @@ primary_region = "sin"
 
   # Non-secret trading config (mirror of .env, minus keys/DSN).
   SENTINEL_VENUE = "futures"
-  SENTINEL_SYMBOLS = "BTCUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,LTCUSDT,ADAUSDT,ETHUSDC,SOLUSDC,SUIUSDC,NEARUSDC,AAVEUSDC,ARBUSDC,WLDUSDC"
+  # 6 bots, majors-biased (tight stops need low-noise books), split 3/3 across
+  # the USDT and USDC margin pools so both fund evenly.
+  SENTINEL_SYMBOLS = "BTCUSDT,XRPUSDT,LINKUSDT,ETHUSDC,SOLUSDC,SUIUSDC"
   SENTINEL_STRATEGY = "sma-ls"
   SENTINEL_STRATEGY_INTERVAL = "1m"
   SENTINEL_STRATEGY_USDT = "200"
-  SENTINEL_MAX_NOTIONAL = "5000"
-  SENTINEL_LEVERAGE = "3"
-  SENTINEL_MAX_LEVERAGE = "3"
+  # Fat-finger backstop only (per-symbol |position| cap = this / price). Must
+  # clear the 10x sizing headroom (~pool/3 × 10 ≈ 13.3k notional) or it would
+  # silently clamp effective leverage; risk_pct + stops are the real protection.
+  SENTINEL_MAX_NOTIONAL = "15000"
+  SENTINEL_LEVERAGE = "10"
+  SENTINEL_MAX_LEVERAGE = "10"
   SENTINEL_RISK_PCT = "0.01"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
-  # Trend-follow discipline: tight capped stop (1% of price), and rr=0 so the
-  # position rides to the opposite cross instead of scalping out at a fixed TP.
-  SENTINEL_SMA_STOP_CAP_PCT = "0.003"
-  SENTINEL_SMA_STOP_FLOOR_PCT = "0.0015"
-  SENTINEL_RR = "2"
+  # Capital-protection profile: tighter capped stop (0.1-0.2% of price) with a
+  # high fixed reward:risk — TP sits 5.5x the stop distance. Loss per stop-out
+  # stays ~risk_pct of the bot's equity share; the 0.1% floor is exactly where
+  # the 10x leverage cap binds (eff lev = risk_pct/stop_pct).
+  SENTINEL_SMA_STOP_CAP_PCT = "0.002"
+  SENTINEL_SMA_STOP_FLOOR_PCT = "0.001"
+  SENTINEL_RR = "5.5"
 
 [http_service]
   internal_port = 8000

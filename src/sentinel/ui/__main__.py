@@ -164,6 +164,28 @@ def _build_registry() -> dict:
 
 
 async def _serve() -> None:
+    # Install this FIRST — before create_pool / broker / app.start(), which do
+    # the first DNS. Drop the benign "socket.send() raised exception." line:
+    # despite how it reads it is NOT a websocket line — uvloop (handles/udp.pyx)
+    # emits it on the "asyncio" logger when a connected UDP datagram send fails
+    # (conn-lost). In the Fly container that's DNS: UDP queries to the internal
+    # resolver (fdaa::3) occasionally get an ICMP error, and each retried send
+    # past a threshold logs this WARNING. Cosmetic — resolution succeeds on retry
+    # and the app stays fully connected. A filter on the "asyncio" logger runs at
+    # emission (before propagation), so that is where it belongs; matching on the
+    # message text keeps genuine asyncio warnings flowing.
+    import logging as _logging
+
+    class _DropSocketSendNoise(_logging.Filter):
+        def filter(self, record):
+            return "socket.send() raised exception" not in record.getMessage()
+
+    _noise_filter = _DropSocketSendNoise()
+    for _n in ("asyncio", "websockets", "websockets.server", "uvicorn.error"):
+        _logging.getLogger(_n).addFilter(_noise_filter)
+    for _h in _logging.getLogger().handlers:   # backstop: any root handler
+        _h.addFilter(_noise_filter)
+
     load_env()
     dsn = os.environ.get("DATABASE_URL", DEFAULT_DB)
     # synchronous_commit=off: don't block each COMMIT on the WAL fsync. That
@@ -242,32 +264,6 @@ async def _serve() -> None:
         risk_params=risk_params,
         multi_asset_margin=multi_asset_margin,
     )
-    # Drop the benign "socket.send() raised exception." line. Despite how it
-    # reads, this is NOT a websocket line — it is emitted by uvloop
-    # (handles/udp.pyx) on the "asyncio" logger when a UDP datagram send fails on
-    # a connected socket that has entered conn-lost state. In practice that is
-    # DNS: queries to Fly's internal resolver (fdaa::3) over UDP occasionally get
-    # an ICMP error, and every retried send past a threshold logs this WARNING.
-    # It is cosmetic — resolution succeeds on retry (Binance / DB / streams stay
-    # connected). An earlier attempt filtered "websockets"/"uvicorn.error", which
-    # never matched because the record originates on the "asyncio" logger; a
-    # filter added to that logger runs at emission (before propagation to root's
-    # handlers), so THIS is where it must go. Match on the message text only, so
-    # genuine asyncio warnings still get through.
-    import logging as _logging
-
-    class _DropSocketSendNoise(_logging.Filter):
-        def filter(self, record):
-            return "socket.send() raised exception" not in record.getMessage()
-
-    _noise_filter = _DropSocketSendNoise()
-    for _n in ("asyncio", "websockets", "websockets.server", "uvicorn.error"):
-        _logging.getLogger(_n).addFilter(_noise_filter)
-    # Belt-and-suspenders: also filter at the root's handlers, which see every
-    # propagated record regardless of originating logger (handler filters run
-    # per-record at output; logger filters only run on direct emission).
-    for _h in _logging.getLogger().handlers:
-        _h.addFilter(_noise_filter)
 
     config = uvicorn.Config(
         # bind 127.0.0.1 locally; 0.0.0.0 in a container (Fly sets HOST=0.0.0.0)

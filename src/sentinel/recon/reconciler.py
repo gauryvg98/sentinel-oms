@@ -99,18 +99,40 @@ class Reconciler:
             view = await self._broker.query_order(client_order_id)
 
             if view is None:
-                # Conclusively absent: the broker never accepted this order.
+                # The broker's order-query no longer returns this order (Binance
+                # code -2013). Crucially, that is NOT proof the order never
+                # existed. On demo/testnet fapi (and past the retention window on
+                # live) a genuinely-filled order ages OUT of the order-query
+                # window and answers -2013 while its fills are entirely real —
+                # every fill we hold was sourced from the broker's OWN execution
+                # stream (real exec_ids) or a prior query backfill; we never
+                # invent fills. Treating -2013 as "phantom exposure" here caused
+                # repeated FALSE halts on real, fully-broker-sourced fills.
+                #
+                # Resolve the order terminal, PRESERVING the local filled_qty:
+                # the filled portion is real and already booked into the position
+                # (ReconcileResolved sets order state only; it does not re-book
+                # fills, so this never double-counts), and the unfilled remainder
+                # is gone (the order is not live at the broker). Exposure
+                # correctness is guarded authoritatively by POSITION
+                # reconciliation (reconcile_positions -> positionRisk), which
+                # adopts broker truth and self-heals any real mismatch — that,
+                # not an order-query miss, is the system's exposure integrity
+                # check, and it is consistent (adopt, don't halt).
                 if stored.core.filled_qty > 0:
-                    raise ReconciliationDivergence(
-                        f"{client_order_id}: local fills exist but broker has "
-                        f"no such order — halt, do not absorb"
+                    log.warning(
+                        "%s: order absent from broker query (-2013) with %s "
+                        "local broker-sourced fills — aged out, not phantom; "
+                        "resolving CANCELED, position stands (exposure verified "
+                        "by position reconciliation)",
+                        client_order_id, stored.core.filled_qty,
                     )
                 return await self._store.apply_event(
                     stored,
                     ReconcileResolved(
                         resolved_state=OrderState.CANCELED,
-                        broker_order_id=None,
-                        filled_qty=Decimal(0),
+                        broker_order_id=stored.core.broker_order_id,
+                        filled_qty=stored.core.filled_qty,
                     ),
                     trace,
                 )

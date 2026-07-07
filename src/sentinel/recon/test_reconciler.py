@@ -154,9 +154,13 @@ async def test_late_fill_reconciles_to_broker_truth(pool):
 # ------------------------------------------------------------- divergence
 
 
-async def test_local_fills_with_absent_broker_order_halts(pool):
-    """Fills for an order the broker never accepted cannot be repaired —
-    reconciliation halts loudly instead of absorbing."""
+async def test_absent_broker_order_with_local_fills_resolves_terminal(pool):
+    """An order the broker's query no longer returns (-2013) but which has real
+    local fills is an AGED-OUT order, not phantom exposure — our fills are all
+    broker-sourced. Resolve it terminal preserving the fills (position stands);
+    do NOT halt. Exposure is guarded by POSITION reconciliation, not by an
+    order-query miss. (Regression: this used to halt the whole OMS on real,
+    fully-filled orders that merely aged out of demo-fapi's query window.)"""
 
     class AbsentBroker:
         async def query_order(self, client_order_id):
@@ -165,8 +169,6 @@ async def test_local_fills_with_absent_broker_order_halts(pool):
     store, sim, engine, gateway, recon = rig(pool)
     await gateway.place(uuid4(), intent(qty="2"))
 
-    script_fill = BrokerScript()
-    sim2 = ScriptedBroker(script_fill)  # unused; we hand-apply a fill
     from sentinel.domain import FillReceived
 
     stored = await store.load_order("K1")
@@ -175,9 +177,11 @@ async def test_local_fills_with_absent_broker_order_halts(pool):
         uuid4(),
     )
 
-    bad_recon = Reconciler(store, AbsentBroker(), WriterCoordinator())
-    with pytest.raises(ReconciliationDivergence):
-        await bad_recon.reconcile_order("K1")
+    recon2 = Reconciler(store, AbsentBroker(), WriterCoordinator())
+    resolved = await recon2.reconcile_order("K1")            # no halt
+    assert resolved.core.state is OrderState.CANCELED
+    assert resolved.core.filled_qty == Decimal(1)           # real fill preserved
+    assert await store.get_position("IDX-OPT") == 1         # position stands, not doubled
 
 
 def _view(state, filled, fills):

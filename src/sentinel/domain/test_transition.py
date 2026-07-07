@@ -154,10 +154,30 @@ def test_unsolicited_cancel_from_partial_keeps_fills():
     assert o.state is OrderState.CANCELED and o.filled_qty == 2
 
 
-def test_cancel_confirm_still_illegal_from_non_live_states():
-    for s in (OrderState.CREATED, OrderState.SUBMITTING, OrderState.FILLED):
+def test_cancel_confirm_still_illegal_before_submission():
+    for s in (OrderState.CREATED, OrderState.SUBMITTING):
         with pytest.raises(IllegalTransition):
             transition(order(s), CancelConfirmed())
+
+
+def test_duplicate_cancel_confirm_is_idempotent():
+    """The broker stream is at-least-once and cancel-confirms carry no dedup
+    key (unlike fills' exec_id). A replayed confirm on an already-CANCELED
+    order must be a no-op — this used to raise IllegalTransition and HALT the
+    whole account on a duplicate delivery."""
+    o = order(OrderState.CANCELED, filled="2")
+    same = transition(o, CancelConfirmed())
+    assert same.state is OrderState.CANCELED and same.filled_qty == 2
+
+
+def test_cancel_confirm_contradicting_terminal_demands_reconciliation():
+    """A cancel-confirm for an order we booked FILLED/REJECTED contradicts the
+    ledger — evidence, not application. Route through reconciliation (R1.7
+    late-event policy), never absorb blind, never halt."""
+    for s in (OrderState.FILLED, OrderState.REJECTED, OrderState.UNKNOWN):
+        with pytest.raises(RequiresReconciliation):
+            transition(order(s, filled="4" if s is OrderState.FILLED else "0"),
+                       CancelConfirmed())
 
 
 # --------------------------------------------------------- R1.10 never over

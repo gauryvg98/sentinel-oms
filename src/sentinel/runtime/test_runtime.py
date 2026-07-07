@@ -28,7 +28,10 @@ async def test_failure_of_critical_task_halts_loudly():
     assert isinstance(sup.failures[0].error, RuntimeError)
 
 
-async def test_restartable_task_is_respawned():
+async def test_restartable_task_is_respawned(monkeypatch):
+    from sentinel.runtime import supervisor as sup_mod
+    monkeypatch.setattr(sup_mod, "_RESTART_BASE_S", 0.01)  # fast for the test
+
     sup = TaskSupervisor()
     runs = 0
     done = asyncio.Event()
@@ -47,6 +50,49 @@ async def test_restartable_task_is_respawned():
     assert len(sup.failures) == 2                 # both failures recorded
     assert not sup.halted.is_set()                # restarts, no halt
     await sup.shutdown()
+
+
+async def test_restart_backs_off_instead_of_crash_looping(monkeypatch):
+    """A task failing on entry must NOT respawn instantly (a tight crash loop
+    starves the event loop). The respawn is deferred by the backoff."""
+    from sentinel.runtime import supervisor as sup_mod
+    monkeypatch.setattr(sup_mod, "_RESTART_BASE_S", 0.3)
+
+    sup = TaskSupervisor()
+    runs = 0
+
+    async def always_fails():
+        nonlocal runs
+        runs += 1
+        raise RuntimeError("boom")
+
+    sup.spawn("crashy", always_fails, restart=True)
+    await asyncio.sleep(0.1)      # first failure recorded, respawn pending
+    assert runs == 1              # NOT respawned yet — backoff holds it
+    await asyncio.sleep(0.4)      # past the 0.3s backoff
+    assert runs == 2              # exactly one deferred respawn
+    await sup.shutdown()
+
+
+async def test_shutdown_cancels_a_pending_backoff_restart(monkeypatch):
+    """A restart scheduled during backoff must not resurrect the task after
+    shutdown() tore the supervisor down — no orphan revival."""
+    from sentinel.runtime import supervisor as sup_mod
+    monkeypatch.setattr(sup_mod, "_RESTART_BASE_S", 0.2)
+
+    sup = TaskSupervisor()
+    runs = 0
+
+    async def fails_once():
+        nonlocal runs
+        runs += 1
+        raise RuntimeError("boom")
+
+    sup.spawn("doomed", fails_once, restart=True)
+    await asyncio.sleep(0.05)     # failed; respawn parked in backoff
+    await sup.shutdown()          # drops the child from the roster
+    await asyncio.sleep(0.4)      # backoff elapses AFTER shutdown
+    assert runs == 1              # never resurrected
 
 
 async def test_cancellation_propagates_and_cleanup_runs():

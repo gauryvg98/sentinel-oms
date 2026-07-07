@@ -35,6 +35,22 @@ log = logging.getLogger("sentinel.runtime")
 _RECON_BACKOFF_S = 2.0
 _RECON_MAX_RETRIES = 5
 
+# Transient-DB retry for event application: a managed-Postgres proxy can kill
+# a live connection mid-query (proven in prod by the writer-lock InterfaceError
+# halt). Losing a connection is NOT an integrity violation — retry briefly
+# before treating it as fatal. Retrying on_broker_event is safe: it reloads
+# order state fresh each attempt, fills dedup by exec_id, and a replayed
+# CancelConfirmed on a CANCELED order is an idempotent no-op — so even the
+# ambiguous case (commit landed, error surfaced) reapplies cleanly as a no-op.
+_DB_RETRYABLE = (ConnectionError, OSError, TimeoutError,
+                 asyncpg.InterfaceError, asyncpg.PostgresConnectionError)
+_DB_RETRY_BACKOFF_S = (0.5, 1.0, 2.0, 4.0, 8.0)   # ~15s, then halt for real
+
+# Balance re-seed: latest_balances is seeded once then stream-merged, so a
+# balance event lost in a user-stream gap skews POSITION SIZING until reboot.
+# Re-seed from REST periodically — the account-side twin of the order sweep.
+_BALANCE_RESEED_S = 300.0
+
 # Stale-order sweep: the liveness backstop for LOST broker events. Every
 # reactive reconcile trigger (timeout, late fill, duplicate) presumes an event
 # ARRIVES; a fill dropped in a user-stream gap produces no trigger at all, so
@@ -140,7 +156,11 @@ class SentinelApp:
         # Consumers next: anything recovery or re-arming submits must have
         # its execution reports heard — a fill that lands before the stream
         # subscribes is a silent divergence (found live against Binance).
-        self.supervisor.spawn("broker-intake", self._broker_intake)
+        # broker-intake restart=True: the stream iterator failing is
+        # CONNECTIVITY, not divergence — respawn (with the supervisor's
+        # backoff) re-enters events(), which reconnects; missed-in-gap events
+        # are repaired by the stale-order sweep + reconciliation.
+        self.supervisor.spawn("broker-intake", self._broker_intake, restart=True)
         self.supervisor.spawn("event-apply", self._event_apply)
         # restart=False: this loop is integrity-critical. It handles its OWN
         # transient retries internally (see _reconcile_loop); the only thing
@@ -149,7 +169,12 @@ class SentinelApp:
         self.supervisor.spawn("reconcile", self._reconcile_loop, restart=False)
         # Liveness backstop: periodically re-queue orders stranded by lost
         # broker events (stream-gap fills). Just a nudger — safe to restart.
-        self.supervisor.spawn("stale-sweep", self._stale_sweep_loop)
+        self.supervisor.spawn("stale-sweep", self._stale_sweep_loop,
+                              restart=True)
+        # Sizing-input backstop: re-seed balances from REST so a balance event
+        # lost in a stream gap can't skew position sizing until the next boot.
+        self.supervisor.spawn("balance-reseed", self._balance_reseed_loop,
+                              restart=True)
         try:
             report = await self.recon.startup_recovery()      # 1. recover
         except ReconciliationDivergence as e:
@@ -162,6 +187,7 @@ class SentinelApp:
             print(f"  STARTUP HALT (serving read-only, not trading): {e}",
                   flush=True)
             self.supervisor.halted.set()
+            self.supervisor.alert(f"STARTUP HALT (boot divergence): {e}")
             report = RecoveryReport()
         if report.positions_imported:
             print(f"  RECONCILED positions from exchange: "
@@ -205,11 +231,38 @@ class SentinelApp:
                     self.metrics.inc("balance_updates")
                 else:
                     with self.metrics.timer("event_apply_ms"):
-                        await self.engine.on_broker_event(event)
+                        await self._apply_with_db_retry(event)
                     self.metrics.inc("events_applied")
                 await self.changes.bump()                 # push to the UI
             finally:
                 self._events.task_done()                  # drain-accounting
+
+    async def _apply_with_db_retry(self, event) -> None:
+        """on_broker_event, retrying briefly through connection-class DB
+        errors (proxy-killed connections). Domain violations pass straight
+        through — those are the genuine halt conditions. Retry is safe: state
+        reloads fresh per attempt, fills dedup on exec_id, duplicate cancel
+        confirms are no-ops (see _DB_RETRYABLE note above)."""
+        for delay in _DB_RETRY_BACKOFF_S:
+            try:
+                await self.engine.on_broker_event(event)
+                return
+            except _DB_RETRYABLE as e:
+                log.warning("event apply hit a transient DB error (%r); "
+                            "retrying in %.1fs", e, delay)
+                self.metrics.inc("event_apply_db_retries")
+                await asyncio.sleep(delay)
+        await self.engine.on_broker_event(event)   # last try: raise = halt
+
+    async def _balance_reseed_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_BALANCE_RESEED_S)
+            try:
+                self.latest_balances = await self._broker.query_positions()
+            except Exception as e:  # noqa: BLE001 — a nudger outlives blips
+                log.warning("balance re-seed failed (%r); next pass", e)
+                continue
+            await self.changes.bump()
 
     async def _reconcile_loop(self) -> None:
         """Single recovery mechanism. Two failure modes, handled distinctly:

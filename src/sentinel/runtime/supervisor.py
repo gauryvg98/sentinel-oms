@@ -12,10 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 log = logging.getLogger("sentinel.runtime")
+
+# Restart backoff: an instantly-respawning restart=True task that fails on
+# entry becomes a tight crash loop that starves the event loop. Back off
+# exponentially per consecutive failure; a healthy run resets the streak.
+_RESTART_BASE_S = 1.0
+_RESTART_MAX_S = 30.0
+_HEALTHY_RUN_S = 60.0    # ran this long before failing -> streak forgiven
 
 
 @dataclass(slots=True)
@@ -31,6 +39,8 @@ class _Child:
     factory: Callable[[], Awaitable[None]]
     restart: bool
     task: asyncio.Task | None = None
+    started_at: float = 0.0
+    fail_streak: int = 0
 
 
 class TaskSupervisor:
@@ -53,6 +63,7 @@ class TaskSupervisor:
         self._start(child)
 
     def _start(self, child: _Child) -> None:
+        child.started_at = asyncio.get_running_loop().time()
         child.task = asyncio.create_task(child.factory(), name=child.name)
         child.task.add_done_callback(lambda t, c=child: self._on_done(c, t))
 
@@ -66,11 +77,52 @@ class TaskSupervisor:
             TaskFailure(name=child.name, error=error, restarted=child.restart)
         )
         if child.restart and not self.halted.is_set():
-            log.error("task %s failed (%r); restarting", child.name, error)
-            self._start(child)
+            now = asyncio.get_running_loop().time()
+            if now - child.started_at >= _HEALTHY_RUN_S:
+                child.fail_streak = 0            # it ran fine for a while
+            delay = min(_RESTART_BASE_S * (2 ** child.fail_streak),
+                        _RESTART_MAX_S)
+            child.fail_streak += 1
+            log.error("task %s failed (%r); restarting in %.1fs",
+                      child.name, error, delay)
+            asyncio.get_running_loop().create_task(
+                self._restart_later(child, delay))
         else:
             log.critical("task %s failed (%r); HALTING", child.name, error)
             self.halted.set()
+            self.alert(f"task {child.name} failed: {error!r}")
+
+    async def _restart_later(self, child: _Child, delay: float) -> None:
+        await asyncio.sleep(delay)
+        # The world may have moved during the backoff: the child may have been
+        # torn down (cancel()/shutdown() drop it from _children) or the account
+        # halted — in either case, respawning would resurrect an orphan.
+        if child in self._children and not self.halted.is_set():
+            self._start(child)
+
+    def alert(self, message: str) -> None:
+        """Fire-and-forget operator notification when the account HALTS.
+        Posts {'content': ...} (Discord/Slack-webhook compatible) to
+        SENTINEL_ALERT_WEBHOOK if set; a halt should page someone, not wait
+        to be noticed on the board. Delivery failure only logs — alerting
+        must never take the process down with it."""
+        url = os.environ.get("SENTINEL_ALERT_WEBHOOK")
+        if not url:
+            return
+
+        async def _post() -> None:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        url, json={"content": f"🛑 Sentinel OMS: {message}"})
+            except Exception as e:  # noqa: BLE001
+                log.warning("halt alert delivery failed (%r)", e)
+
+        try:
+            asyncio.get_running_loop().create_task(_post())
+        except RuntimeError:      # no running loop (sync teardown path)
+            log.warning("halt alert skipped: no running event loop")
 
     async def cancel(self, name: str) -> None:
         """Cancel and forget the tasks with this name — used to tear down ONE

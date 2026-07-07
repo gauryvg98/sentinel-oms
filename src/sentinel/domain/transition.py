@@ -164,6 +164,20 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
                 # do NOT halt. Halting here is over-escalation and inconsistent
                 # with how fills are treated in this very state.
                 return order
+            if s is OrderState.CANCELED:
+                # Duplicate delivery: the broker stream is at-least-once, and
+                # unlike fills (exec_id) a cancel-confirm has no dedup key.
+                # Re-confirming a cancel we already booked changes nothing —
+                # absorb it (idempotent no-op), never halt on a replay.
+                return order
+            if s in TERMINAL or s is OrderState.UNKNOWN:
+                # FILLED/REJECTED/UNKNOWN: a cancel-confirm CONTRADICTS what we
+                # booked — evidence, not application. Same policy as a late
+                # fill (R1.7): route through reconciliation and resolve against
+                # broker truth rather than either absorbing blind or halting.
+                raise RequiresReconciliation(
+                    f"cancel confirmed in {s.value}; reconcile before applying"
+                )
             if s not in (OrderState.CANCEL_PENDING, OrderState.WORKING,
                          OrderState.PARTIAL):
                 raise IllegalTransition(f"cancel confirmed in {s.value}")

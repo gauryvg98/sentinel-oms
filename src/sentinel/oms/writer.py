@@ -171,9 +171,21 @@ class OrderEngine:
                         )
                         await self.needs_reconcile.put(stored.core.client_order_id)
                 case BrokerCancelConfirmed():
-                    stored = await self._store.apply_event(
-                        stored, CancelConfirmed(), trace
-                    )
+                    try:
+                        stored = await self._store.apply_event(
+                            stored, CancelConfirmed(), trace
+                        )
+                    except RequiresReconciliation:
+                        # Cancel-confirm contradicting a terminal/unknown order:
+                        # evidence, not application — reopen via recon, exactly
+                        # like a late fill. (A duplicate confirm on CANCELED is
+                        # absorbed inside transition and never lands here.)
+                        stored = await self._store.apply_event(
+                            stored,
+                            ReconcileStarted(cause="late cancel-confirm"), trace,
+                        )
+                        await self.needs_reconcile.put(
+                            stored.core.client_order_id)
 
     # -------------------------------------------------------------- internals
 

@@ -50,3 +50,35 @@ async def test_dropped_connection_releases_lock(pg_dsn):
     b = SingleWriterLock(pg_dsn, account="acct-E")
     await b.acquire()            # takeover succeeds
     await b.release()
+
+
+async def test_reacquire_after_recycle_keeps_running(pg_dsn):
+    """The Fly-proxy incident: the lock connection is RECYCLED (closed under
+    us) but no rival exists. _reacquire must win the lock back on a fresh
+    session — a recycle is not a second writer, and must not halt."""
+    a = SingleWriterLock(pg_dsn, account="acct-F")
+    await a.acquire()
+    await a._conn.close()        # noqa: SLF001 — proxy recycles the connection
+    a._conn = None
+    assert await a._reacquire() is True     # noqa: SLF001
+    # exclusivity survives the recycle: a rival is still refused
+    rival = SingleWriterLock(pg_dsn, account="acct-F")
+    with pytest.raises(AnotherWriterActive):
+        await rival.acquire()
+    await a.release()
+
+
+async def test_reacquire_yields_to_a_real_rival(pg_dsn):
+    """If another writer claimed the account while our connection was down,
+    _reacquire must return False (-> guard raises -> HALT). The two-writer
+    interleave stays impossible."""
+    a = SingleWriterLock(pg_dsn, account="acct-G")
+    await a.acquire()
+    await a._conn.close()        # noqa: SLF001
+    a._conn = None
+    rival = SingleWriterLock(pg_dsn, account="acct-G")
+    await rival.acquire()                    # rival takes over the freed lock
+    try:
+        assert await a._reacquire() is False  # noqa: SLF001 — defer, don't steal
+    finally:
+        await rival.release()

@@ -263,6 +263,12 @@ async def _serve() -> None:
         ui, host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("PORT", "8000")),
         log_level="info", proxy_headers=True, forwarded_allow_ips="*",
+        # Reap half-open clients faster. A tab that vanishes without a clean TCP
+        # FIN (laptop sleeps, network drops) lingers server-side until a Ping
+        # goes unanswered; uvicorn's 20s/20s default means ~40s of the 2s
+        # heartbeat calling send_text() on a dead socket (the "socket.send()
+        # raised exception" noise). 15s/10s reaps it in ~15s -> WebSocketDisconnect.
+        ws_ping_interval=15.0, ws_ping_timeout=10.0,
     )
     await uvicorn.Server(config).serve()
 

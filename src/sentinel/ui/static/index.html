@@ -489,31 +489,52 @@ let chart=null, cseries=null, overlays={}, chartInterval=null, slLine=null, tpLi
 let chartMarkers=[], chartPegs=[];    // for the hover tooltip (fills / peg detail)
 
 // ------------------------------------------------------------------ websocket
+// Exactly ONE socket per client. Earlier this leaked: each reconnect opened a
+// new socket without retiring the old one, and stale sockets' onclose fired
+// their own reconnects — so a tab accumulated N zombie sockets the server kept
+// pushing to (socket.send spam + N× the fan-out, feeding the very congestion
+// that triggered the reconnects). `ws` tracks the live socket; anything that
+// isn't `ws` is stale and must neither reconnect nor be pushed to.
+let ws = null;
 let wsWatchdog = null;
+let reconnectTimer = null;
 function connect(){
+  // fully retire any previous socket: null its handlers so its late onclose
+  // can't schedule another reconnect, then close it so the server drops it.
+  if (ws) { try { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); } catch (e) {} }
+  clearInterval(wsWatchdog);
+  clearTimeout(reconnectTimer); reconnectTimer = null;
   const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${wsScheme}://${location.host}/ws`);
+  const sock = new WebSocket(`${wsScheme}://${location.host}/ws`);
+  ws = sock;
   let lastMsg = Date.now();
-  ws.onopen = () => { $("conn").innerHTML = '<span class="dot ok"></span> live'; };
-  ws.onmessage = ev => {
+  const reconnect = () => {
+    if (ws !== sock) return;              // superseded — ignore this stale socket
+    clearInterval(wsWatchdog);
+    $("conn").innerHTML = '<span class="dot bad"></span> reconnecting';
+    if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 1000);
+  };
+  sock.onopen = () => { $("conn").innerHTML = '<span class="dot ok"></span> live'; };
+  sock.onmessage = ev => {
     lastMsg = Date.now();
     const m = JSON.parse(ev.data);
     if (m.type === 'account') onAccount(m);
     else if (m.type === 'card') onCard(m);
     else if (m.type === 'logs') onLogs(m);
   };
-  ws.onclose = () => { clearInterval(wsWatchdog); $("conn").innerHTML='<span class="dot bad"></span> reconnecting'; setTimeout(connect,1000); };
-  // Liveness watchdog (NOT a data poll): the server pushes at least an account
-  // heartbeat every ~2s, so prolonged silence means a half-open socket that
-  // fired no onclose — the page would freeze until a manual refresh. Force a
-  // reconnect instead. Fetches nothing; only checks the connection is alive.
-  clearInterval(wsWatchdog);
+  sock.onclose = reconnect;
+  sock.onerror = () => { try { sock.close(); } catch (e) {} };
+  // Liveness watchdog (NOT a data poll): the server heartbeats ~every 2s, so
+  // prolonged silence means a half-open socket. 15s (was 6s) is lenient enough
+  // that a slow sync under load isn't mistaken for death — a too-tight timeout
+  // was force-reconnecting live sockets and storming the server.
   wsWatchdog = setInterval(() => {
-    if (Date.now() - lastMsg > 6000) {
+    if (ws !== sock) { clearInterval(wsWatchdog); return; }
+    if (Date.now() - lastMsg > 15000) {
       $("conn").innerHTML = '<span class="dot bad"></span> stalled — reconnecting';
-      try { ws.close(); } catch (e) {}     // -> onclose -> reconnect
+      try { sock.close(); } catch (e) {}   // -> onclose -> reconnect
     }
-  }, 2000);
+  }, 3000);
 }
 
 function onAccount(a){

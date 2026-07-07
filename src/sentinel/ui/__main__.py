@@ -242,6 +242,22 @@ async def _serve() -> None:
         risk_params=risk_params,
         multi_asset_margin=multi_asset_margin,
     )
+    # Drop the benign "socket.send() raised exception." line the websockets lib
+    # emits when a push races a client that just closed — pure noise (the send
+    # simply targets a gone socket) that otherwise floods the logs. The real fix
+    # for the volume is the client holding ONE socket; this just quiets the tail.
+    import logging as _logging
+
+    class _DropSocketSendNoise(_logging.Filter):
+        def filter(self, record):
+            return "socket.send() raised exception" not in record.getMessage()
+
+    for _n in ("websockets", "websockets.server", "uvicorn.error"):
+        _logging.getLogger(_n).addFilter(_DropSocketSendNoise())
+    # the message is INFO on the per-connection websockets logger; raising the
+    # parent level suppresses it there too (level is inherited, filters aren't).
+    _logging.getLogger("websockets").setLevel(_logging.WARNING)
+
     config = uvicorn.Config(
         # bind 127.0.0.1 locally; 0.0.0.0 in a container (Fly sets HOST=0.0.0.0)
         ui, host=os.environ.get("HOST", "127.0.0.1"),

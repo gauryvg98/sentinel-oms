@@ -218,6 +218,22 @@ def test_reconciling_ingests_fills_without_concluding():
     assert o.filled_qty == 4
 
 
+def test_reconciling_ingests_cancel_confirm_without_concluding():
+    """A cancel-confirm landing mid-reconcile is the same race as a fill landing
+    mid-reconcile: live evidence, not a divergence. It must be absorbed (order
+    stays RECONCILING, fills retained) — only ReconcileResolved concludes. This
+    is the exact halt we hit: CancelConfirmed arrived while the order was
+    RECONCILING and raised IllegalTransition, taking the whole OMS down."""
+    o = order(OrderState.RECONCILING, filled="2")
+    o = transition(o, CancelConfirmed())
+    assert o.state is OrderState.RECONCILING and o.filled_qty == 2
+    # resolution is still the only exit — broker truth concludes it
+    o = transition(o, ReconcileResolved(
+        resolved_state=OrderState.CANCELED, broker_order_id="B1",
+        filled_qty=Decimal("2")))
+    assert o.state is OrderState.CANCELED and o.filled_qty == 2
+
+
 def test_reconciling_backfill_overmatch_clamps_to_qty():
     # Backfilling a venue over-match: the order's booked fill clamps to qty and
     # stays RECONCILING (only resolution concludes). Never over-books.

@@ -153,6 +153,17 @@ def transition(order: OrderCore, event: OrderEvent) -> OrderCore:  # noqa: C901
             # order itself: self-trade prevention (STP -> EXPIRED_IN_MATCH) or an
             # exchange-side cancel. Accept it from WORKING/PARTIAL too, keeping
             # any fills already applied; the remainder is gone -> CANCELED.
+            if s is OrderState.RECONCILING:
+                # A cancel-confirm landing mid-reconcile is the SAME race as a
+                # fill landing mid-reconcile (see FillReceived above): a live
+                # exec report arriving inside the reconcile window, not a
+                # divergence. Reconciliation ingests evidence but never concludes
+                # from a live event — the order stays RECONCILING until
+                # ReconcileResolved replaces belief with broker truth. Absorb it
+                # (recorded as evidence in the ledger, from==to==RECONCILING);
+                # do NOT halt. Halting here is over-escalation and inconsistent
+                # with how fills are treated in this very state.
+                return order
             if s not in (OrderState.CANCEL_PENDING, OrderState.WORKING,
                          OrderState.PARTIAL):
                 raise IllegalTransition(f"cancel confirmed in {s.value}")

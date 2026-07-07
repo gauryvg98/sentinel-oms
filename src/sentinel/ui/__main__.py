@@ -166,7 +166,17 @@ def _build_registry() -> dict:
 async def _serve() -> None:
     load_env()
     dsn = os.environ.get("DATABASE_URL", DEFAULT_DB)
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=6)
+    # synchronous_commit=off: don't block each COMMIT on the WAL fsync. That
+    # fsync-per-commit is what saturates a small single-node Postgres under a
+    # pegging fleet's fill flood (checkpoints falling tens of seconds behind ->
+    # dropped connections -> halts). The only cost is a <1s window of committed
+    # events that a hard pg crash could lose — which is exactly what this
+    # system's reconcile-against-broker recovery re-derives on restart (fills
+    # back-filled idempotently by exec_id). Durability backstop already exists.
+    pool = await asyncpg.create_pool(
+        dsn, min_size=2, max_size=10,
+        server_settings={"synchronous_commit": "off"},
+    )
     async with pool.acquire() as conn:
         await apply_migrations(conn)
 

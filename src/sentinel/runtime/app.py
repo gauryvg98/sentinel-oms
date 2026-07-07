@@ -131,7 +131,19 @@ class SentinelApp:
         # that exits it is a ReconciliationDivergence or an exhausted retry —
         # both of which SHOULD halt the account, not silently respawn.
         self.supervisor.spawn("reconcile", self._reconcile_loop, restart=False)
-        report = await self.recon.startup_recovery()      # 1. recover
+        try:
+            report = await self.recon.startup_recovery()      # 1. recover
+        except ReconciliationDivergence as e:
+            # A genuine boot divergence must HALT (don't absorb) — but halting
+            # must NOT crash the process into a Fly restart loop (which serves
+            # nothing and hides the reason). Trip the halt flag so the board comes
+            # up read-only and refuses to trade, and keep serving so the operator
+            # can see and investigate. Same "halt, don't absorb" outcome as a
+            # runtime divergence — just without the opaque crash-loop.
+            print(f"  STARTUP HALT (serving read-only, not trading): {e}",
+                  flush=True)
+            self.supervisor.halted.set()
+            report = RecoveryReport()
         if report.positions_imported:
             print(f"  RECONCILED positions from exchange: "
                   f"{', '.join(report.positions_imported)}", flush=True)

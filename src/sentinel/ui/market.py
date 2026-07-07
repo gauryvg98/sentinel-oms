@@ -56,6 +56,7 @@ class MarketData:
         self._book_ts: float = 0.0
         self._last_bump: float = 0.0           # UI-push throttle (book is chatty)
         self._ws = None                        # live stream, closed on tf switch
+        self._hub = None                       # set when driven by a MarketHub
         # Async callback fired on price/candle tick, so the UI pushes in real
         # time instead of on a timer. Wired to app.changes.bump.
         self.on_change = None
@@ -94,12 +95,15 @@ class MarketData:
             return
         self.interval = interval
         await self.load_history()              # replaces candles for the new tf
-        ws = self._ws
-        if ws is not None:
-            try:
-                await ws.close()               # forces run() to reconnect
-            except Exception:  # noqa: BLE001
-                pass
+        if self._hub is not None:
+            self._hub._touch()                 # hub re-subscribes on the new @kline
+        else:
+            ws = self._ws                      # standalone fallback (no hub)
+            if ws is not None:
+                try:
+                    await ws.close()           # forces run() to reconnect
+                except Exception:  # noqa: BLE001
+                    pass
         if self.on_change is not None:
             await self.on_change()
 

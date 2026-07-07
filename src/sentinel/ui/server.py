@@ -331,8 +331,9 @@ class Bot:
     def __init__(self, app: SentinelApp, venue: Venue, symbol: str, market,
                  bars, spec: InstrumentSpec, strategies: dict, *,
                  default_strategy: str, size_usdt: Decimal,
-                 equity_fn=None, risk_params=None) -> None:
+                 equity_fn=None, risk_params=None, hub=None) -> None:
         self.app = app
+        self.hub = hub                          # shared MarketHub, or None
         self.venue = venue
         self.symbol = symbol
         self.market = market
@@ -413,8 +414,12 @@ class Bot:
         await self.market.load_history()
         await self.bars.load_history()
         self.market.on_change = functools.partial(self.app.changes.bump, self.symbol)
-        self.app.supervisor.spawn(f"market:{self.symbol}", self.market.run, restart=True)
-        self.app.supervisor.spawn(f"bars:{self.symbol}", self.bars.run, restart=True)
+        if self.hub is not None:
+            # one shared socket for the whole fleet drives this bot's feeds
+            self.hub.register(self.market, self.bars)
+        else:
+            self.app.supervisor.spawn(f"market:{self.symbol}", self.market.run, restart=True)
+            self.app.supervisor.spawn(f"bars:{self.symbol}", self.bars.run, restart=True)
         self.app.supervisor.spawn(f"strategy:{self.symbol}", self.runner.run, restart=True)
 
     def start(self) -> None:
@@ -451,6 +456,8 @@ class Bot:
         elif pos < 0:
             await self.terminal.trade("BUY", btc=float(-pos),
                                       authority=Authority.PROTECTIVE_EXIT)
+        if self.hub is not None:
+            self.hub.unregister(self.symbol)
         for kind in ("strategy", "bars", "market"):
             await self.app.supervisor.cancel(f"{kind}:{self.symbol}")
 
@@ -579,6 +586,7 @@ class InstrumentManager:
                  log_ring: LogRing | None = None) -> None:
         self.app = app
         self.venue = venue
+        self.hub = None                        # shared MarketHub (Binance), lazy
         self.strategies = strategies
         self.default_strategy = default_strategy
         self.default_usdt = default_usdt
@@ -699,6 +707,13 @@ class InstrumentManager:
                 return {"error": f"could not fetch {symbol} rules: {e}"}
             market = self.venue.make_market(symbol)
             bars = self.venue.make_bars(symbol, self.venue.default_interval)
+            # Binance feeds share ONE combined-stream socket via the hub (created
+            # lazily off the first market's stream base; started once, supervised).
+            # bybit's market has no _hub attr -> hub stays None -> per-bot sockets.
+            if self.hub is None and getattr(market, "_hub", "n/a") is None:
+                from .market_hub import MarketHub
+                self.hub = MarketHub(market._stream)
+                self.app.supervisor.spawn("market-hub", self.hub.run, restart=True)
             # Each bot sizes off its OWN share of the settlement-asset pool
             # (equity_for), never the whole account — bound at construction to
             # this symbol.
@@ -706,7 +721,7 @@ class InstrumentManager:
                       self.strategies, default_strategy=self.default_strategy,
                       size_usdt=self.default_usdt,
                       equity_fn=functools.partial(self.equity_for, symbol),
-                      risk_params=self.risk_params)
+                      risk_params=self.risk_params, hub=self.hub)
             await bot.spawn()                       # loads history -> a mark exists
             self.bots[symbol] = bot                 # register BEFORE cap so it
                                                     # counts in its own pool share

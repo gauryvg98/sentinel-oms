@@ -42,6 +42,9 @@ _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 _LIQ_SAFETY_S = 20.0   # slow safety re-anchor for cross-margin liq drift; the
                        # real refresh is event-driven off account changes
 _LOGS_PUSH_MIN_S = 2.0   # max cadence for pushing the logs frame over the WS
+_ACCOUNT_PUSH_MIN_S = 0.5  # min cadence for refreshing the aggregate running/net
+                           # P&L on activity (it moves with the same marks as the
+                           # cards, but a card bump only refreshes that one card)
 
 # --- public read-only mode (deployment) --------------------------------------
 # With SENTINEL_PUBLIC_READONLY set, every control (trade, start/stop, add/remove,
@@ -990,24 +993,40 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
                 await send_card(sym)
             await send_logs()
             seen = app.changes.revision
-            last_logs = _aio.get_event_loop().time()
+            _now0 = _aio.get_event_loop().time()
+            last_logs = _now0
+            last_account = _now0
             while True:
                 nxt = await app.changes.wait_past(seen, timeout=2.0)
                 topics = app.changes.topics_since(seen)
                 seen = nxt
+                account_sent = False
                 if not topics:                        # heartbeat (dead-quiet)
-                    await send_account()
+                    await send_account(); account_sent = True
                 else:
                     for topic in topics:
                         if topic in ("account", "roster"):
-                            await send_account()
+                            await send_account(); account_sent = True
                         else:
                             await send_card(topic)
+                now = _aio.get_event_loop().time()
+                # The top-line running/net P&L is an aggregate of EVERY bot's
+                # unrealized P&L, moving with the same marks that move the cards —
+                # but a card bump only refreshes that one card. Under active
+                # ticking the "dead-quiet" heartbeat above is starved (topics is
+                # never empty), so without this the aggregate would refresh only
+                # on broker events (fills), visibly lagging the ticks. Refresh it
+                # on activity too, rate-limited like logs (the snapshot aggregates
+                # all bots, so cap it rather than push on literally every tick).
+                if not account_sent and now - last_account >= _ACCOUNT_PUSH_MIN_S:
+                    await send_account()
+                    account_sent = True
+                if account_sent:
+                    last_account = now
                 # Logs (system ring + event ledger) — pushed on any wake but rate-
                 # limited: a 2s tail is plenty and keeps the recent_events query
                 # off the hot path. The 2s heartbeat guarantees it refreshes even
                 # when idle. Server-pushed, never polled by the browser.
-                now = _aio.get_event_loop().time()
                 if now - last_logs >= _LOGS_PUSH_MIN_S:
                     await send_logs()
                     last_logs = now

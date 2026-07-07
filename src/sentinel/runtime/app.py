@@ -12,6 +12,7 @@ event queue through the engine, cancel supervised tasks awaiting cleanup.
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 
 import asyncpg
@@ -26,11 +27,26 @@ from sentinel.recon import Reconciler, ReconciliationDivergence, RecoveryReport
 from .single_writer import SingleWriterLock
 from .supervisor import TaskSupervisor
 
+log = logging.getLogger("sentinel.runtime")
+
 # Reconcile retry policy: a transient broker/network error must NOT strand the
 # order (which would hold the instrument forever). Re-enqueue with backoff up
 # to a cap; beyond the cap the failure is treated as fatal, not transient.
 _RECON_BACKOFF_S = 2.0
 _RECON_MAX_RETRIES = 5
+
+# Stale-order sweep: the liveness backstop for LOST broker events. Every
+# reactive reconcile trigger (timeout, late fill, duplicate) presumes an event
+# ARRIVES; a fill dropped in a user-stream gap produces no trigger at all, so
+# the order sits in a live state forever — found in prod as a filled MARKET
+# protective exit stuck WORKING/0, pinning its position as committed-to-exits
+# and blocking every SL/TP flatten. Sweep non-terminal orders untouched for
+# _SWEEP_STALE_AGE_S onto the reconcile queue; reconcile_order is idempotent
+# (exec_id dedup), so sweeping a genuinely-resting order just re-affirms it.
+# The age comfortably exceeds any honest in-flight window (submission timeout,
+# reconcile round-trip), so the sweep only ever touches abandoned state.
+_SWEEP_INTERVAL_S = 30.0
+_SWEEP_STALE_AGE_S = 120.0
 
 
 class ChangeSignal:
@@ -131,6 +147,9 @@ class SentinelApp:
         # that exits it is a ReconciliationDivergence or an exhausted retry —
         # both of which SHOULD halt the account, not silently respawn.
         self.supervisor.spawn("reconcile", self._reconcile_loop, restart=False)
+        # Liveness backstop: periodically re-queue orders stranded by lost
+        # broker events (stream-gap fills). Just a nudger — safe to restart.
+        self.supervisor.spawn("stale-sweep", self._stale_sweep_loop)
         try:
             report = await self.recon.startup_recovery()      # 1. recover
         except ReconciliationDivergence as e:
@@ -235,3 +254,30 @@ class SentinelApp:
             attempts.pop(key, None)
             self.metrics.inc("reconciliations")
             await self.changes.bump()
+
+    async def sweep_stale_orders(self) -> list[str]:
+        """One sweep pass: queue every non-terminal order untouched for
+        _SWEEP_STALE_AGE_S for reconciliation against broker truth. Returns the
+        queued keys. Idempotent and cheap — a swept order's first reconcile
+        event bumps updated_at, so it will not be re-swept for another full
+        staleness window even if it legitimately keeps resting."""
+        stale = await self.store.load_stale_nonterminal(_SWEEP_STALE_AGE_S)
+        keys = [s.core.client_order_id for s in stale]
+        for s in stale:
+            log.warning(
+                "stale-order sweep: %s %s on %s untouched > %.0fs — a broker "
+                "event was likely lost (stream gap); reconciling",
+                s.core.client_order_id, s.core.state.value,
+                s.core.instrument, _SWEEP_STALE_AGE_S,
+            )
+            self.metrics.inc("stale_sweeps")
+            await self.engine.needs_reconcile.put(s.core.client_order_id)
+        return keys
+
+    async def _stale_sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_SWEEP_INTERVAL_S)
+            try:
+                await self.sweep_stale_orders()
+            except Exception as e:  # noqa: BLE001 — a nudger must outlive DB blips
+                log.warning("stale sweep pass failed (%r); next pass retries", e)

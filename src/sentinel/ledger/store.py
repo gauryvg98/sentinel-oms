@@ -261,6 +261,28 @@ class LedgerStore:
         )
         return [_row_to_stored(r) for r in rows]
 
+    async def load_stale_nonterminal(self, older_than_s: float
+                                     ) -> list[StoredOrder]:
+        """Non-terminal orders untouched for `older_than_s` — the liveness sweep.
+
+        A broker event lost in a user-stream gap (Binance listenKey streams do
+        NOT replay missed events on reconnect) leaves an order stranded in a
+        live state with NO reactive reconcile trigger: a MARKET exit that filled
+        at the venue stays WORKING/filled=0 here forever, pinning its position
+        as 'committed to exits'. Every event application bumps updated_at, so
+        'non-terminal and untouched for minutes' is precisely the
+        something-was-lost signal. (updated_at is reset wholesale by boot's
+        rebuild_projections, which is fine: startup recovery reconciles every
+        non-terminal order itself; this query serves the RUNTIME sweep.)"""
+        rows = await self._pool.fetch(
+            "SELECT * FROM orders "
+            "WHERE state NOT IN ('FILLED','CANCELED','REJECTED') "
+            "AND updated_at < now() - make_interval(secs => $1) "
+            "ORDER BY last_event_seq",
+            older_than_s,
+        )
+        return [_row_to_stored(r) for r in rows]
+
     # ------------------------------------------------------------ transitions
 
     async def apply_event(

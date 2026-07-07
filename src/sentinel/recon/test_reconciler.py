@@ -184,6 +184,41 @@ async def test_absent_broker_order_with_local_fills_resolves_terminal(pool):
     assert await store.get_position("IDX-OPT") == 1         # position stands, not doubled
 
 
+async def test_stale_sweep_recovers_fill_lost_in_stream_gap(pool):
+    """The BTCUSDT prod incident: a MARKET protective exit fills at the venue,
+    but the user stream dropped mid-gap and Binance does NOT replay missed
+    events — the order sits WORKING/filled=0 with NO reactive trigger, pinning
+    its position as committed-to-exits and blocking every SL/TP flatten. The
+    staleness query is the missing trigger; existing reconcile machinery does
+    the rest."""
+    script = BrokerScript()
+    script.fill("K1", qty="4", price="4.20", at_step=1)
+    store, sim, engine, gateway, recon = rig(pool, script)
+
+    await gateway.place(uuid4(), intent())     # ACKed -> WORKING locally
+    sim.step()
+    sim.take_events()                          # fill happened; report LOST
+
+    working = await store.load_order("K1")
+    assert working.core.state is OrderState.WORKING   # stranded, no trigger
+
+    # Fresh orders are left alone...
+    assert await store.load_stale_nonterminal(120) == []
+    # ...but once untouched past the staleness window, the sweep finds it.
+    await pool.execute(
+        "UPDATE orders SET updated_at = now() - interval '10 minutes'"
+    )
+    stale = await store.load_stale_nonterminal(120)
+    assert [s.core.client_order_id for s in stale] == ["K1"]
+
+    for s in stale:                            # what the sweep loop does
+        await engine.needs_reconcile.put(s.core.client_order_id)
+    resolved = (await recon.drain(engine.needs_reconcile))[0]
+    assert resolved.core.state is OrderState.FILLED    # broker truth restored
+    assert resolved.core.filled_qty == 4
+    assert await store.get_position("IDX-OPT") == 4    # exposure unpinned
+
+
 def _view(state, filled, fills):
     from sentinel.broker.adapter import BrokerOrderView
     return BrokerOrderView("K1", "B1", state, Decimal(filled), tuple(fills))

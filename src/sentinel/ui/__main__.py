@@ -198,6 +198,12 @@ async def _serve() -> None:
     pool = await asyncpg.create_pool(
         dsn, min_size=2, max_size=10,
         server_settings={"synchronous_commit": "off"},
+        # Recycle idle pool connections well before a managed Postgres proxy
+        # (Fly) kills long-lived TCP connections (~10-20min), which otherwise
+        # surfaces as a mid-query InterfaceError('connection is closed'). 5min
+        # keeps the pool's connections fresh; the single-writer lock connection
+        # (necessarily long-lived) handles its own drop by re-acquiring.
+        max_inactive_connection_lifetime=300.0,
     )
     async with pool.acquire() as conn:
         await apply_migrations(conn)

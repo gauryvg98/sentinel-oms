@@ -39,8 +39,8 @@ primary_region = "sin"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Trend-follow discipline: tight capped stop (1% of price), and rr=0 so the
   # position rides to the opposite cross instead of scalping out at a fixed TP.
-  SENTINEL_SMA_STOP_CAP_PCT = "0.01"
-  SENTINEL_SMA_STOP_FLOOR_PCT = "0.005"
+  SENTINEL_SMA_STOP_CAP_PCT = "0.003"
+  SENTINEL_SMA_STOP_FLOOR_PCT = "0.0015"
   SENTINEL_RR = "0"
 
 [http_service]

@@ -161,6 +161,12 @@ def _row_to_stored(row: asyncpg.Record) -> StoredOrder:
 class LedgerStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
+        # Monotonic counter bumped whenever a NEW fill row is committed (see
+        # apply_event). Read by compute_pnl to gate its cost-basis memo: the
+        # avg-cost walk over the fills table only needs recomputing when this
+        # changes, not on every per-tick card()/snapshot read. In-memory and
+        # process-local, which is correct under the single-writer invariant.
+        self.fills_version = 0
 
     # ------------------------------------------------------------- commands
 
@@ -348,6 +354,11 @@ class LedgerStore:
                     f"projection for {core.client_order_id} moved underneath us"
                 )
 
+        # Transaction committed. A FillReceived that reached here inserted a new
+        # row (duplicates returned FillOutcome.DUPLICATE above), so invalidate
+        # the P&L cost-basis memo by bumping the version.
+        if isinstance(event, FillReceived):
+            self.fills_version += 1
         return StoredOrder(
             core=new_core,
             side=stored.side,

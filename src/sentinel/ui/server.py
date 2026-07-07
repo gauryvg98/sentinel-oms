@@ -42,6 +42,9 @@ _UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 _LIQ_SAFETY_S = 20.0   # slow safety re-anchor for cross-margin liq drift; the
                        # real refresh is event-driven off account changes
 _LOGS_PUSH_MIN_S = 2.0   # max cadence for pushing the logs frame over the WS
+_DIAG_TTL_S = 3.0        # max staleness for the integrity checks + order counts
+                         # (full-table scans) shown in the account snapshot — they
+                         # move slowly, so they need not re-scan on every 0.5s push
 _ACCOUNT_PUSH_MIN_S = 0.5  # min cadence for refreshing the aggregate running/net
                            # P&L on activity (it moves with the same marks as the
                            # cards, but a card bump only refreshes that one card)
@@ -472,7 +475,13 @@ class Bot:
         return [c["c"] for c in cs[::step]][-n:]
 
     async def _pnl(self):
-        return (await compute_pnl(self.app.store._pool, self.market)).get(self.symbol)
+        # version=fills_version lets compute_pnl reuse its cost-basis memo across
+        # every bot's per-tick card() instead of re-scanning the whole fills
+        # table each time; live marks are still overlaid fresh per call.
+        return (await compute_pnl(
+            self.app.store._pool, self.market,
+            version=self.app.store.fills_version,
+        )).get(self.symbol)
 
     async def avg_cost(self) -> Decimal | None:
         """The open position's entry price — anchors the risk layer's SL/TP."""
@@ -610,6 +619,9 @@ class InstrumentManager:
         # once every bot is up and in its correct live state.
         self.seed_target = 0
         self.seed_done = False
+        # TTL memo for the heavy, slow-moving account diagnostics (order_stats +
+        # check_invariants: full-table scans). Kept off the per-0.5s hot path.
+        self._diag_cache: dict = {"t": 0.0, "orders": None, "invariants": None}
         self._lock = asyncio.Lock()
 
     def account_cash(self) -> Decimal:
@@ -805,6 +817,14 @@ class InstrumentManager:
         eff_lev = (gross_notional / equity) if equity > 0 else Decimal(0)
         shown = {a: format(v.normalize(), "f")
                  for a, v in sorted(balances.items()) if v}
+        # Heavy diagnostics (full-table scans) — refresh at most every _DIAG_TTL_S
+        # rather than on every 0.5s push. They move slowly; the live money numbers
+        # above (equity / running / net) are recomputed every call and stay fresh.
+        dc = self._diag_cache
+        if dc["orders"] is None or time.monotonic() - dc["t"] > _DIAG_TTL_S:
+            dc["orders"] = await order_stats(self.app)
+            dc["invariants"] = await check_invariants(self.app)
+            dc["t"] = time.monotonic()
         return {
             "type": "account",
             "accepting": self.app.accepting,
@@ -812,8 +832,8 @@ class InstrumentManager:
             "uptime_s": round(time.time() - self._started),
             "task_failures": len(self.app.supervisor.failures),
             "metrics": self.app.metrics.snapshot(),
-            "orders": await order_stats(self.app),
-            "invariants": await check_invariants(self.app),
+            "orders": dc["orders"],
+            "invariants": dc["invariants"],
             "roster": self.roster(),
             "predefined": list(self.venue.predefined),
             "strategies": list(self.strategies),

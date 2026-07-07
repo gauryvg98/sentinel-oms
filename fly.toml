@@ -40,7 +40,10 @@ primary_region = "sin"
   SENTINEL_MAX_NOTIONAL = "15000"
   SENTINEL_LEVERAGE = "10"
   SENTINEL_MAX_LEVERAGE = "10"
-  SENTINEL_RISK_PCT = "0.01"
+  # 2%: at the 0.2% stop cap this sizes to exactly the 10x leverage ceiling
+  # (eff lev = risk_pct/stop_pct) — fully margin-committed, ~2% of the bot's
+  # share lost per stop-out.
+  SENTINEL_RISK_PCT = "0.02"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Capital-protection profile: tighter capped stop (0.1-0.2% of price) with a
   # high fixed reward:risk — TP sits 5.5x the stop distance. Loss per stop-out

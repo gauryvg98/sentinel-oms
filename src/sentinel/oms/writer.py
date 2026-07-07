@@ -14,8 +14,11 @@ on this path AT ALL (R1.3): the code that could blind-resubmit was never written
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 from uuid import UUID, uuid4
+
+log = logging.getLogger("sentinel.oms")
 
 from sentinel.broker import (
     BrokerAdapter,
@@ -134,12 +137,19 @@ class OrderEngine:
     async def on_broker_event(self, event: BrokerEvent) -> None:
         stored = await self._store.load_order(event.client_order_id)
         if stored is None:
-            # An execution for an order we have no intent for: gravest possible
-            # divergence — never absorb silently. (Cannot reconcile an unknown
-            # id either; surface loudly.)
-            raise RuntimeError(
-                f"broker event for unknown client_order_id {event.client_order_id!r}"
+            # An execution/update for an order we have NO intent for — e.g. an
+            # orphan order left on the account by another process. Surface it
+            # loudly, but DISOWN and continue: one stray id must not take the
+            # whole fleet down. We never book exposure we didn't create; any real
+            # exposure it produced is caught by POSITION reconciliation against
+            # broker truth (the considered retry-then-halt path), not by crashing
+            # the event-apply loop here.
+            log.error(
+                "disowning broker event for unknown client_order_id %r (%s) — "
+                "not in the ledger; continuing",
+                event.client_order_id, type(event).__name__,
             )
+            return
         async with self._coord.lock(stored.core.instrument):
             stored = await self._store.load_order(event.client_order_id)
             trace = uuid4()

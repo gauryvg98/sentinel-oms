@@ -67,6 +67,8 @@ primary_region = "sin"
   # distance and only ever tightens; fixed TP is disabled while trailing (the
   # trail is the profit-taker — runs are ridden, giveback bounded to ~one sd).
   SENTINEL_TRAIL = "true"
+  # After a stop-out, re-enter the SAME regime after 2 closed bars (0 = only on flip)
+  SENTINEL_REENTRY_BARS = "2"
 
 [http_service]
   internal_port = 8000

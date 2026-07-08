@@ -23,6 +23,8 @@ short-side callables. plan_action is pure -> every case is tested without a brok
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Awaitable, Callable
@@ -153,6 +155,10 @@ class StrategyRunner:
         self._entry_fn = entry_fn
         self._margin_cap_fn = margin_cap_fn
         self._suppressed = None          # stance we exited on a stop/TP — no re-entry until it flips
+        # Bars-based re-entry: >0 lets a bot re-enter the SAME regime after N
+        # closed bars post-stop (0 = classic wait-for-flip only).
+        self._reentry_bars = int(os.environ.get("SENTINEL_REENTRY_BARS", "0"))
+        self._suppress_age = 0           # closed bars since suppression began
         self._last_bracket: dict | None = None   # current SL/TP levels, for the UI
         self._trail: dict | None = None          # ratchet state {sign, hwm, stop}
 
@@ -197,7 +203,13 @@ class StrategyRunner:
         # FLIPS — don't immediately pile back into the same trade we just exited.
         if self._suppressed is not None:
             if d.stance == self._suppressed:
-                return Decimal(0)
+                # Same regime: stay flat — unless bar-based re-entry is on and
+                # enough bars have closed since the stop (the market got N bars
+                # to prove the move was a wick, not a trend against us).
+                if self._reentry_bars > 0 and self._suppress_age >= self._reentry_bars:
+                    self._suppressed = None
+                else:
+                    return Decimal(0)
             self._suppressed = None
         if d.stance is Stance.SHORT and not self._allow_short:
             return Decimal(0)
@@ -341,6 +353,7 @@ class StrategyRunner:
         elif not is_long and self._reduce_buy_fn is not None:
             await self._reduce_buy_fn(qty)
         self._suppressed = d.stance if d is not None else None
+        self._suppress_age = 0
         self._last_bracket = None
         self._trail = None
         self.last_action = f"{hit} hit @ {format(price.normalize(), 'f')} — flattened"
@@ -400,6 +413,8 @@ class StrategyRunner:
                 continue
             self._last_closed_t = closed["t"]
 
+            if self._suppressed is not None:
+                self._suppress_age += 1          # one more closed bar in timeout
             self.last_decision = self._feed(closed)
             self._history.append({"t": closed["t"], "detail": self.last_decision.detail})
             del self._history[:-_HISTORY_CAP]

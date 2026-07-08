@@ -37,17 +37,17 @@ primary_region = "sin"
   # Fat-finger backstop only (per-symbol |position| cap = this / price). Must
   # clear the 10x sizing headroom (~pool/3 × 10 ≈ 13.3k notional) or it would
   # silently clamp effective leverage; risk_pct + stops are the real protection.
-  SENTINEL_MAX_NOTIONAL = "30000"
+  SENTINEL_MAX_NOTIONAL = "70000"
   # 100x exchange margin setting: sizing stays RISK-driven (eff lev =
   # risk_pct/stop_pct = 10-20x with 2% risk and 0.1-0.2% stops), so 100x mostly
   # means less margin posted per position. Symbols whose Binance bracket caps
   # below 100 reject the setting and keep their previous leverage (non-fatal).
   SENTINEL_LEVERAGE = "100"
   SENTINEL_MAX_LEVERAGE = "100"
-  # 2%: at the 0.2% stop cap this sizes to exactly the 10x leverage ceiling
-  # (eff lev = risk_pct/stop_pct) — fully margin-committed, ~2% of the bot's
-  # share lost per stop-out.
-  SENTINEL_RISK_PCT = "0.02"
+  # 5%: eff lev = risk_pct/stop_pct -> 25x at the 0.2% stop cap, 50x at the
+  # 0.1% floor. A stop-out costs ~5% of the bot's equity share. Aggressive by
+  # instruction — the 100x exchange setting keeps posted margin small.
+  SENTINEL_RISK_PCT = "0.05"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Tight stops (0.1-0.2% of price) with TP at 2.5x the stop — 5.5x proved
   # unreachable on 1m bars (stops always hit first). 2.5x breaks even at ~29%

@@ -18,6 +18,7 @@ from decimal import Decimal
 import asyncpg
 
 from sentinel.broker import BrokerAdapter, BrokerBalanceUpdate, BrokerTimeout
+from sentinel.domain import is_terminal
 from sentinel.ledger import LedgerStore
 from sentinel.metrics import MetricsRegistry
 from sentinel.oms import CommandGateway, OrderEngine, WriterCoordinator
@@ -34,6 +35,12 @@ log = logging.getLogger("sentinel.runtime")
 # to a cap; beyond the cap the failure is treated as fatal, not transient.
 _RECON_BACKOFF_S = 2.0
 _RECON_MAX_RETRIES = 5
+# BrokerTimeout re-queue delay escalates PER KEY (base -> double -> cap) and
+# resets on success. A fixed 2s delay meant a batch of unreconcilable orders
+# (broker throttling) re-hit the broker every 2s each — worsening the very
+# throttling that caused the timeouts, while every attempt held the instrument
+# lock (prod storm: event_apply max 391s, order-place max 428s, lock convoy).
+_RECON_BACKOFF_CAP_S = 60.0
 
 # Transient-DB retry for event application: a managed-Postgres proxy can kill
 # a live connection mid-query (proven in prod by the writer-lock InterfaceError
@@ -281,19 +288,46 @@ class SentinelApp:
         - Other transient (broker 5xx, unexpected shape): bounded retries then
           escalate to fatal rather than looping on forever.
 
-        reconcile_order is idempotent (exec_id dedup), so every retry is safe."""
+        reconcile_order is idempotent (exec_id dedup), so every retry is safe.
+
+        Pending-set lifecycle: a key enters engine.pending_reconcile in
+        enqueue_reconcile (the only producer entry point) and leaves it HERE,
+        only once its attempt concludes — resolved, or found terminal. The
+        re-queue paths below deliberately bypass enqueue_reconcile and keep
+        the key in the set: it is still owed a reconcile, and a fresh trigger
+        arriving mid-retry must stay a no-op (see writer.py for the storm
+        this prevents)."""
         attempts: dict[str, int] = {}
+        timeout_backoff: dict[str, float] = {}   # per-key escalating delay
         while True:
             key = await self.engine.needs_reconcile.get()
+            self.metrics.gauge("reconcile_queue_depth",
+                               self.engine.needs_reconcile.qsize())
+            # Terminal short-circuit: a queued key can be resolved before we
+            # get to it (broker event applied while it waited, or a sweep of
+            # an order a prior reconcile already closed). Reload first and
+            # skip without ANY broker traffic — during throttling, redundant
+            # queries are exactly the load that keeps the throttling alive.
+            stored = await self.store.load_order(key)
+            if stored is not None and is_terminal(stored.core.state):
+                self.engine.pending_reconcile.discard(key)
+                attempts.pop(key, None)
+                timeout_backoff.pop(key, None)
+                self.metrics.inc("reconcile_terminal_skips")
+                continue
             try:
                 await self.recon.reconcile_order(key)
             except ReconciliationDivergence:
                 raise  # integrity-critical: propagate -> supervisor halts
             except BrokerTimeout:
-                # Pure connectivity failure — do NOT count toward the halt cap.
+                # Pure connectivity failure — do NOT count toward the halt cap,
+                # but DO back off per key (double to a cap, reset on success):
+                # retrying a throttled broker every 2s only feeds the throttle.
                 self.metrics.inc("reconcile_timeouts")
-                await asyncio.sleep(_RECON_BACKOFF_S)
-                await self.engine.needs_reconcile.put(key)
+                delay = timeout_backoff.get(key, _RECON_BACKOFF_S)
+                timeout_backoff[key] = min(delay * 2, _RECON_BACKOFF_CAP_S)
+                await asyncio.sleep(delay)
+                await self.engine.needs_reconcile.put(key)  # stays pending
                 continue
             except Exception:  # noqa: BLE001 — transient; do not strand
                 n = attempts.get(key, 0) + 1
@@ -302,21 +336,32 @@ class SentinelApp:
                 attempts[key] = n
                 self.metrics.inc("reconcile_retries")
                 await asyncio.sleep(_RECON_BACKOFF_S)
-                await self.engine.needs_reconcile.put(key)
+                await self.engine.needs_reconcile.put(key)  # stays pending
                 continue
             attempts.pop(key, None)
+            timeout_backoff.pop(key, None)
+            self.engine.pending_reconcile.discard(key)   # concluded: resolvable again
             self.metrics.inc("reconciliations")
             await self.changes.bump()
 
     async def sweep_stale_orders(self) -> list[str]:
         """One sweep pass: queue every non-terminal order untouched for
-        _SWEEP_STALE_AGE_S for reconciliation against broker truth. Returns the
-        queued keys. Idempotent and cheap — a swept order's first reconcile
-        event bumps updated_at, so it will not be re-swept for another full
-        staleness window even if it legitimately keeps resting."""
+        _SWEEP_STALE_AGE_S for reconciliation against broker truth, skipping
+        keys already queued/in-flight. Returns the NEWLY queued keys.
+        Idempotent and cheap — a swept order's first reconcile event bumps
+        updated_at, so it will not be re-swept for another full staleness
+        window even if it legitimately keeps resting."""
         stale = await self.store.load_stale_nonterminal(_SWEEP_STALE_AGE_S)
-        keys = [s.core.client_order_id for s in stale]
+        keys: list[str] = []
         for s in stale:
+            # Dedup via the pending set: an order stuck RECONCILING gets no
+            # new event, so updated_at never bumps and it matches EVERY sweep
+            # pass until it resolves. Re-queuing it each pass was the storm's
+            # amplifier (11,409 sweep enqueues vs 2,159 completed reconciles
+            # in prod) — enqueue_reconcile makes those passes no-ops.
+            if not await self.engine.enqueue_reconcile(s.core.client_order_id):
+                continue
+            keys.append(s.core.client_order_id)
             log.warning(
                 "stale-order sweep: %s %s on %s untouched > %.0fs — a broker "
                 "event was likely lost (stream gap); reconciling",
@@ -324,7 +369,8 @@ class SentinelApp:
                 s.core.instrument, _SWEEP_STALE_AGE_S,
             )
             self.metrics.inc("stale_sweeps")
-            await self.engine.needs_reconcile.put(s.core.client_order_id)
+        self.metrics.gauge("reconcile_queue_depth",
+                           self.engine.needs_reconcile.qsize())
         return keys
 
     async def _stale_sweep_loop(self) -> None:

@@ -62,6 +62,29 @@ class OrderEngine:
         self._guards = ExposureGuards(store, max_position=max_position)
         # client_order_ids awaiting reconciliation (consumed by recon layer).
         self.needs_reconcile: asyncio.Queue[str] = asyncio.Queue()
+        # Keys currently queued OR in-flight in the reconcile loop. This is
+        # the dedup that prevents queue storms: without it, the stale sweep
+        # re-enqueued every stuck-RECONCILING order on EVERY 30s pass (no new
+        # event -> updated_at never bumps) while the timeout path re-queued
+        # the same keys every 2s — measured in prod as 11,409 sweep enqueues
+        # against 2,159 completed reconciliations, each redundant attempt
+        # hammering an already-throttling broker and holding the instrument
+        # lock (event-apply p_max 391s, order-place p_max 428s). Only the
+        # reconcile loop removes a key, and only once its attempt CONCLUDES
+        # (resolved or terminal) — a re-queue keeps the key pending.
+        self.pending_reconcile: set[str] = set()
+
+    async def enqueue_reconcile(self, key: str) -> bool:
+        """Single entry point onto the reconcile queue (every producer —
+        engine paths, stale sweep, retry — routes through here). A key
+        already pending is a no-op: one queued reconcile resolves the order
+        against broker truth regardless of how many triggers fired, so
+        duplicates are pure load. Returns whether the key was newly queued."""
+        if key in self.pending_reconcile:
+            return False
+        self.pending_reconcile.add(key)
+        await self.needs_reconcile.put(key)
+        return True
 
     # ----------------------------------------------------------------- place
 
@@ -79,7 +102,7 @@ class OrderEngine:
                         existing, ReconcileStarted(cause="replayed mid-submission"),
                         intent.trace_id,
                     )
-                    await self.needs_reconcile.put(existing.core.client_order_id)
+                    await self.enqueue_reconcile(existing.core.client_order_id)
                 return existing
 
             intent = await self._guards.apply(intent)
@@ -106,7 +129,7 @@ class OrderEngine:
                 stored = await self._store.apply_event(
                     stored, SubmissionTimedOut(), intent.trace_id
                 )
-                await self.needs_reconcile.put(stored.core.client_order_id)
+                await self.enqueue_reconcile(stored.core.client_order_id)
                 return stored
             return await self._store.apply_event(
                 stored, BrokerAcked(broker_order_id=broker_id), intent.trace_id
@@ -129,7 +152,7 @@ class OrderEngine:
                 stored = await self._store.apply_event(
                     stored, ReconcileStarted(cause="cancel timeout"), trace_id
                 )
-                await self.needs_reconcile.put(client_order_id)
+                await self.enqueue_reconcile(client_order_id)
             return stored
 
     # ---------------------------------------------------------- broker events
@@ -169,7 +192,7 @@ class OrderEngine:
                         stored = await self._store.apply_event(
                             stored, ReconcileStarted(cause=f"late fill {e}"), trace
                         )
-                        await self.needs_reconcile.put(stored.core.client_order_id)
+                        await self.enqueue_reconcile(stored.core.client_order_id)
                 case BrokerCancelConfirmed():
                     try:
                         stored = await self._store.apply_event(
@@ -184,7 +207,7 @@ class OrderEngine:
                             stored,
                             ReconcileStarted(cause="late cancel-confirm"), trace,
                         )
-                        await self.needs_reconcile.put(
+                        await self.enqueue_reconcile(
                             stored.core.client_order_id)
 
     # -------------------------------------------------------------- internals

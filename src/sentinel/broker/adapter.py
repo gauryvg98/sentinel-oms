@@ -111,8 +111,13 @@ class BrokerAdapter(Protocol):
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
-        """Returns broker_order_id. Raises BrokerReject or BrokerTimeout."""
+        """Returns broker_order_id. Raises BrokerReject or BrokerTimeout.
+
+        ``stop_price`` set (with ``limit_price`` None) means a reduce-only
+        stop-market order resting at the venue — the exchange-native hard-stop
+        backstop. Venues without stop support raise BrokerReject."""
         ...
 
     async def cancel(self, client_order_id: str) -> None:

@@ -48,6 +48,24 @@ async def test_submit_ack_fill_to_completion():
     assert view.state is BrokerOrderState.FILLED and view.filled_qty == 4
 
 
+async def test_stop_order_rests_working_and_cancels_normally():
+    """A stop-market submit (stop_price set, no limit) just RESTS: WORKING
+    until a scripted fill (the trigger firing) or a cancel — which is all the
+    hard-stop backstop lifecycle needs from the sim."""
+    sim = ScriptedBroker(BrokerScript())
+    await sim.submit(client_order_id="BS1", instrument="IDX-OPT",
+                     side=Side.SELL, qty=Decimal("4"), limit_price=None,
+                     stop_price=Decimal("3.90"))
+    view = await sim.query_order("BS1")
+    assert view.state is BrokerOrderState.WORKING and view.filled_qty == 0
+    assert sim._orders["BS1"].stop_price == Decimal("3.90")
+
+    await sim.cancel("BS1")
+    sim.step()
+    assert (await sim.query_order("BS1")).state is BrokerOrderState.CANCELED
+    assert [type(e) for e in sim.take_events()] == [BrokerCancelConfirmed]
+
+
 async def test_reject_raises_and_registers_nothing():
     sim = ScriptedBroker(BrokerScript().on_submit("K1", reject="no permission"))
     with pytest.raises(BrokerReject):

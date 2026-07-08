@@ -40,11 +40,21 @@ class EconomicOrderIntent:
     # later) so slippage = fill price - quote_at_decision is honest — it
     # measures the cost of everything between deciding and filling.
     quote_at_decision: Decimal | None = None
+    # Exchange-native stop trigger. stop_price set + limit_price None = a
+    # reduce-only STOP_MARKET resting ON the venue (the hard-stop backstop
+    # behind the software trail). Stop-limit (both set) is deliberately not a
+    # thing here — refused at construction so no adapter has to guess.
+    stop_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.qty <= 0:
             raise ValueError(f"intent qty must be positive, got {self.qty}")
         if self.limit_price is not None and self.limit_price <= 0:
             raise ValueError(f"limit price must be positive, got {self.limit_price}")
+        if self.stop_price is not None and self.stop_price <= 0:
+            raise ValueError(f"stop price must be positive, got {self.stop_price}")
+        if self.stop_price is not None and self.limit_price is not None:
+            raise ValueError("stop-limit intents are not supported: "
+                             "set stop_price OR limit_price, not both")
         if not self.idempotency_key:
             raise ValueError("idempotency_key must be non-empty")

@@ -188,6 +188,7 @@ class BinanceFuturesAdapter:
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
         await self._ensure_configured()
         params: dict = {
@@ -196,7 +197,14 @@ class BinanceFuturesAdapter:
             "quantity": fmt_decimal(qty),     # SELL opens/adds short or trims long
             "newClientOrderId": client_order_id,
         }
-        if limit_price is not None:
+        if stop_price is not None:
+            # Exchange-native hard-stop backstop: a reduce-only STOP_MARKET
+            # resting ON the venue. reduceOnly so it can only ever shrink the
+            # position — if it fires stale (position already flipped by other
+            # flow) Binance rejects/reduces it instead of opening new exposure.
+            params.update(type="STOP_MARKET", stopPrice=fmt_decimal(stop_price),
+                          reduceOnly="true")
+        elif limit_price is not None:
             params.update(type="LIMIT", timeInForce="GTC",
                           price=fmt_decimal(limit_price))
         else:

@@ -41,6 +41,10 @@ class _SimOrder:
     state: BrokerOrderState = BrokerOrderState.WORKING
     cancel_confirm_at: int | None = None
     fills: list[BrokerFill] = field(default_factory=list)
+    # Stop trigger, recorded for test assertions. A resting stop behaves like
+    # any WORKING order here: it cancels normally and a scripted fill IS the
+    # trigger firing — no separate trigger machinery needed.
+    stop_price: Decimal | None = None
 
 
 class ScriptedBroker:
@@ -64,6 +68,7 @@ class ScriptedBroker:
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
         behavior = self._script.submits.get(client_order_id)
         if behavior and behavior.reject_reason is not None:
@@ -84,6 +89,7 @@ class ScriptedBroker:
                 instrument=instrument,
                 side=side,
                 qty=qty,
+                stop_price=stop_price,
             )
             self._orders[client_order_id] = order
 

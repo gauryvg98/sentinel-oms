@@ -254,6 +254,26 @@ async def test_exit_clamps_to_reconciled_position(pool):
     assert stored.core.qty == 3                      # clamped 5 -> 3, never over
 
 
+async def test_stop_intent_reaches_broker_and_rests_working(pool):
+    """The hard-stop backstop end to end: an intent carrying stop_price flows
+    gateway -> engine -> broker.submit unchanged and rests WORKING — a resting
+    stop maps onto the existing state machine, no new states."""
+    script = BrokerScript()
+    script.fill("K1", qty="3", price="4.20", at_step=1)
+    _, sim, engine, gateway = rig(pool, script)
+    await gateway.place(uuid4(), intent(key="K1", qty="3"))
+    await pump(sim, engine)                          # position: +3
+
+    stop = EconomicOrderIntent(
+        intent_id=uuid4(), idempotency_key="BS1", instrument="IDX-OPT",
+        side=Side.SELL, qty=Decimal("3"), limit_price=None,
+        authority=Authority.PROTECTIVE_EXIT, trace_id=uuid4(),
+        stop_price=Decimal("3.90"))
+    stored = await gateway.place(uuid4(), stop)
+    assert stored.core.state is OrderState.WORKING
+    assert sim._orders["BS1"].stop_price == Decimal("3.90")
+
+
 async def test_stacked_exits_cannot_over_exit(pool):
     script = BrokerScript()
     script.fill("K1", qty="3", price="4.20", at_step=1)

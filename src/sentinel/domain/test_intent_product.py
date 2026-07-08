@@ -64,6 +64,24 @@ def test_exit_authority_is_first_class():
         is Authority.PROTECTIVE_EXIT
 
 
+def test_stop_intent_carries_stop_price():
+    """The exchange-native hard-stop backstop: stop_price rides the intent
+    (limit_price None -> STOP_MARKET at the adapter)."""
+    i = make_intent(limit_price=None, stop_price=Decimal("95"),
+                    authority=Authority.PROTECTIVE_EXIT)
+    assert i.stop_price == Decimal("95") and i.limit_price is None
+    assert make_intent().stop_price is None            # default: not a stop
+
+
+def test_stop_intent_rejects_nonpositive_and_stop_limit():
+    with pytest.raises(ValueError):
+        make_intent(limit_price=None, stop_price=Decimal("0"))
+    with pytest.raises(ValueError):
+        make_intent(limit_price=None, stop_price=Decimal("-5"))
+    with pytest.raises(ValueError):                    # stop-limit: not a thing
+        make_intent(limit_price=Decimal("4.20"), stop_price=Decimal("4"))
+
+
 # ------------------------------------------------------------------ products
 
 

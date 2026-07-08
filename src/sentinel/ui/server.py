@@ -200,7 +200,8 @@ class Terminal:
         self.trade_qty = spec.min_qty or spec.lot_step
 
     def _intent(self, side: Side, authority: Authority, qty: Decimal,
-                limit_price: Decimal | None = None) -> EconomicOrderIntent:
+                limit_price: Decimal | None = None,
+                stop_price: Decimal | None = None) -> EconomicOrderIntent:
         mark = self.market.latest(self.market.symbol)
         return EconomicOrderIntent(
             intent_id=uuid4(),
@@ -212,6 +213,7 @@ class Terminal:
             authority=authority,
             trace_id=uuid4(),
             quote_at_decision=mark.price if mark else None,
+            stop_price=stop_price,            # set -> reduce-only STOP_MARKET
         )
 
     async def place_limit(self, side: str, qty: Decimal, price: Decimal,
@@ -230,6 +232,36 @@ class Terminal:
             with self.app.metrics.timer("place_ms"):
                 stored = await self.app.gateway.place(
                     uuid4(), self._intent(Side(side), authority, qty, price)
+                )
+            return await self._classify(stored)
+        except PlacementBlocked as e:
+            self.app.metrics.inc("orders_blocked")
+            return {"blocked": type(e).__name__, "reason": str(e)}
+
+    async def place_stop(self, side: str, qty: Decimal,
+                         stop_price: Decimal) -> dict:
+        """Rest a reduce-only STOP_MARKET on the exchange — the hard-stop
+        backstop behind the software trail. PROTECTIVE_EXIT authority, so the
+        same never-over-exit clamp and ledgered client id as any exit: if it
+        triggers, the fills book normally."""
+        qty = self.spec.round_qty(qty)
+        # Snap the trigger AWAY from the mark (a SELL stop sits below price ->
+        # round DOWN, a BUY stop above -> round UP): never tighter than asked,
+        # so it stays strictly behind the software stop. round_price's side
+        # semantics are maker-biased, hence the inversion.
+        stop_price = self.spec.round_price(
+            stop_price, "BUY" if side.upper() == "SELL" else "SELL")
+        if qty <= 0 or stop_price <= 0:
+            return {"blocked": "ZeroSize", "reason": "nothing to protect"}
+        if not self.spec.tradeable(qty, stop_price):
+            return {"blocked": "BelowMinimum",
+                    "reason": f"below exchange minimum "
+                              f"(qty {self.spec.min_qty} / notional {self.spec.min_notional})"}
+        try:
+            with self.app.metrics.timer("place_ms"):
+                stored = await self.app.gateway.place(
+                    uuid4(), self._intent(Side(side), Authority.PROTECTIVE_EXIT,
+                                          qty, stop_price=stop_price)
                 )
             return await self._classify(stored)
         except PlacementBlocked as e:
@@ -440,6 +472,9 @@ class Bot:
             entry_fn=self.avg_cost,
             # closed-loop clamp: total-position form (held + resting + headroom)
             margin_cap_fn=self.margin_qty_cap,
+            # exchange-native hard-stop backstop (SENTINEL_HARD_STOP_PCT-gated)
+            place_stop_fn=lambda side, qty, stop: t.place_stop(side, qty, stop),
+            price_tick=self.spec.price_tick,
         )
 
     async def spawn(self) -> None:

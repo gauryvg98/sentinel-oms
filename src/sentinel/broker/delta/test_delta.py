@@ -106,6 +106,31 @@ async def test_submit_short_limit_maps_contracts_signs_and_returns_id():
     assert seen["hdr"]["signature"] == expect
 
 
+async def test_submit_stop_price_maps_to_reduce_only_stop_loss_order():
+    """The hard-stop backstop on Delta's wire: stop_price set + limit None ->
+    order_type=market_order + stop_order_type=stop_loss_order + stop_price
+    (string trigger) + reduce_only, sized in contracts like any order."""
+    seen = {}
+
+    def handler(request):
+        def orders(req):
+            seen["body"] = req.content.decode()
+            return ok({"id": 777, "client_order_id": "BS1"})
+        return route(request, {"/v2/orders": orders})
+
+    oid = await adapter(handler).submit(
+        client_order_id="BS1", instrument="BTCUSD", side=Side.SELL,
+        qty=Decimal("0.010"), limit_price=None, stop_price=Decimal("59000"))
+    assert oid == "777"
+    body = seen["body"]
+    assert '"order_type":"market_order"' in body
+    assert '"stop_order_type":"stop_loss_order"' in body
+    assert '"stop_price":"59000"' in body
+    assert '"reduce_only":true' in body               # can only shrink the position
+    assert '"size":10' in body and '"side":"sell"' in body
+    assert "limit_price" not in body
+
+
 async def test_submit_reject_and_5xx_timeout():
     with pytest.raises(BrokerReject, match="insufficient_margin"):
         await adapter(lambda r: route(r, {

@@ -74,6 +74,33 @@ async def test_submit_sets_oneway_mode_and_leverage_then_places_limit():
     assert "signature" in seen["order"]
 
 
+async def test_submit_stop_price_maps_to_reduce_only_stop_market():
+    """The hard-stop backstop on the wire: stop_price set + limit None ->
+    type=STOP_MARKET with stopPrice and reduceOnly=true, and NO limit price."""
+    seen = {}
+
+    def handler(request):
+        method, path, params = route(request)
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        if path in ("/fapi/v1/positionSide/dual", "/fapi/v1/leverage"):
+            return ok({})
+        assert (method, path) == ("POST", "/fapi/v1/order")
+        seen["order"] = params
+        return ok({"orderId": 7, "status": "NEW"})
+
+    bid = await adapter(handler).submit(
+        client_order_id="BS1", instrument="BTCUSDT", side=Side.SELL,
+        qty=Decimal("0.078"), limit_price=None, stop_price=Decimal("59000.5"))
+    assert bid == "7"
+    o = seen["order"]
+    assert o["type"] == "STOP_MARKET"
+    assert o["stopPrice"] == "59000.5"
+    assert o["reduceOnly"] == "true"                  # can only shrink the position
+    assert o["quantity"] == "0.078" and o["side"] == "SELL"
+    assert "price" not in o and "timeInForce" not in o
+
+
 async def test_open_positions_carries_liq_and_mark():
     """positionRisk -> BrokerPosition with signed qty, entry, liquidation and
     mark. A zero liquidationPrice (cross, no liq) becomes None; flat rows are

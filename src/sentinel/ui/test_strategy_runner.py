@@ -324,3 +324,191 @@ async def test_set_strategy_swaps_and_reseeds():
 
     await r.set_strategy(_Other())
     assert r.strategy.name == "other" and r.last_decision.detail == {"k": "v"}
+
+
+# ------------------------------------------ exchange-native hard-stop backstop
+
+from sentinel.risk import RiskParams  # noqa: E402
+
+
+def make_hard_stop(monkeypatch, *, position="0.15", entry_price="100",
+                   stop_dist="1", pct="0.005", trail=True, env=True):
+    """A risk-layer runner with the backstop enabled: fake fns recording ONE
+    ordered call log (so cancel-vs-flatten ordering is provable), an
+    injectable clock for the 30s repeg limit, and mutable pos/price/results.
+    Long stance, entry 100, stop_dist 1 -> software stop 99, backstop 98.5."""
+    if env:
+        monkeypatch.setenv("SENTINEL_HARD_STOP_PCT", pct)
+    else:
+        monkeypatch.delenv("SENTINEL_HARD_STOP_PCT", raising=False)
+    state = {"pos": Decimal(position), "price": Decimal("100"),
+             "reduce_result": None}
+    seq: list[tuple] = []
+    n = {"stop": 0}
+
+    async def position_fn():
+        return state["pos"]
+
+    async def open_entry_fn():
+        return None
+
+    async def entry_fn():
+        return Decimal(entry_price)
+
+    async def place_entry_fn(qty, price):
+        seq.append(("open_buy", qty)); return {"placed": "K1", "qty": str(qty)}
+
+    async def place_short_fn(qty, price):
+        seq.append(("open_sell", qty)); return {"placed": "S1", "qty": str(qty)}
+
+    async def reduce_sell_fn(qty):
+        seq.append(("reduce_sell", qty))
+        return state["reduce_result"] or {"placed": "R1", "qty": str(qty)}
+
+    async def reduce_buy_fn(qty):
+        seq.append(("reduce_buy", qty))
+        return state["reduce_result"] or {"placed": "C1", "qty": str(qty)}
+
+    async def cancel_fn(key):
+        seq.append(("cancel", key)); return {"canceling": key}
+
+    async def place_stop_fn(side, qty, stop):
+        n["stop"] += 1
+        seq.append(("place_stop", side, qty, stop))
+        return {"placed": f"BS{n['stop']}", "qty": str(qty)}
+
+    async def on_change():
+        return None
+
+    d = {"stop_dist": stop_dist}
+    r = StrategyRunner(
+        _Strat(Stance.LONG, d), SimpleNamespace(candles=[]),
+        position_fn=position_fn, open_entry_fn=open_entry_fn,
+        place_entry_fn=place_entry_fn, reduce_sell_fn=reduce_sell_fn,
+        cancel_fn=cancel_fn,
+        bid_fn=lambda: state["price"], ask_fn=lambda: state["price"],
+        budget_fn=lambda: B, on_change=on_change,
+        place_short_fn=place_short_fn, reduce_buy_fn=reduce_buy_fn,
+        allow_short=True, lot_step=Decimal("0.001"),
+        equity_fn=lambda: Decimal("1000"),
+        risk_params=RiskParams(risk_pct=Decimal("0.01"),
+                               max_leverage=Decimal("5"),
+                               stop_atr_mult=Decimal("2"),
+                               fallback_stop_pct=Decimal("0.01"),
+                               rr=Decimal("0"), trail=trail),
+        entry_fn=entry_fn,
+        place_stop_fn=place_stop_fn, price_tick=Decimal("0.01"))
+    r.running = True
+    r.last_decision = Decision(Stance.LONG, d)
+    clock = {"t": 0.0}
+    r._now = lambda: clock["t"]
+    return r, state, seq, clock
+
+
+async def test_backstop_places_once_behind_the_software_stop(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()
+    # software stop 99, extra 0.5% of price -> reduce-only stop rests at 98.5
+    assert seq == [("place_stop", "SELL", Decimal("0.15"), Decimal("98.5"))]
+    await r._check_brackets()                     # same level, same qty ->
+    await r._check_brackets()                     # nothing new goes out
+    assert len(seq) == 1
+    assert r._backstop["key"] == "BS1" and r._backstop["stop"] == Decimal("98.5")
+
+
+async def test_backstop_off_without_the_env_gate(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch, env=False)
+    await r._check_brackets()
+    assert seq == [] and r._backstop is None
+
+
+async def test_backstop_repeg_only_tighter_and_only_every_30s(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()                     # rests @ 98.5
+    state["price"] = Decimal("102")               # trail ratchets stop to 101
+    await r._check_brackets()                     # tighter, but < 30s -> hold
+    assert [k for k, *_ in seq] == ["place_stop"]
+    clock["t"] = 31.0
+    await r._check_brackets()                     # repeg: cancel this poll...
+    assert seq[-1] == ("cancel", "BS1") and r._backstop is None
+    await r._check_brackets()                     # ...replacement next poll
+    # desired = 101 - 0.5% of 102 = 100.49 (tick-quantized)
+    assert seq[-1] == ("place_stop", "SELL", Decimal("0.15"), Decimal("100.49"))
+
+
+async def test_backstop_never_loosens_even_when_the_stop_widens(monkeypatch):
+    # Non-trail mode: the static bracket CAN loosen when the strategy's stop
+    # geometry widens — the backstop is MONOTONIC and must not follow it down.
+    r, state, seq, clock = make_hard_stop(monkeypatch, trail=False)
+    await r._check_brackets()                     # stop 99 -> backstop 98.5
+    assert seq[-1][3] == Decimal("98.5")
+    r.last_decision = Decision(Stance.LONG, {"stop_dist": "2"})  # stop now 98
+    clock["t"] = 61.0                             # rate limit long expired
+    await r._check_brackets()
+    assert [k for k, *_ in seq] == ["place_stop"]           # no looser repeg
+    assert r._backstop["stop"] == Decimal("98.5")
+
+
+async def test_backstop_cancels_on_flat(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()
+    state["pos"] = Decimal("0")
+    await r._check_brackets()
+    assert seq[-1] == ("cancel", "BS1")
+    assert r._backstop is None and r._backstop_floor is None
+
+
+async def test_backstop_repegs_qty_on_position_resize(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()                     # SELL 0.15 @ 98.5
+    state["pos"] = Decimal("0.20")                # added >= 1 lot to the long
+    clock["t"] = 31.0
+    await r._check_brackets()                     # resize -> cancel...
+    assert seq[-1] == ("cancel", "BS1")
+    await r._check_brackets()                     # ...replace at the new qty
+    assert seq[-1] == ("place_stop", "SELL", Decimal("0.20"), Decimal("98.5"))
+
+
+async def test_backstop_flips_with_the_position(monkeypatch):
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()                     # long backstop (SELL stop)
+    state["pos"] = Decimal("-0.15")               # flipped short
+    await r._check_brackets()
+    i = seq.index(("cancel", "BS1"))              # old side canceled first,
+    assert seq[i + 1][0] == "place_stop"          # then a BUY stop behind the
+    assert seq[i + 1][1] == "BUY"                 # short's software stop
+    assert seq[i + 1][3] == Decimal("101.5")      # 101 + 0.5% of price
+
+
+async def test_software_stop_cancels_backstop_before_flatten(monkeypatch):
+    """THE guard trap: the resting backstop counts toward open_exit_remaining,
+    so when the SOFTWARE stop fires the runner must cancel the backstop FIRST
+    and only then send the market flatten — and a flatten refused because the
+    cancel confirm hasn't booked yet must be RETRIED next poll with the trail
+    state intact (not cleared into a looser re-derived stop, not suppressed)."""
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()                     # backstop resting @ 98.5
+    state["price"] = Decimal("99")                # software stop (99) breached
+    state["reduce_result"] = {"blocked": "NothingToExit",
+                              "reason": "committed to exits"}
+    await r._check_brackets()
+    assert seq[1:] == [("cancel", "BS1"), ("reduce_sell", Decimal("0.15"))]
+    assert r._suppressed is None and r._trail is not None    # no wedge
+    state["reduce_result"] = None                 # cancel confirm booked now
+    await r._check_brackets()                     # breach re-fires -> retry
+    assert seq[-1] == ("reduce_sell", Decimal("0.15"))
+    assert seq.count(("reduce_sell", Decimal("0.15"))) == 2
+    assert r._suppressed is Stance.LONG and r._trail is None
+    assert r._backstop is None
+
+
+async def test_strategy_reduce_cancels_backstop_first(monkeypatch):
+    """Same trap on the NORMAL exit path: a strategy-driven reduce would be
+    clamped to nothing while the backstop claims the whole position — the
+    runner cancels the backstop before any reduce goes out."""
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+    await r._check_brackets()                     # backstop resting
+    r.last_decision = Decision(Stance.FLAT, {})   # strategy wants out
+    await r.reconcile_now()
+    i = seq.index(("cancel", "BS1"))
+    assert seq[i + 1] == ("reduce_sell", Decimal("0.15"))

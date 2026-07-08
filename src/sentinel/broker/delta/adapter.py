@@ -370,6 +370,7 @@ class DeltaFuturesAdapter:
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
         await self._ensure_product(instrument)   # paginated map + fallback
         await self._ensure_leverage(instrument)
@@ -379,7 +380,17 @@ class DeltaFuturesAdapter:
             "side": "buy" if side is Side.BUY else "sell",
             "client_order_id": client_order_id,
         }
-        if limit_price is not None:
+        if stop_price is not None:
+            # Exchange-native hard-stop backstop: a reduce-only stop MARKET
+            # order resting at the venue. Field names per docs.delta.exchange
+            # ('Place Order'): a stop order is order_type market_order +
+            # stop_order_type stop_loss_order + stop_price (string trigger);
+            # reduce_only so a stale trigger can only shrink the position.
+            params.update(order_type="market_order",
+                          stop_order_type="stop_loss_order",
+                          stop_price=format(stop_price.normalize(), "f"),
+                          reduce_only=True)
+        elif limit_price is not None:
             params.update(order_type="limit_order", time_in_force="gtc",
                           limit_price=format(limit_price.normalize(), "f"))
         else:

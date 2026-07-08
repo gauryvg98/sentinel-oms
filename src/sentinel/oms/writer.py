@@ -118,6 +118,7 @@ class OrderEngine:
                     side=intent.side,
                     qty=stored.core.qty,
                     limit_price=intent.limit_price,
+                    stop_price=intent.stop_price,
                 )
             except BrokerReject as e:
                 return await self._store.apply_event(

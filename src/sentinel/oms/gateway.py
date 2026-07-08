@@ -36,6 +36,8 @@ class CommandGateway:
                 "authority": intent.authority.value,
                 "quote_at_decision": str(intent.quote_at_decision)
                 if intent.quote_at_decision is not None else None,
+                "stop_price": str(intent.stop_price)
+                if intent.stop_price is not None else None,
             },
         )
         if not fresh:

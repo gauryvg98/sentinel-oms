@@ -58,6 +58,7 @@ class AlpacaPaperAdapter:
     async def submit(
         self, *, client_order_id: str, instrument: str, side: Side,
         qty: Decimal, limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
         raise NotImplementedError("alpaca integration: later milestone")
 

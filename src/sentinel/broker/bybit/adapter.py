@@ -171,7 +171,12 @@ class BybitFuturesAdapter:
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
+        if stop_price is not None:
+            # TODO: map to Bybit v5 conditional orders (triggerPrice +
+            # triggerDirection + reduceOnly) once verified against a testnet.
+            raise BrokerReject("stop orders not yet supported on bybit")
         params: dict = {
             "category": _CATEGORY,
             "symbol": instrument,

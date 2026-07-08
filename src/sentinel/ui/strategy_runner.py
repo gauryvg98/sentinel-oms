@@ -24,9 +24,10 @@ short-side callables. plan_action is pure -> every case is tested without a brok
 from __future__ import annotations
 
 import os
+import time
 
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 from typing import Awaitable, Callable
 
 from sentinel.strategy import Bar, Decision, Stance, Strategy
@@ -35,7 +36,14 @@ _RESTING = ("WORKING", "PARTIAL")             # cleanly resting -> safe to re-pr
 _DEFAULT_REPRICE_FRAC = Decimal("0.0005")     # 5 bps: re-peg once the touch drifts
 _DEFAULT_REBALANCE_FRAC = Decimal("0.20")     # no-trade band around target (anti-churn)
 _DEFAULT_LOT_STEP = Decimal("0.00001")
+_DEFAULT_PRICE_TICK = Decimal("0.00000001")
 _HISTORY_CAP = 400
+
+# Hard-stop backstop pacing: re-peg the exchange-side stop only once the
+# desired level has ratcheted >= 5 bps of price tighter, and never more often
+# than every 30s — a cancel+place per trail tick would spam the venue.
+_BACKSTOP_REPEG_FRAC = Decimal("0.0005")
+_BACKSTOP_REPEG_S = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +139,11 @@ class StrategyRunner:
         # (price) -> TOTAL |position| qty the bot's real margin can carry
         # (held + resting + free headroom). None -> open-loop sizing as before.
         margin_cap_fn: Callable[[Decimal], Awaitable[Decimal | None]] | None = None,
+        # (side, qty, stop) -> reduce-only STOP_MARKET resting ON the exchange
+        # (Terminal.place_stop). None -> no exchange-native backstop possible.
+        place_stop_fn: Callable[[str, Decimal, Decimal],
+                                Awaitable[dict]] | None = None,
+        price_tick: Decimal = _DEFAULT_PRICE_TICK,
     ) -> None:
         self.strategy = strategy
         self._bars = bars
@@ -161,6 +174,24 @@ class StrategyRunner:
         self._suppress_age = 0           # closed bars since suppression began
         self._last_bracket: dict | None = None   # current SL/TP levels, for the UI
         self._trail: dict | None = None          # ratchet state {sign, hwm, stop}
+        # Exchange-native hard-stop backstop (catastrophe insurance: process
+        # death leaves a REAL stop on the venue). Gated on SENTINEL_HARD_STOP_PCT
+        # = fraction of price of EXTRA distance beyond the software stop
+        # (unset/0 = off). The software trail is strictly tighter, so in normal
+        # operation it always exits first and the backstop is canceled.
+        self._place_stop_fn = place_stop_fn
+        self._price_tick = price_tick
+        try:
+            self._hard_stop_pct = Decimal(
+                os.environ.get("SENTINEL_HARD_STOP_PCT", "0") or "0")
+        except InvalidOperation:
+            self._hard_stop_pct = Decimal(0)
+        self._backstop: dict | None = None   # live stop {key, side, stop, qty, at}
+        # Tighten-only memory across cancel/replace cycles (mirrors the trail
+        # ratchet): a replacement may never rest looser than any level this
+        # position's backstop has already held.
+        self._backstop_floor: dict | None = None       # {side, level}
+        self._now = time.monotonic          # injectable clock (repeg rate limit)
 
         self.running = False
         self.last_decision: Decision | None = None
@@ -307,11 +338,16 @@ class StrategyRunner:
         the UI. No-op without risk params, a position, an entry price, or while
         paused."""
         if not self.running or self._risk_params is None:
+            # Deliberately leaves any resting exchange-side backstop alone: a
+            # paused runner with a position is EXACTLY when venue-side
+            # protection matters most, and reduce-only means it stays harmless.
             self._last_bracket = None
             self._trail = None
             return
         pos = await self._position_fn()
         if pos == 0:
+            await self._cancel_backstop()        # flat: nothing left to protect
+            self._backstop_floor = None
             self._last_bracket = None
             self._trail = None
             return
@@ -346,18 +382,97 @@ class StrategyRunner:
                               "trail": bool(p.trail)}
         hit = breached(is_long, price, stop, take)
         if hit is None:
+            await self._manage_backstop(pos, price, stop, is_long)
             return
-        qty = abs(pos)
+        # SOFTWARE stop/TP fired -> flatten at market. The resting backstop
+        # counts toward store.open_exit_remaining, so it MUST be canceled
+        # FIRST or clamp_exit would refuse the flatten (NothingToExit).
+        await self._cancel_backstop()
+        qty = abs(pos)                       # clamp_exit trims off any residue
+        r: dict | None = None
         if is_long and self._reduce_sell_fn is not None:
-            await self._reduce_sell_fn(qty)
+            r = await self._reduce_sell_fn(qty)
         elif not is_long and self._reduce_buy_fn is not None:
-            await self._reduce_buy_fn(qty)
+            r = await self._reduce_buy_fn(qty)
+        if isinstance(r, dict) and \
+                any(k in r for k in ("blocked", "rejected", "error")):
+            # Flatten refused — typically NothingToExit while the backstop's
+            # cancel confirm hasn't booked yet. Keep the trail/bracket state
+            # UNTOUCHED so the breach re-fires next poll and the flatten is
+            # retried; clearing it here would re-derive a looser trail from
+            # the current price and silently wedge the position open.
+            self.last_action = (f"{hit} hit @ {format(price.normalize(), 'f')}"
+                                f" — flatten {self._fmt(r)}; retrying")
+            await self._on_change()
+            return
         self._suppressed = d.stance if d is not None else None
         self._suppress_age = 0
         self._last_bracket = None
         self._trail = None
+        self._backstop_floor = None
         self.last_action = f"{hit} hit @ {format(price.normalize(), 'f')} — flattened"
         await self._on_change()
+
+    async def _cancel_backstop(self) -> None:
+        """Cancel the live exchange-side backstop, if any. Clears the tracking
+        eagerly — the cancel confirm books asynchronously, and until it does
+        the order still counts against never-over-exit (callers know this and
+        retry whatever the backstop was blocking on the next poll)."""
+        bs, self._backstop = self._backstop, None
+        if bs is not None:
+            await self._cancel_fn(bs["key"])
+
+    async def _manage_backstop(self, pos: Decimal, price: Decimal,
+                               stop: Decimal, is_long: bool) -> None:
+        """Exchange-NATIVE trailing hard-stop: a reduce-only STOP_MARKET
+        resting ON the venue, SENTINEL_HARD_STOP_PCT of price BEYOND the
+        software stop. Catastrophe insurance — if this process dies, the
+        position still has a real stop; in normal operation the strictly
+        tighter software trail exits first (canceling this order first).
+
+        Lifecycle per poll, only while the software stop is known and NOT
+        breached: place when missing; cancel-and-replace when the trail
+        ratcheted the desired level >= 5 bps of price tighter OR |position|
+        resized >= one lot (both rate-limited to one repeg per 30s; the
+        replacement goes out on a LATER poll, once the cancel confirm frees
+        the never-over-exit budget); cancel on flip. MONOTONIC like the trail:
+        the desired level only ever tightens."""
+        if self._place_stop_fn is None or self._hard_stop_pct <= 0:
+            return
+        side = "SELL" if is_long else "BUY"
+        if self._backstop is not None and self._backstop["side"] != side:
+            await self._cancel_backstop()        # position flipped
+        if self._backstop_floor is not None and \
+                self._backstop_floor["side"] != side:
+            self._backstop_floor = None
+        # Desired trigger: the extra margin beyond the software stop, snapped
+        # to the tick grid AWAY from the mark (never tighter than asked), then
+        # floored against every level already rested at (tighten-only).
+        extra = price * self._hard_stop_pct
+        desired = stop - extra if is_long else stop + extra
+        if self._price_tick > 0:
+            desired = (desired / self._price_tick).to_integral_value(
+                rounding=ROUND_DOWN if is_long else ROUND_UP) * self._price_tick
+        if self._backstop_floor is not None:
+            level = self._backstop_floor["level"]
+            desired = max(desired, level) if is_long else min(desired, level)
+        if desired <= 0:
+            return
+        qty = abs(pos)
+        bs = self._backstop
+        if bs is None:
+            r = await self._place_stop_fn(side, qty, desired)
+            if isinstance(r, dict) and "placed" in r:
+                self._backstop = {"key": r["placed"], "side": side,
+                                  "stop": desired, "qty": qty, "at": self._now()}
+                self._backstop_floor = {"side": side, "level": desired}
+            return                               # blocked/rejected: retry next poll
+        if self._now() - bs["at"] < _BACKSTOP_REPEG_S:
+            return                               # repeg rate limit
+        tighter = desired - bs["stop"] if is_long else bs["stop"] - desired
+        resized = abs(qty - bs["qty"]) >= self._lot_step
+        if resized or tighter >= price * _BACKSTOP_REPEG_FRAC:
+            await self._cancel_backstop()        # replacement placed next poll
 
     async def _execute(self, plan: Plan) -> str | None:
         if plan.kind == "noop":
@@ -374,6 +489,13 @@ class StrategyRunner:
                 return "BLOCKED short-open (spot venue)"
             return f"PEG {plan.side} {self._fmt(r)} @ {format(plan.price.normalize(), 'f')}"
         if plan.kind == "reduce":
+            # A resting backstop claims the WHOLE position in never-over-exit
+            # accounting, so any strategy reduce would clamp to nothing
+            # (NothingToExit). Cancel it first; this reduce may still come
+            # back blocked this cycle (cancel confirm not yet booked) — the
+            # next reconcile re-plans and retries, and the backstop is
+            # re-placed by _check_brackets if a position remains.
+            await self._cancel_backstop()
             if plan.side == "SELL":
                 r = await self._reduce_sell_fn(plan.qty)
             elif self._reduce_buy_fn is not None:
@@ -489,4 +611,7 @@ class StrategyRunner:
             "stop_price": str(b["stop"]) if b else None,
             # take may be None when rr<=0 (take-profit disabled — ride to flip).
             "take_price": str(b["take"]) if b and b.get("take") is not None else None,
+            # exchange-native hard-stop backstop currently resting on the venue
+            "hard_stop_price": (str(self._backstop["stop"])
+                                if self._backstop else None),
         }

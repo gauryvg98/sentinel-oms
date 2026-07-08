@@ -160,7 +160,12 @@ class BinanceSpotAdapter:
         side: Side,
         qty: Decimal,
         limit_price: Decimal | None,
+        stop_price: Decimal | None = None,
     ) -> str:
+        if stop_price is not None:
+            # Spot has no reduceOnly, so a resting stop could SELL into thin
+            # air after a manual close — refuse locally rather than half-map it.
+            raise BrokerReject("stop orders not supported on Binance spot")
         params: dict = {
             "symbol": instrument,
             "side": side.value,

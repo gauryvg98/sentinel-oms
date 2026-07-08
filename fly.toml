@@ -69,6 +69,12 @@ primary_region = "sin"
   SENTINEL_TRAIL = "true"
   # After a stop-out, re-enter the SAME regime after 2 closed bars (0 = only on flip)
   SENTINEL_REENTRY_BARS = "2"
+  # Exchange-native hard-stop backstop: a reduce-only STOP_MARKET rests ON the
+  # venue 0.5% of price BEYOND the software trail and ratchets with it.
+  # Catastrophe insurance — if the process dies, the position still has a real
+  # stop at the exchange; in normal operation the software trail exits first
+  # because it is strictly tighter. Unset/0 disables.
+  SENTINEL_HARD_STOP_PCT = "0.005"
 
 [http_service]
   internal_port = 8000

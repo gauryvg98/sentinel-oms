@@ -45,7 +45,7 @@ primary_region = "sin"
   # means less margin posted per position. Symbols whose Binance bracket caps
   # below 100 reject the setting and keep their previous leverage (non-fatal).
   SENTINEL_LEVERAGE = "25"
-  SENTINEL_MAX_LEVERAGE = "25"
+  SENTINEL_MAX_LEVERAGE = "15"  # sizing cap: margin <=60% of share at the 25x setting — 3 bots/pool can all hold positions without exhausting the pool (-2019)
   # 5%: eff lev = risk_pct/stop_pct -> 25x at the 0.2% stop cap, 50x at the
   # 0.1% floor. A stop-out costs ~5% of the bot's equity share. Aggressive by
   # instruction — the 100x exchange setting keeps posted margin small.

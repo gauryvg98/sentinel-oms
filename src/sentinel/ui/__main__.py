@@ -27,7 +27,8 @@ from sentinel.broker.binance import BinanceFuturesAdapter, BinanceSpotAdapter
 from sentinel.ledger import apply_migrations
 from sentinel.runtime import SentinelApp
 from sentinel.ui.bars import BarFeed
-from sentinel.ui.instruments import fetch_binance_spec, fetch_bybit_spec
+from sentinel.ui.instruments import (fetch_binance_spec, fetch_bybit_spec,
+                                     fetch_delta_spec)
 from sentinel.ui.market import REST_BASE as SPOT_REST
 from sentinel.ui.market import MarketData
 from sentinel.ui.server import Venue, build_ui
@@ -51,6 +52,10 @@ PERP_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
                 "ADAUSDC", "AVAXUSDC", "LINKUSDC", "LTCUSDC", "SUIUSDC",
                 "NEARUSDC", "DOGEUSDC", "AAVEUSDC")
 SPOT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "LTCUSDT")
+# Delta Exchange India perps are USD-quoted and sized in integer contracts of
+# each product's contract_value; specs (contract_value/tick) are fetched live.
+DELTA_SYMBOLS = ("BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BNBUSD",
+                 "DOGEUSD", "ADAUSD", "AVAXUSD", "LINKUSD", "LTCUSD")
 
 
 def _notional_cap(spec, price):
@@ -64,9 +69,34 @@ def _notional_cap(spec, price):
 def _venue() -> Venue:
     """Assemble the account's Venue: one shared adapter + per-symbol factories
     that fetch rules FROM the exchange. SENTINEL_VENUE picks spot (long/flat) /
-    Binance-futures / Bybit (both long/short)."""
+    Binance-futures / Bybit / Delta (futures venues are long/short)."""
     interval = os.environ.get("SENTINEL_STRATEGY_INTERVAL", "1m")
     venue = os.environ.get("SENTINEL_VENUE")
+
+    if venue == "delta":
+        # Delta Exchange India — defaults to the India TESTNET (demo keys).
+        # Production: SENTINEL_DELTA_REST=https://api.india.delta.exchange
+        #             SENTINEL_DELTA_WS=wss://socket.india.delta.exchange
+        from sentinel.broker.delta import (TESTNET_BASE as DELTA_REST,
+                                           TESTNET_WS as DELTA_WS,
+                                           DeltaFuturesAdapter)
+        from sentinel.ui.delta_market import DeltaBarFeed, DeltaMarketData
+        rest = os.environ.get("SENTINEL_DELTA_REST", DELTA_REST)
+        ws = os.environ.get("SENTINEL_DELTA_WS", DELTA_WS)
+        adapter = DeltaFuturesAdapter(
+            os.environ["DELTA_KEY"], os.environ["DELTA_SECRET"],
+            symbols=DELTA_SYMBOLS, base_url=rest, ws_url=ws)
+        return Venue(
+            adapter=adapter, allow_short=True, predefined=DELTA_SYMBOLS,
+            # Delta lists USD-quoted symbols; the global BTCUSDT default would
+            # never resolve here, so the venue gets its own default.
+            default_symbol=os.environ.get("SENTINEL_SYMBOL", "BTCUSD"),
+            default_interval=interval,
+            make_market=lambda s: DeltaMarketData(s, rest_base=rest, ws_url=ws),
+            make_bars=lambda s, iv: DeltaBarFeed(s, iv, rest_base=rest, ws_url=ws),
+            fetch_spec=lambda s: fetch_delta_spec(rest, s),
+            cap_for=_notional_cap,
+        )
 
     if venue == "bybit":
         from sentinel.broker.bybit import BybitFuturesAdapter

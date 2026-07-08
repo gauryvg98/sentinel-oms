@@ -12,8 +12,10 @@ from sentinel.ui.instruments import (
     InstrumentSpec,
     fetch_binance_spec,
     fetch_bybit_spec,
+    fetch_delta_spec,
     parse_binance_spec,
     parse_bybit_spec,
+    parse_delta_spec,
 )
 
 # ---- captured payloads (trimmed to the filters we read) --------------------
@@ -53,6 +55,15 @@ BYBIT_SOL = {
                       "minNotionalValue": "5"},
     "priceFilter": {"tickSize": "0.010"},
 }
+DELTA_BTC = {
+    "id": 27,
+    "symbol": "BTCUSD",
+    "contract_value": "0.001",
+    "tick_size": "0.5",
+    "settling_asset": {"symbol": "USDT"},
+    "quoting_asset": {"symbol": "USD"},
+    "state": "live",
+}
 
 
 # ---- parsing ---------------------------------------------------------------
@@ -73,6 +84,17 @@ def test_bybit_linear_filters():
     s = parse_bybit_spec(BYBIT_SOL)
     assert s.lot_step == Decimal("0.1") and s.price_tick == Decimal("0.010")
     assert s.min_qty == Decimal("0.1") and s.min_notional == Decimal("5")
+
+
+def test_delta_contract_value_becomes_the_qty_grid():
+    # Delta sizes orders in integer contracts of contract_value each, so the
+    # base-qty grid (and the min) must be exactly contract_value — that is what
+    # keeps sizing in base units from ever producing a fractional contract.
+    s = parse_delta_spec(DELTA_BTC)
+    assert s.lot_step == Decimal("0.001") and s.min_qty == Decimal("0.001")
+    assert s.price_tick == Decimal("0.5")
+    assert s.quote_asset == "USDT"                    # settling, not quoting
+    assert s.round_qty(Decimal("0.00318")) == Decimal("0.003")
 
 
 def test_two_symbols_get_distinct_rules():
@@ -164,3 +186,24 @@ async def test_fetch_bybit_spec_parses_linear_instrument():
     s = await fetch_bybit_spec("https://api-testnet.bybit.com", "SOLUSDT",
                                transport=httpx.MockTransport(handler))
     assert s.symbol == "SOLUSDT" and s.lot_step == Decimal("0.1")
+
+
+async def test_fetch_delta_spec_parses_product_and_rejects_unlisted():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"success": True, "result": DELTA_BTC})
+
+    s = await fetch_delta_spec("https://cdn-ind.testnet.deltaex.org", "BTCUSD",
+                               transport=httpx.MockTransport(handler))
+    assert s.symbol == "BTCUSD" and s.lot_step == Decimal("0.001")
+    assert seen["url"].endswith("/v2/products/BTCUSD")
+
+    def missing(request):
+        return httpx.Response(404, json={"success": False,
+                                         "error": {"code": "not_found"}})
+    import pytest
+    with pytest.raises(ValueError):
+        await fetch_delta_spec("https://x", "NOPEUSD",
+                               transport=httpx.MockTransport(missing))

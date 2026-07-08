@@ -82,6 +82,26 @@ def parse_binance_spec(info: dict) -> InstrumentSpec:
     )
 
 
+def parse_delta_spec(product: dict) -> InstrumentSpec:
+    """One `result` product from Delta /v2/products/{symbol}. Delta orders are
+    sized in INTEGER CONTRACTS of `contract_value` base units each, so the base
+    -qty grid is exactly contract_value: lot_step = min_qty = contract_value.
+    Sizing/guards stay in base units and the broker adapter converts to
+    contracts on the wire — anything off this grid would change real position
+    size, so it must be impossible to produce upstream."""
+    cv = Decimal(str(product.get("contract_value", "0.00000001")))
+    settling = (product.get("settling_asset") or {}).get("symbol", "")
+    quoting = (product.get("quoting_asset") or {}).get("symbol", "")
+    return InstrumentSpec(
+        symbol=product["symbol"],
+        lot_step=cv,
+        price_tick=Decimal(str(product.get("tick_size", "0.00000001"))),
+        min_qty=cv,                       # smallest order = 1 contract
+        min_notional=Decimal("0"),        # Delta publishes no notional floor
+        quote_asset=settling or quoting,  # margin draws on the settling asset
+    )
+
+
 def parse_bybit_spec(item: dict) -> InstrumentSpec:
     """One `result.list[]` entry from Bybit /v5/market/instruments-info."""
     lot = item.get("lotSizeFilter", {})
@@ -114,6 +134,20 @@ async def fetch_binance_spec(rest_base: str, path: str, symbol: str,
     if match is None:
         raise ValueError(f"{symbol} not listed on {rest_base}")
     return parse_binance_spec(match)
+
+
+async def fetch_delta_spec(rest_base: str, symbol: str, *,
+                           transport=None) -> InstrumentSpec:
+    async with httpx.AsyncClient(base_url=rest_base, timeout=10,
+                                 transport=transport) as http:
+        resp = await http.get(f"/v2/products/{symbol}")
+        if resp.status_code != 404:            # 404 = not listed, not an outage
+            resp.raise_for_status()
+    body = resp.json() if resp.status_code == 200 else {}
+    product = body.get("result") if body.get("success") else None
+    if not product:
+        raise ValueError(f"{symbol} not listed on Delta ({rest_base})")
+    return parse_delta_spec(product)
 
 
 async def fetch_bybit_spec(rest_base: str, symbol: str, *,

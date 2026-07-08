@@ -34,6 +34,7 @@ from sentinel.domain import (
     ReconcileStarted,
     Side,
     SubmissionStarted,
+    is_terminal,
 )
 from sentinel.ledger import FillOutcome, LedgerStore, StoredOrder
 from sentinel.oms import WriterCoordinator
@@ -83,69 +84,88 @@ class Reconciler:
         self._coord = coordinator
 
     async def reconcile_order(self, client_order_id: str) -> StoredOrder:
+        """Broker I/O runs OUTSIDE the instrument lock. query_order is
+        multi-second HTTP (order lookup + paginated trades), and holding the
+        per-instrument writer lock across it convoyed every live fill apply
+        and placement on that instrument behind reconciliation (prod:
+        event_apply p99 3.41s/max 51s, order-place p99 8s/max 28.9s, against
+        a ~13ms steady state). The shape is an outer loop of
+        {query outside the lock -> reload + apply + evaluate inside it}:
+        every ledger write still happens under the lock against a freshly
+        reloaded order, and exec_id dedup makes re-applied fills exactly-once,
+        so releasing the lock around broker HTTP costs nothing in safety."""
+        # Phase A — no lock: cheap reads and the broker round-trip.
         stored = await self._store.load_order(client_order_id)
         if stored is None:
             raise ReconciliationDivergence(f"no such order {client_order_id!r}")
+        if is_terminal(stored.core.state):
+            return stored          # already resolved; nothing to reconcile
+        instrument = stored.core.instrument
 
-        async with self._coord.lock(stored.core.instrument):
-            stored = await self._store.load_order(client_order_id)
-            trace = uuid4()
+        trace = uuid4()
+        view = await self._broker.query_order(client_order_id)
 
-            if stored.core.state is not OrderState.RECONCILING:
-                stored = await self._store.apply_event(
-                    stored, ReconcileStarted(cause="reconciler"), trace
-                )
-
-            view = await self._broker.query_order(client_order_id)
-
-            if view is None:
-                # The broker's order-query no longer returns this order (Binance
-                # code -2013). Crucially, that is NOT proof the order never
-                # existed. On demo/testnet fapi (and past the retention window on
-                # live) a genuinely-filled order ages OUT of the order-query
-                # window and answers -2013 while its fills are entirely real —
-                # every fill we hold was sourced from the broker's OWN execution
-                # stream (real exec_ids) or a prior query backfill; we never
-                # invent fills. Treating -2013 as "phantom exposure" here caused
-                # repeated FALSE halts on real, fully-broker-sourced fills.
-                #
-                # Resolve the order terminal, PRESERVING the local filled_qty:
-                # the filled portion is real and already booked into the position
-                # (ReconcileResolved sets order state only; it does not re-book
-                # fills, so this never double-counts), and the unfilled remainder
-                # is gone (the order is not live at the broker). Exposure
-                # correctness is guarded authoritatively by POSITION
-                # reconciliation (reconcile_positions -> positionRisk), which
-                # adopts broker truth and self-heals any real mismatch — that,
-                # not an order-query miss, is the system's exposure integrity
-                # check, and it is consistent (adopt, don't halt).
-                if stored.core.filled_qty > 0:
-                    log.warning(
-                        "%s: order absent from broker query (-2013) with %s "
-                        "local broker-sourced fills — aged out, not phantom; "
-                        "resolving CANCELED, position stands (exposure verified "
-                        "by position reconciliation)",
-                        client_order_id, stored.core.filled_qty,
+        # Backfill executions we never received, then reconcile the count.
+        # The ledger's exec_id dedup makes replay exactly-once, so re-querying
+        # is safe. On each pass we apply (under the lock) whatever fills the
+        # broker last reported; if `booked` still trails `broker` it may just
+        # be the userTrades feed lagging executedQty on an actively-filling
+        # order — release the lock, re-query, and let it catch up. Only a gap
+        # that SURVIVES the retries is a genuine missing-fills halt.
+        # booked > broker (invented exposure) never retries; it halts at once.
+        for attempt in range(_FILL_BACKFILL_RETRIES + 1):
+            # Phase B — under the lock: the order may have moved while we were
+            # in broker HTTP. Reload it, and if another path (a live fill, a
+            # prior reconcile) already resolved it terminal, adopt that result
+            # — never reopen a settled order.
+            async with self._coord.lock(instrument):
+                stored = await self._store.load_order(client_order_id)
+                if is_terminal(stored.core.state):
+                    return stored
+                if stored.core.state is not OrderState.RECONCILING:
+                    stored = await self._store.apply_event(
+                        stored, ReconcileStarted(cause="reconciler"), trace
                     )
-                return await self._store.apply_event(
-                    stored,
-                    ReconcileResolved(
-                        resolved_state=OrderState.CANCELED,
-                        broker_order_id=stored.core.broker_order_id,
-                        filled_qty=stored.core.filled_qty,
-                    ),
-                    trace,
-                )
 
-            # Backfill executions we never received, then reconcile the count.
-            # The ledger's exec_id dedup makes replay exactly-once, so re-querying
-            # is safe. On each pass we apply whatever fills the broker now reports;
-            # if `booked` still trails `broker` it may just be the userTrades feed
-            # lagging executedQty on an actively-filling order — re-query and let
-            # it catch up. Only a gap that SURVIVES the retries is a genuine
-            # missing-fills halt. booked > broker (invented exposure) never
-            # retries; it halts at once.
-            for attempt in range(_FILL_BACKFILL_RETRIES + 1):
+                if view is None:
+                    # The broker's order-query no longer returns this order (Binance
+                    # code -2013). Crucially, that is NOT proof the order never
+                    # existed. On demo/testnet fapi (and past the retention window on
+                    # live) a genuinely-filled order ages OUT of the order-query
+                    # window and answers -2013 while its fills are entirely real —
+                    # every fill we hold was sourced from the broker's OWN execution
+                    # stream (real exec_ids) or a prior query backfill; we never
+                    # invent fills. Treating -2013 as "phantom exposure" here caused
+                    # repeated FALSE halts on real, fully-broker-sourced fills.
+                    #
+                    # Resolve the order terminal, PRESERVING the local filled_qty:
+                    # the filled portion is real and already booked into the position
+                    # (ReconcileResolved sets order state only; it does not re-book
+                    # fills, so this never double-counts), and the unfilled remainder
+                    # is gone (the order is not live at the broker). Exposure
+                    # correctness is guarded authoritatively by POSITION
+                    # reconciliation (reconcile_positions -> positionRisk), which
+                    # adopts broker truth and self-heals any real mismatch — that,
+                    # not an order-query miss, is the system's exposure integrity
+                    # check, and it is consistent (adopt, don't halt).
+                    if stored.core.filled_qty > 0:
+                        log.warning(
+                            "%s: order absent from broker query (-2013) with %s "
+                            "local broker-sourced fills — aged out, not phantom; "
+                            "resolving CANCELED, position stands (exposure verified "
+                            "by position reconciliation)",
+                            client_order_id, stored.core.filled_qty,
+                        )
+                    return await self._store.apply_event(
+                        stored,
+                        ReconcileResolved(
+                            resolved_state=OrderState.CANCELED,
+                            broker_order_id=stored.core.broker_order_id,
+                            filled_qty=stored.core.filled_qty,
+                        ),
+                        trace,
+                    )
+
                 for f in view.fills:
                     result = await self._store.apply_event(
                         stored,
@@ -163,46 +183,48 @@ class Reconciler:
                     raise ReconciliationDivergence(
                         f"{client_order_id}: local filled {booked} > broker {broker}"
                     )
-                if booked < min(broker, qty):
-                    if attempt < _FILL_BACKFILL_RETRIES:
-                        await asyncio.sleep(_FILL_BACKFILL_BACKOFF_S)
-                        refetched = await self._broker.query_order(client_order_id)
-                        if refetched is not None:
-                            view = refetched
-                        continue
-                    # Still short after retries — a real gap, not a feed lag. Halt.
-                    raise ReconciliationDivergence(
-                        f"{client_order_id}: filled {booked} local vs {broker} "
-                        f"broker after backfill"
+                if booked >= min(broker, qty):   # reconciled
+                    if broker > qty:
+                        # The venue matched a resting order past its size (demo-fapi
+                        # over-match). The order is booked to its qty and the fills
+                        # carry true position — log the excess, never halt.
+                        log.warning(
+                            "%s: venue over-match — broker filled %s > order qty %s; "
+                            "booked to qty, position tracks the fills",
+                            client_order_id, broker, qty,
+                        )
+                    resolved = await self._store.apply_event(
+                        stored,
+                        ReconcileResolved(
+                            resolved_state=_STATE_MAP[view.state],
+                            broker_order_id=view.broker_order_id,
+                            filled_qty=view.filled_qty,
+                        ),
+                        trace,
                     )
-                break   # booked >= min(broker, qty): reconciled
+                    await self._store.record_decision(
+                        trace, resolved.core.instrument, "reconciler",
+                        "RECONCILE_RESOLVED",
+                        {"key": client_order_id, "to": resolved.core.state.value,
+                         "filled": str(resolved.core.filled_qty)},
+                    )
+                    return resolved
 
-            if broker > qty:
-                # The venue matched a resting order past its size (demo-fapi
-                # over-match). The order is booked to its qty and the fills carry
-                # true position — log the excess, never halt.
-                log.warning(
-                    "%s: venue over-match — broker filled %s > order qty %s; "
-                    "booked to qty, position tracks the fills",
-                    client_order_id, broker, qty,
+            # booked < min(broker, qty): short. The lock is RELEASED here —
+            # live fills and placements on the instrument proceed while we
+            # wait out the feed and re-query.
+            if attempt >= _FILL_BACKFILL_RETRIES:
+                # Still short after retries — a real gap, not a feed lag. Halt.
+                raise ReconciliationDivergence(
+                    f"{client_order_id}: filled {booked} local vs {broker} "
+                    f"broker after backfill"
                 )
+            await asyncio.sleep(_FILL_BACKFILL_BACKOFF_S)
+            refetched = await self._broker.query_order(client_order_id)
+            if refetched is not None:
+                view = refetched
 
-            resolved = await self._store.apply_event(
-                stored,
-                ReconcileResolved(
-                    resolved_state=_STATE_MAP[view.state],
-                    broker_order_id=view.broker_order_id,
-                    filled_qty=view.filled_qty,
-                ),
-                trace,
-            )
-            await self._store.record_decision(
-                trace, resolved.core.instrument, "reconciler",
-                "RECONCILE_RESOLVED",
-                {"key": client_order_id, "to": resolved.core.state.value,
-                 "filled": str(resolved.core.filled_qty)},
-            )
-            return resolved
+        raise AssertionError("unreachable: the backfill loop returns or raises")
 
     async def drain(self, queue: asyncio.Queue[str]) -> list[StoredOrder]:
         """Process every queued reconciliation request (test/scenario driver;

@@ -3,6 +3,7 @@ recovery mechanism, including the full crash-and-restart sequence."""
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from uuid import uuid4
 
@@ -277,6 +278,98 @@ async def test_persistent_fill_gap_still_halts_after_retries(pool, monkeypatch):
     with pytest.raises(ReconciliationDivergence):
         await Reconciler(store, b, WriterCoordinator()).reconcile_order("K1")
     assert b.calls == recon_module._FILL_BACKFILL_RETRIES + 1   # initial + retries
+
+
+# ------------------------------------------ lock scope: broker I/O outside it
+
+
+class _GatedBroker:
+    """query_order that parks in "broker HTTP" until released — lets a test
+    hold a reconcile mid-I/O and probe what else can run meanwhile."""
+
+    def __init__(self, view):
+        self._view = view
+        self.entered = asyncio.Event()   # set once reconcile is inside the query
+        self.release = asyncio.Event()   # test sets it to let the query return
+
+    async def query_order(self, client_order_id):
+        self.entered.set()
+        await self.release.wait()
+        return self._view
+
+
+def _shared_coord_rig(pool, gated_broker):
+    """Engine and reconciler sharing ONE coordinator (as in prod), with the
+    reconciler's broker gated so tests can hold it mid-query."""
+    store = LedgerStore(pool)
+    coord = WriterCoordinator()
+    engine = OrderEngine(store, ScriptedBroker(BrokerScript()), coord)
+    gateway = CommandGateway(store, engine)
+    recon = Reconciler(store, gated_broker, coord)
+    return store, engine, gateway, recon
+
+
+async def test_fill_event_applies_while_reconcile_is_in_broker_http(pool):
+    """The prod convoy: reconcile used to hold the instrument lock across
+    multi-second broker HTTP, so live fill applies queued behind it
+    (event_apply p99 3.41s vs ~13ms steady state). Broker I/O now runs
+    OUTSIDE the lock: a fill event must apply to completion WHILE the
+    reconcile is still parked inside its query."""
+    from sentinel.broker import BrokerOrderState
+
+    broker = _GatedBroker(_view(BrokerOrderState.PARTIAL, "1", [_fill("E1", "1")]))
+    store, engine, gateway, recon = _shared_coord_rig(pool, broker)
+    await gateway.place(uuid4(), intent(qty="4"))            # K1 WORKING
+
+    reconcile = asyncio.create_task(recon.reconcile_order("K1"))
+    await asyncio.wait_for(broker.entered.wait(), timeout=1.0)  # parked in HTTP
+
+    try:
+        # The live fill must NOT convoy behind the parked reconcile. (With the
+        # lock held across the query this deadlocks until release -> timeout.)
+        await asyncio.wait_for(engine.on_broker_event(_fill("E1", "1")),
+                               timeout=1.0)
+        assert not reconcile.done()                # reconcile still in its query
+        fresh = await store.load_order("K1")
+        assert fresh.core.filled_qty == 1          # fill landed while it waited
+    finally:
+        broker.release.set()
+
+    resolved = await reconcile
+    assert resolved.core.state is OrderState.PARTIAL
+    assert resolved.core.filled_qty == 1           # E1 deduped, never doubled
+    assert await store.get_position("IDX-OPT") == 1
+    assert await pool.fetchval("SELECT count(*) FROM fills") == 1
+
+
+async def test_reconcile_adopts_terminal_resolution_from_another_path(pool):
+    """Between phase A (broker query, no lock) and phase B (apply, locked),
+    another path may resolve the order — here a live fill completes it to
+    FILLED. Reconcile must return that terminal order as-is, never re-opening
+    it (no RECONCILE_STARTED / RECONCILE_RESOLVED appended)."""
+    from sentinel.broker import BrokerOrderState
+
+    broker = _GatedBroker(_view(BrokerOrderState.FILLED, "4", [_fill("E1", "4")]))
+    store, engine, gateway, recon = _shared_coord_rig(pool, broker)
+    await gateway.place(uuid4(), intent(qty="4"))            # K1 WORKING
+
+    reconcile = asyncio.create_task(recon.reconcile_order("K1"))
+    await asyncio.wait_for(broker.entered.wait(), timeout=1.0)  # parked in HTTP
+
+    try:
+        await engine.on_broker_event(_fill("E1", "4"))       # completes: FILLED
+    finally:
+        broker.release.set()
+
+    resolved = await reconcile
+    assert resolved.core.state is OrderState.FILLED          # adopted, not redone
+    assert resolved.core.filled_qty == 4
+    assert await store.get_position("IDX-OPT") == 4
+    n = await pool.fetchval(
+        "SELECT count(*) FROM events "
+        "WHERE kind IN ('RECONCILE_STARTED', 'RECONCILE_RESOLVED')"
+    )
+    assert n == 0                                            # never re-opened
 
 
 # --------------------------------------------------------- startup recovery

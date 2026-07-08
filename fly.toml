@@ -35,7 +35,7 @@ primary_region = "sin"
   SENTINEL_STRATEGY_INTERVAL = "1m"
   SENTINEL_STRATEGY_USDT = "200"
   # Fat-finger backstop only (per-symbol |position| cap = this / price). Must
-  # clear the 10x sizing headroom (~pool/3 × 10 ≈ 13.3k notional) or it would
+  # clear the 25x sizing headroom (~pool/3 × 25 ≈ 33k notional) or it would
   # silently clamp effective leverage; risk_pct + stops are the real protection.
   SENTINEL_MAX_NOTIONAL = "70000"
   # 25x: Binance leverage BRACKETS cap max notional per position at each
@@ -45,7 +45,13 @@ primary_region = "sin"
   # means less margin posted per position. Symbols whose Binance bracket caps
   # below 100 reject the setting and keep their previous leverage (non-fatal).
   SENTINEL_LEVERAGE = "25"
-  SENTINEL_MAX_LEVERAGE = "10"  # sizing cap: margin <=60% of share at the 25x setting — 3 bots/pool can all hold positions without exhausting the pool (-2019)
+  # 25 (= the exchange setting): sizing may now use the FULL equity share as
+  # margin. The old conservative static cap (10x, before that 15x) existed only
+  # to leave room for margin sizing couldn't see; the closed-loop margin clamp
+  # (risk sizing subtracts the position's and the resting entry's ACTUAL margin,
+  # with a 10% buffer) supersedes it — -2019 is prevented by measurement, not by
+  # under-levering every order.
+  SENTINEL_MAX_LEVERAGE = "25"
   # 5%: eff lev = risk_pct/stop_pct -> 25x at the 0.2% stop cap, 50x at the
   # 0.1% floor. A stop-out costs ~5% of the bot's equity share. Aggressive by
   # instruction — the 100x exchange setting keeps posted margin small.

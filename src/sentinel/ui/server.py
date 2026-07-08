@@ -69,6 +69,12 @@ def _is_admin(request: "Request") -> bool:
     return bool(_ADMIN_TOKEN) and hmac.compare_digest(tok, _ADMIN_TOKEN)
 
 
+# Closed-loop sizing spends at most this fraction of the measured free margin:
+# the 10% held back absorbs taker fees and the mark drifting against us between
+# sizing and fill, so a maximal order doesn't land exactly on the -2019 line.
+_MARGIN_BUFFER = Decimal("0.90")
+
+
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
     """Initial margin a resting limit ENTRY reserves: its remaining (unfilled)
     notional / leverage. Zero when there's no live order, no limit price, or
@@ -180,10 +186,15 @@ async def order_stats(app: SentinelApp) -> dict:
 
 class Terminal:
     def __init__(self, app: SentinelApp, market: MarketData,
-                 spec: InstrumentSpec) -> None:
+                 spec: InstrumentSpec, *,
+                 margin_cap_fn=None) -> None:
         self.app = app
         self.market = market
         self.spec = spec                # the symbol's exchange rules (lot/tick/mins)
+        # (price) -> max qty a NEW entry may add given the bot's actually-free
+        # margin (Bot.entry_headroom_qty). None (standalone terminal / tests)
+        # leaves manual sizing unclamped, exactly as before.
+        self._margin_cap_fn = margin_cap_fn
         # A bare manual order (no usdt/btc/pct) defaults to the exchange minimum
         # quantity for this symbol — never a hardcoded qty.
         self.trade_qty = spec.min_qty or spec.lot_step
@@ -287,11 +298,23 @@ class Terminal:
         a cover (BUY that REDUCES a short) passes authority=PROTECTIVE_EXIT so it
         is clamped by never-over-exit, not treated as a fresh open."""
         qty = await self._size(side, usdt, btc, pct)
+        if authority is None:
+            authority = Authority.ENTRY if side == "BUY" else Authority.PROTECTIVE_EXIT
+        # Closed-loop margin clamp on the manual path, ENTRY only. It lives here
+        # (not in _size) because the gate is the AUTHORITY, not the side: a BUY
+        # that COVERS a short is a PROTECTIVE_EXIT and must never be clipped —
+        # margin exhaustion is exactly when you most need the cover to go out.
+        if authority is Authority.ENTRY and self._margin_cap_fn is not None:
+            mark = self.market.latest(self.market.symbol)
+            cap = await self._margin_cap_fn(mark.price if mark else None)
+            if cap is not None and qty > cap:
+                qty = self.spec.round_qty(cap)
+                if qty <= 0:
+                    return {"blocked": "ZeroSize",
+                            "reason": "no free margin for a new entry"}
         if qty <= 0:
             return {"blocked": "ZeroSize",
                     "reason": "nothing to trade at that size"}
-        if authority is None:
-            authority = Authority.ENTRY if side == "BUY" else Authority.PROTECTIVE_EXIT
         try:
             with self.app.metrics.timer("place_ms"):
                 stored = await self.app.gateway.place(
@@ -353,7 +376,10 @@ class Bot:
         self.liq_price: Decimal | None = None   # anchored liquidation price; the
                                                  # live distance is derived per
                                                  # mark tick in card()
-        self.terminal = Terminal(app, market, spec)
+        # Manual orders share the closed-loop margin clamp (headroom form): a
+        # human BUY is capped by the same free margin the runner respects.
+        self.terminal = Terminal(app, market, spec,
+                                 margin_cap_fn=self.entry_headroom_qty)
         self.runner = self._build_runner(strategies[default_strategy]())
 
     # -- the peg's touch: rest at the near side; fall back to the mark --------
@@ -412,6 +438,8 @@ class Bot:
             equity_fn=self.equity_fn,
             risk_params=self.risk_params,
             entry_fn=self.avg_cost,
+            # closed-loop clamp: total-position form (held + resting + headroom)
+            margin_cap_fn=self.margin_qty_cap,
         )
 
     async def spawn(self) -> None:
@@ -487,6 +515,61 @@ class Bot:
         """The open position's entry price — anchors the risk layer's SL/TP."""
         pnl = await self._pnl()
         return pnl.avg_cost if pnl else None
+
+    # ---- closed-loop margin clamp -------------------------------------------
+    # Sizing used to be open-loop: equity_share and a leverage cap, blind to the
+    # margin ALREADY consumed by the open position and the resting entry peg
+    # (Binance reserves initial margin for open orders too). Each bot could thus
+    # ask for its full share again on every bar — the steady stream of -2019
+    # "Margin is insufficient" rejects. These helpers close the loop with the
+    # SAME per-bot numbers account_snapshot derives for the wallet display.
+
+    async def _margin_state(self) -> tuple[Decimal, Decimal, Decimal] | None:
+        """(free_margin, |position| qty, resting-entry remaining qty) for THIS
+        bot. free_margin = equity_share − position margin − resting-order margin
+        (may be negative after adverse drift). None when there's no equity view
+        (fixed-notional/budget mode) — callers then skip the clamp entirely."""
+        if self.equity_fn is None:
+            return None
+        lev = Decimal(self.venue.leverage or 1)
+        share = self.equity_fn()
+        pnl = await self._pnl()
+        pos_qty = abs(pnl.position) if pnl and pnl.position else Decimal(0)
+        # Initial margin the position holds, at cost basis — same formula as the
+        # wallet's 'committed' roll-up in account_snapshot().
+        pos_margin = (abs(pnl.avg_cost * pnl.position) / lev
+                      if pnl and pnl.avg_cost and pnl.position else Decimal(0))
+        entry = await self.app.store.open_entry(self.symbol)
+        order_margin = _order_margin(entry, lev)   # the wallet's 'blocked' figure
+        resting_qty = Decimal(0)
+        if entry and entry.get("limit_price") is not None:
+            resting_qty = max(Decimal(0), entry["qty"] - entry["filled"])
+        return share - pos_margin - order_margin, pos_qty, resting_qty
+
+    async def entry_headroom_qty(self, price: Decimal | None) -> Decimal | None:
+        """Most base-asset qty a NEW order may add right now: the bot's free
+        margin (buffered) levered back into quantity at `price`. Zero when the
+        share is exhausted — an entry then becomes a no-op instead of a -2019."""
+        state = await self._margin_state()
+        if state is None or price is None or price <= 0:
+            return None
+        free, _, _ = state
+        lev = Decimal(self.venue.leverage or 1)
+        return max(Decimal(0), free) * _MARGIN_BUFFER * lev / price
+
+    async def margin_qty_cap(self, price: Decimal | None) -> Decimal | None:
+        """TOTAL |position| the bot's margin can carry — the runner's sizing
+        clamp. Held + already-resting + free headroom, NOT headroom alone: the
+        risk sizer produces a target for the WHOLE position, so a cap that
+        forgot the position would read 'no headroom' as 'target zero' and
+        flatten a perfectly good trade (and forgetting the resting peg would
+        cancel/re-place it every bar)."""
+        state = await self._margin_state()
+        if state is None or price is None or price <= 0:
+            return None
+        free, pos_qty, resting_qty = state
+        lev = Decimal(self.venue.leverage or 1)
+        return pos_qty + resting_qty + max(Decimal(0), free) * _MARGIN_BUFFER * lev / price
 
     async def card(self) -> dict:
         """Compact, always-live state for this bot's card. No candles (a

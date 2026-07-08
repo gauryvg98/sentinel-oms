@@ -126,6 +126,9 @@ class StrategyRunner:
         equity_fn: Callable[[], Decimal] | None = None,   # account equity (USDT)
         risk_params=None,                                 # RiskParams -> risk-based sizing
         entry_fn: Callable[[], Awaitable[Decimal | None]] | None = None,  # position avg cost
+        # (price) -> TOTAL |position| qty the bot's real margin can carry
+        # (held + resting + free headroom). None -> open-loop sizing as before.
+        margin_cap_fn: Callable[[Decimal], Awaitable[Decimal | None]] | None = None,
     ) -> None:
         self.strategy = strategy
         self._bars = bars
@@ -148,6 +151,7 @@ class StrategyRunner:
         self._equity_fn = equity_fn
         self._risk_params = risk_params
         self._entry_fn = entry_fn
+        self._margin_cap_fn = margin_cap_fn
         self._suppressed = None          # stance we exited on a stop/TP — no re-entry until it flips
         self._last_bracket: dict | None = None   # current SL/TP levels, for the UI
         self._trail: dict | None = None          # ratchet state {sign, hwm, stop}
@@ -172,11 +176,18 @@ class StrategyRunner:
             w = Decimal("1")
         return max(Decimal(0), min(Decimal(1), w))
 
-    def _target(self, bid: Decimal | None, ask: Decimal | None) -> Decimal | None:
+    def _target(self, bid: Decimal | None, ask: Decimal | None,
+                margin_qty_cap: Decimal | None = None) -> Decimal | None:
         """Signed desired position from stance + conviction. LONG -> +qty (sized
         off the bid, the side we'd buy into); SHORT -> -qty (off the ask). FLAT
         -> 0 (needs no price, so exits never block on the feed). A SHORT on a
-        spot venue (allow_short=False) clamps to 0 — you can't short spot."""
+        spot venue (allow_short=False) clamps to 0 — you can't short spot.
+
+        `margin_qty_cap` (resolved by the async caller — this stays sync/pure)
+        is the closed-loop clamp on the TOTAL target magnitude: held + resting
+        + what free margin can still add. It caps the target, it never shrinks
+        it below the current position — the cap already INCLUDES the position,
+        so a fully-margined position targets itself (noop), not a flatten."""
         d = self.last_decision
         if d is None or d.stance is None:
             return None
@@ -200,7 +211,8 @@ class StrategyRunner:
             from sentinel.risk import risk_sized_qty
             raw = risk_sized_qty(
                 self._risk_params, equity=self._equity_fn(), price=price,
-                stop_dist=self._stop_dist(price), conviction=self._weight(d))
+                stop_dist=self._stop_dist(price), conviction=self._weight(d),
+                margin_qty_cap=margin_qty_cap)
         else:
             raw = self._weight(d) * self._budget_fn() / price   # fixed-notional budget
         qty = raw.quantize(self._lot_step, rounding=ROUND_DOWN)
@@ -239,9 +251,17 @@ class StrategyRunner:
         if not self.running or self.last_decision is None:
             return None
         bid, ask = self._bid_fn(), self._ask_fn()
+        # Closed-loop margin clamp: ask the bot how much TOTAL position its real
+        # free margin can carry (position + resting-order margin already netted
+        # out) BEFORE sizing. Resolved here because it needs I/O and _target is
+        # sync. Either touch price works as the reference — the cap's 10% safety
+        # buffer dwarfs a spread's worth of difference.
+        margin_qty_cap = None
+        if self._margin_cap_fn is not None and (ref := bid or ask):
+            margin_qty_cap = await self._margin_cap_fn(ref)
         plan = plan_action(
             await self._position_fn(), bid, ask, await self._open_entry_fn(),
-            self._target(bid, ask),
+            self._target(bid, ask, margin_qty_cap),
             reprice_frac=self._reprice_frac, rebalance_frac=self._rebalance_frac,
             lot_step=self._lot_step,
         )

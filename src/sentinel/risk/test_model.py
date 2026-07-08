@@ -59,6 +59,35 @@ def test_zero_or_negative_inputs_are_safe():
                           stop_dist=None) == 0
 
 
+# ---- closed-loop margin clamp -------------------------------------------------
+
+def test_margin_cap_binds_when_tighter_than_risk_and_leverage():
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    cap = uncapped / 2                             # real free margin allows less
+    assert risk_sized_qty(P, margin_qty_cap=cap, **kw) == cap
+
+
+def test_margin_cap_absent_or_loose_leaves_sizing_unchanged():
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    # None (open-loop callers, backtests) must be byte-identical to before.
+    assert risk_sized_qty(P, margin_qty_cap=None, **kw) == uncapped
+    # A cap wider than the risk-sized qty never inflates the size.
+    assert risk_sized_qty(P, margin_qty_cap=uncapped * 10, **kw) == uncapped
+
+
+def test_margin_cap_zero_or_negative_free_margin_sizes_to_zero():
+    # Exhausted (or over-drawn after drift) margin -> qty 0, a quiet no-op —
+    # never a negative qty and never an order the exchange would -2019.
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    assert risk_sized_qty(P, margin_qty_cap=Decimal(0), **kw) == 0
+    assert risk_sized_qty(P, margin_qty_cap=Decimal("-0.5"), **kw) == 0
+
+
 # ---- stop distance / ATR ----------------------------------------------------
 
 def test_stop_falls_back_to_pct_without_atr():

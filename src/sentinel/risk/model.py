@@ -10,6 +10,12 @@ thing most naive bots get wrong.
     stop_dist   = stop_atr_mult · ATR   (or fallback%)  (where the thesis breaks)
     qty         = risk_amount / stop_dist               (so a stop-out ≈ risk_amount)
     qty         = min(qty, equity · max_leverage / px)  (hard leverage cap)
+    qty         = min(qty, margin_qty_cap)              (closed-loop margin clamp)
+
+The last line is what makes sizing CLOSED-loop: the caller derives the cap from
+the margin actually still free (equity share minus the margin the open position
+and any resting entry already consume), so we never ask the exchange for more
+initial margin than exists (-2019 Margin is insufficient).
 
 Pure and unsigned — the runner applies the LONG/SHORT sign. No I/O, no clock, so
 every rule is unit-testable before any feed or broker exists.
@@ -98,17 +104,27 @@ def breached(is_long: bool, mark: Decimal, stop: Decimal,
 
 def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
                    stop_dist: Decimal | None,
-                   conviction: Decimal = Decimal(1)) -> Decimal:
+                   conviction: Decimal = Decimal(1),
+                   margin_qty_cap: Decimal | None = None) -> Decimal:
     """Base-asset quantity so that hitting the stop (`stop_dist` price units away)
     loses about `risk_pct · conviction` of equity — capped by max leverage.
     Takes the stop distance directly so sizing and the SL use the SAME stop,
-    whether it's ATR-derived or the strategy's own geometry. Unsigned."""
+    whether it's ATR-derived or the strategy's own geometry. Unsigned.
+
+    `margin_qty_cap` is the OPTIONAL closed-loop clamp: the most qty the caller's
+    actually-free margin can carry (position + resting-order margin already
+    deducted upstream). None keeps the function pure open-loop — same result as
+    before the clamp existed — so the risk math stays testable in isolation.
+    A zero/negative cap means no margin headroom: size to zero, never reject."""
     if equity <= 0 or price <= 0 or stop_dist is None or stop_dist <= 0:
         return Decimal(0)
     conviction = max(Decimal(0), min(Decimal(1), conviction))
     qty = (params.risk_pct * equity * conviction) / stop_dist
     lev_cap_qty = (equity * params.max_leverage) / price   # never over-lever
-    return min(qty, lev_cap_qty)
+    qty = min(qty, lev_cap_qty)
+    if margin_qty_cap is not None:
+        qty = min(qty, max(Decimal(0), margin_qty_cap))
+    return qty
 
 
 def trail_ratchet(is_long: bool, entry: Decimal, price: Decimal,

@@ -228,26 +228,84 @@ class DeltaFuturesAdapter:
     # ------------------------------------------------------ contract sizing
 
     async def _ensure_products(self) -> None:
-        """Lazy one-shot load of /v2/products (public, unsigned): symbol ->
-        {id, contract_value, ...}. Everything qty<->contracts flows through
-        this map — no contract size is ever assumed."""
+        """Lazy load of /v2/products (public, unsigned): symbol ->
+        {id, contract_value, ...}. Delta PAGINATES this endpoint — cursor in
+        `meta.after`, passed back as the `after` param (docs.delta.exchange,
+        default page_size 100) — and testnet lists hundreds of products
+        including options, so a page-1-only read silently drops perps and made
+        live symbols "unknown". Every page is consumed.
+
+        The maps are committed ONLY after the LAST page succeeds: a failed or
+        partial fetch is never cached as "loaded" — one hiccup at boot must
+        not blind the adapter until restart; the next call refetches from
+        page one instead. Everything qty<->contracts flows through this map —
+        no contract size is ever assumed."""
         if self._products:
             return
-        try:
-            resp = await self._http.get("/v2/products",
-                                        params={"page_size": "500"})
-        except (httpx.TimeoutException, httpx.TransportError) as e:
-            raise BrokerTimeout(f"GET /v2/products: {e!r}") from e
-        if resp.status_code >= 500:
-            raise BrokerTimeout(f"GET /v2/products: HTTP {resp.status_code}")
-        rows = resp.json().get("result") or []
-        for p in rows:
-            if p.get("symbol") and p.get("contract_value") is not None:
-                self._products[p["symbol"]] = p
-                if p.get("id") is not None:
-                    self._products_by_id[int(p["id"])] = p
-        if not self._products:
+        by_symbol: dict[str, dict] = {}
+        by_id: dict[int, dict] = {}
+        params: dict[str, str] = {"page_size": "500"}
+        for _ in range(50):                     # cursor-loop hard stop
+            try:
+                resp = await self._http.get("/v2/products", params=params)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                raise BrokerTimeout(f"GET /v2/products: {e!r}") from e
+            if resp.status_code >= 500:
+                raise BrokerTimeout(f"GET /v2/products: HTTP {resp.status_code}")
+            code = self._error_code(resp)
+            if code is not None:                # conclusive refusal, no cache
+                raise BrokerReject(f"GET /v2/products: [{code}]")
+            body = resp.json()
+            for p in body.get("result") or []:
+                if p.get("symbol") and p.get("contract_value") is not None:
+                    by_symbol[p["symbol"]] = p
+                    if p.get("id") is not None:
+                        by_id[int(p["id"])] = p
+            after = (body.get("meta") or {}).get("after")
+            if not after:
+                break
+            params = {"page_size": "500", "after": str(after)}
+        else:
+            raise BrokerError("GET /v2/products: pagination cursor never "
+                              "terminated")
+        if not by_symbol:
             raise BrokerError("Delta /v2/products returned no products")
+        self._products = by_symbol
+        self._products_by_id = by_id
+
+    async def _ensure_product(self, symbol: str) -> dict:
+        """Product for `symbol`, with a per-symbol fallback: the bulk map
+        first, then GET /v2/products/{symbol} — the same endpoint the spec
+        fetcher (ui.instruments.fetch_delta_spec) uses — because the bulk
+        listing can lag or omit a product the venue itself resolves fine. A
+        fallback hit is MERGED into the maps so conversions, leverage and
+        fill parsing all see it.
+
+        Still unknown after both -> BrokerReject: nothing touched the
+        exchange, so an unlisted symbol is a conclusive local refusal — the
+        order lands REJECTED instead of stranded in SUBMITTING (which is
+        what a plain BrokerError caused live: OrderEngine.place only maps
+        BrokerReject/BrokerTimeout)."""
+        await self._ensure_products()
+        p = self._products.get(symbol)
+        if p is not None:
+            return p
+        try:
+            resp = await self._http.get(f"/v2/products/{symbol}")
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            raise BrokerTimeout(f"GET /v2/products/{symbol}: {e!r}") from e
+        if resp.status_code >= 500:
+            raise BrokerTimeout(
+                f"GET /v2/products/{symbol}: HTTP {resp.status_code}")
+        if self._error_code(resp) is None:
+            prod = resp.json().get("result") or {}
+            if isinstance(prod, dict) and prod.get("symbol") == symbol \
+                    and prod.get("contract_value") is not None:
+                self._products[symbol] = prod
+                if prod.get("id") is not None:
+                    self._products_by_id[int(prod["id"])] = prod
+                return prod
+        raise BrokerReject(f"{symbol!r} not listed on Delta")
 
     def _product(self, symbol: str) -> dict:
         p = self._products.get(symbol)
@@ -313,7 +371,7 @@ class DeltaFuturesAdapter:
         qty: Decimal,
         limit_price: Decimal | None,
     ) -> str:
-        await self._ensure_products()
+        await self._ensure_product(instrument)   # paginated map + fallback
         await self._ensure_leverage(instrument)
         params: dict = {
             "product_symbol": instrument,

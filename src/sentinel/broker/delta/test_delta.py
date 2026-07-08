@@ -136,6 +136,163 @@ async def test_submit_off_grid_qty_refused_locally_never_hits_the_wire():
     assert hits == ["/v2/products"]              # only the spec cache loaded
 
 
+# ------------------------------------------------------- products catalog
+
+def paged(result, after=None):
+    """A /v2/products page in Delta's envelope, with the meta.after cursor."""
+    return httpx.Response(200, json={"success": True, "result": result,
+                                     "meta": {"after": after, "before": None}})
+
+
+async def test_products_pagination_merges_all_pages():
+    """Delta paginates /v2/products (testnet lists hundreds of products);
+    consuming only page 1 made live perps 'unknown'. The adapter must follow
+    meta.after until exhausted and merge every page into the map."""
+    cursors = []
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/products":
+            after = request.url.params.get("after")
+            cursors.append(after)
+            if after is None:                    # page 1: options noise only
+                return paged([{"id": 1, "symbol": "C-BTC-90000-311226",
+                               "contract_value": "0.001"}], after="cur-1")
+            if after == "cur-1":                 # page 2: one perp
+                return paged([{"id": 27, "symbol": "BTCUSD",
+                               "contract_value": "0.001"}], after="cur-2")
+            assert after == "cur-2"              # page 3: last (no cursor)
+            return paged([{"id": 3136, "symbol": "ETHUSD",
+                           "contract_value": "0.01"}])
+        assert path == "/v2/orders"
+        return ok({"id": 55, "client_order_id": "K1"})
+
+    a = adapter(handler)
+    # ETHUSD lives on page 3 — reachable only if pagination was followed.
+    oid = await a.submit(client_order_id="K1", instrument="ETHUSD",
+                         side=Side.BUY, qty=Decimal("0.02"), limit_price=None)
+    assert oid == "55"
+    assert cursors == [None, "cur-1", "cur-2"]   # each cursor passed back once
+    assert set(a._products) >= {"BTCUSD", "ETHUSD"}   # pages MERGED, not last-wins
+    assert a._to_contracts("ETHUSD", Decimal("0.02")) == 2
+
+
+async def test_symbol_missing_from_pages_falls_back_to_single_product_fetch():
+    """A perp absent from the paginated listing (listing lag / dropped page)
+    must be resolved via GET /v2/products/{symbol} — the endpoint the spec
+    fetcher demonstrably uses — and merged into the map before the order."""
+    paths = []
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        paths.append(path)
+        if path == "/v2/products":
+            return paged([{"id": 27, "symbol": "BTCUSD",
+                           "contract_value": "0.001"}])   # no ETHUSD anywhere
+        if path == "/v2/products/ETHUSD":
+            return ok({"id": 3136, "symbol": "ETHUSD",
+                       "contract_value": "0.01", "state": "live"})
+        assert path == "/v2/orders"
+        return ok({"id": 88, "client_order_id": "K1"})
+
+    a = adapter(handler)
+    oid = await a.submit(client_order_id="K1", instrument="ETHUSD",
+                         side=Side.SELL, qty=Decimal("0.03"), limit_price=None)
+    assert oid == "88"
+    assert paths == ["/v2/products", "/v2/products/ETHUSD", "/v2/orders"]
+    # Merged: id and contract_value now serve conversions and fill parsing.
+    assert a._to_qty("ETHUSD", 3) == Decimal("0.03")
+    assert a._products_by_id[3136]["symbol"] == "ETHUSD"
+
+
+async def test_still_unknown_symbol_is_broker_reject_not_a_strand():
+    """Unknown after BOTH the paginated map and the per-symbol fallback:
+    nothing touched the exchange, so this must be BrokerReject — the exact
+    type OrderEngine.place maps to REJECTED. The live bug raised plain
+    BrokerError, which place() does not catch, stranding the order in
+    SUBMITTING until the stale-order sweep."""
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/products":
+            return paged([{"id": 27, "symbol": "BTCUSD",
+                           "contract_value": "0.001"}])
+        assert path == "/v2/products/NOPEUSD"
+        return err("not_found", 404)
+
+    with pytest.raises(BrokerReject, match="'NOPEUSD' not listed") as ei:
+        await adapter(handler).submit(
+            client_order_id="K1", instrument="NOPEUSD", side=Side.BUY,
+            qty=Decimal("1"), limit_price=None)
+    # Exact-type assertion: BrokerReject subclasses BrokerError, and the
+    # order path branches on the SUBCLASS — a plain BrokerError here would
+    # pass an isinstance check in the wrong direction and strand the order.
+    assert ei.type is BrokerReject
+
+
+async def test_failed_products_fetch_is_never_cached_as_loaded():
+    """A products fetch that dies MID-PAGINATION (page 2 5xx) must surface as
+    BrokerTimeout and leave NO partial map behind — the next call refetches
+    from page one and succeeds. Caching the failure would blind the adapter
+    (every symbol 'unknown') until restart, which is what a live outage
+    looked like."""
+    fetches = {"n": 0}
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/products":
+            fetches["n"] += 1
+            after = request.url.params.get("after")
+            if fetches["n"] == 1:                # 1st attempt, page 1: fine
+                return paged([{"id": 27, "symbol": "BTCUSD",
+                               "contract_value": "0.001"}], after="cur-1")
+            if fetches["n"] == 2:                # 1st attempt, page 2: dies
+                assert after == "cur-1"
+                return httpx.Response(502)
+            # 2nd attempt restarts from page ONE (no cursor) and completes.
+            assert after is None
+            return paged([{"id": 27, "symbol": "BTCUSD",
+                           "contract_value": "0.001"}])
+        assert path == "/v2/orders"
+        return ok({"id": 7, "client_order_id": "K1"})
+
+    a = adapter(handler)
+    with pytest.raises(BrokerTimeout):
+        await a.submit(client_order_id="K1", instrument="BTCUSD",
+                       side=Side.BUY, qty=Decimal("0.001"), limit_price=None)
+    assert a._products == {}                    # partial page-1 NOT cached
+    oid = await a.submit(client_order_id="K1", instrument="BTCUSD",
+                         side=Side.BUY, qty=Decimal("0.001"), limit_price=None)
+    assert oid == "7"                           # retried, fresh, complete
+    assert fetches["n"] == 3
+
+
+async def test_products_error_envelope_not_cached_and_rejects():
+    """success=false on the products fetch is a conclusive refusal (nothing
+    touched the exchange): BrokerReject, and the empty map is NOT cached —
+    the next call retries the fetch."""
+    hits = {"n": 0}
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/products":
+            hits["n"] += 1
+            if hits["n"] == 1:
+                return err("rate_limit_exceeded", 429)
+            return paged([{"id": 27, "symbol": "BTCUSD",
+                           "contract_value": "0.001"}])
+        assert path == "/v2/orders"
+        return ok({"id": 8, "client_order_id": "K1"})
+
+    a = adapter(handler)
+    with pytest.raises(BrokerReject, match="rate_limit_exceeded"):
+        await a.submit(client_order_id="K1", instrument="BTCUSD",
+                       side=Side.BUY, qty=Decimal("0.001"), limit_price=None)
+    assert a._products == {}
+    assert await a.submit(client_order_id="K1", instrument="BTCUSD",
+                          side=Side.BUY, qty=Decimal("0.001"),
+                          limit_price=None) == "8"
+
+
 # -------------------------------------------------------------- leverage
 
 async def test_submit_sets_leverage_once_per_symbol_before_the_order():

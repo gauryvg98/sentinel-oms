@@ -85,7 +85,8 @@ def _venue() -> Venue:
         ws = os.environ.get("SENTINEL_DELTA_WS", DELTA_WS)
         adapter = DeltaFuturesAdapter(
             os.environ["DELTA_KEY"], os.environ["DELTA_SECRET"],
-            symbols=DELTA_SYMBOLS, base_url=rest, ws_url=ws)
+            symbols=DELTA_SYMBOLS, base_url=rest, ws_url=ws,
+            leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")))
         return Venue(
             adapter=adapter, allow_short=True, predefined=DELTA_SYMBOLS,
             # Delta lists USD-quoted symbols; the global BTCUSDT default would
@@ -96,6 +97,7 @@ def _venue() -> Venue:
             make_bars=lambda s, iv: DeltaBarFeed(s, iv, rest_base=rest, ws_url=ws),
             fetch_spec=lambda s: fetch_delta_spec(rest, s),
             cap_for=_notional_cap,
+            leverage=int(os.environ.get("SENTINEL_LEVERAGE", "1")),
         )
 
     if venue == "bybit":

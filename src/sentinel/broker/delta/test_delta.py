@@ -136,6 +136,72 @@ async def test_submit_off_grid_qty_refused_locally_never_hits_the_wire():
     assert hits == ["/v2/products"]              # only the spec cache loaded
 
 
+# -------------------------------------------------------------- leverage
+
+async def test_submit_sets_leverage_once_per_symbol_before_the_order():
+    """First submit on a symbol POSTs the per-product leverage endpoint (before
+    the order) with the string body Delta expects; the second submit on the
+    same symbol must NOT repeat it — one attempt per symbol, cached."""
+    paths, lev_bodies = [], []
+
+    def handler(request):
+        p = urlparse(str(request.url)).path
+        if p != "/v2/products":
+            paths.append(p)
+
+        def leverage(req):
+            lev_bodies.append(req.content.decode())
+            return ok({"leverage": "25", "product_id": 27})
+        return route(request, {
+            "/v2/products/27/orders/leverage": leverage,
+            "/v2/orders": lambda r: ok({"id": 1, "client_order_id": "K"}),
+        })
+
+    a = DeltaFuturesAdapter(KEY, SECRET, symbols=("BTCUSD",), leverage=25,
+                            transport=httpx.MockTransport(handler))
+    await a.submit(client_order_id="K1", instrument="BTCUSD", side=Side.BUY,
+                   qty=Decimal("0.001"), limit_price=None)
+    await a.submit(client_order_id="K2", instrument="BTCUSD", side=Side.BUY,
+                   qty=Decimal("0.001"), limit_price=None)
+    assert paths == ["/v2/products/27/orders/leverage",
+                     "/v2/orders", "/v2/orders"]
+    assert lev_bodies == ['{"leverage":"25"}']
+
+
+async def test_submit_survives_leverage_failure_and_never_retries_it():
+    """A failing leverage call is best-effort: the order still goes out, and
+    the symbol is marked done so the submit path never re-blocks on it."""
+    lev_hits = []
+
+    def handler(request):
+        def leverage(req):
+            lev_hits.append(1)
+            return httpx.Response(500)          # transport-shaped failure
+        return route(request, {
+            "/v2/products/27/orders/leverage": leverage,
+            "/v2/orders": lambda r: ok({"id": 9, "client_order_id": "K"}),
+        })
+
+    a = DeltaFuturesAdapter(KEY, SECRET, symbols=("BTCUSD",), leverage=25,
+                            transport=httpx.MockTransport(handler))
+    oid = await a.submit(client_order_id="K1", instrument="BTCUSD",
+                         side=Side.BUY, qty=Decimal("0.001"), limit_price=None)
+    assert oid == "9"                           # order unblocked
+    await a.submit(client_order_id="K2", instrument="BTCUSD", side=Side.SELL,
+                   qty=Decimal("0.001"), limit_price=None)
+    assert lev_hits == [1]                      # one attempt, no retry
+
+
+async def test_submit_without_leverage_never_touches_the_endpoint():
+    """leverage=None (the default) leaves the account's product default alone
+    — route() asserts on any unexpected path, so a stray call would fail."""
+    a = adapter(lambda r: route(r, {
+        "/v2/orders": lambda req: ok({"id": 3, "client_order_id": "K1"})}))
+    assert await a.submit(client_order_id="K1", instrument="BTCUSD",
+                          side=Side.BUY, qty=Decimal("0.001"),
+                          limit_price=None) == "3"
+
+
 # --------------------------------------------------------------- query
 
 async def test_query_absent_only_after_open_and_history_both_miss():

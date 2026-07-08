@@ -140,12 +140,17 @@ class DeltaFuturesAdapter:
         ws_url: str = TESTNET_WS,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout_s: float = 5.0,
+        leverage: int | None = None,
     ) -> None:
         if not symbols:
             raise ValueError("configure at least one traded symbol")
         self._key = api_key
         self._secret = api_secret
         self._symbols = symbols
+        # Per-product leverage, applied lazily on the first submit per symbol
+        # (None = leave the account's product default untouched).
+        self._leverage = leverage
+        self._leverage_done: set[str] = set()
         self._ws_url = ws_url
         self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout_s,
                                        transport=transport)
@@ -269,6 +274,34 @@ class DeltaFuturesAdapter:
         """Integer contracts (possibly signed) -> decimal base qty."""
         return Decimal(str(contracts)) * self._contract_value(symbol)
 
+    async def _ensure_leverage(self, symbol: str) -> None:
+        """Best-effort per-product leverage, set once per symbol on its first
+        submit — POST /v2/products/{product_id}/orders/leverage with body
+        {"leverage": "<n>"} (verified against docs.delta.exchange, 'Change
+        Order Leverage'). Without this, orders sized for N x leverage hit the
+        account's product default (often 10x) and margin-reject.
+
+        Mirrors BinanceFuturesAdapter._ensure_configured: lazy so it works
+        regardless of boot order and only touches products actually traded;
+        any failure is logged and the symbol marked done anyway — the submit
+        path never blocks or retries on configuration (R1.3), and a genuinely
+        wrong leverage surfaces as the order's own margin reject."""
+        if self._leverage is None or symbol in self._leverage_done:
+            return
+        self._leverage_done.add(symbol)          # one attempt, even on failure
+        try:
+            pid = int(self._product(symbol)["id"])
+            resp = await self._request(
+                "POST", f"/v2/products/{pid}/orders/leverage",
+                json_body={"leverage": str(self._leverage)})
+            code = self._error_code(resp)
+            if code is not None:
+                log.warning("delta leverage %sx on %s refused [%s] (continuing)",
+                            self._leverage, symbol, code)
+        except Exception as e:  # noqa: BLE001
+            log.warning("delta leverage %sx on %s failed (continuing): %r",
+                        self._leverage, symbol, e)
+
     # ------------------------------------------------------------- adapter
 
     async def submit(
@@ -281,6 +314,7 @@ class DeltaFuturesAdapter:
         limit_price: Decimal | None,
     ) -> str:
         await self._ensure_products()
+        await self._ensure_leverage(instrument)
         params: dict = {
             "product_symbol": instrument,
             "size": self._to_contracts(instrument, qty),

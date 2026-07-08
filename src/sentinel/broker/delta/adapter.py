@@ -482,25 +482,59 @@ class DeltaFuturesAdapter:
 
     async def _fills_for(self, client_order_id: str, order: dict,
                          symbol: str) -> tuple[BrokerFill, ...]:
-        """Executions for one order from /v2/fills. Filtered by order id
-        server-side (param) AND client-side (belt and braces — an ignored
-        filter must not attribute someone else's fills to this order). Fill ids
-        are Delta's stable exec ids; the ledger dedups on them (R1.7)."""
-        resp = await self._request("GET", "/v2/fills", params={
-            "order_id": str(order.get("id", "")), "page_size": "100"})
-        rows = self._unwrap(resp)
-        if not isinstance(rows, list):
-            rows = []
+        """Executions for one order from /v2/fills. The endpoint is
+        CURSOR-PAGINATED exactly like /v2/products (meta.after passed back as
+        the `after` param — docs.delta.exchange, 'GET user fills by filters')
+        and it has NO server-side order_id filter: the documented params are
+        only product_ids / contract_types / start_time / end_time plus the
+        cursor. A page-1-only read therefore undercounts any order filled in
+        many fragments — live, an 82-contract order backfilled as 6 and the
+        false divergence HALTed reconciliation.
+
+        So: EVERY page is consumed before anything is returned. The sweep is
+        narrowed with product_ids (pure narrowing — it can never exclude this
+        order's own fills; start_time is deliberately NOT sent, because a
+        created_at unit/parse slip would silently exclude exactly the fills
+        being recounted). Rows are attributed by order id CLIENT-SIDE — the
+        only order-level filter the API allows, and the correctness backstop
+        either way. A mid-pagination transport/5xx failure raises (never a
+        partial tuple), and a cursor that outruns the hard page cap is
+        UNPROVABLE -> BrokerTimeout so reconcile retries — a truncated fill
+        set returned as complete is precisely the live bug. Fill ids are
+        Delta's stable exec ids; the ledger dedups on them (R1.7)."""
         oid = str(order.get("id", ""))
-        return tuple(
-            BrokerFill(
-                client_order_id=client_order_id,
-                exec_id=str(f["id"]),
-                qty=self._to_qty(symbol, f["size"]),
-                price=Decimal(str(f["price"])),
-            )
-            for f in rows if str(f.get("order_id", "")) == oid
-        )
+        base_params: dict[str, str] = {"page_size": "500"}
+        if order.get("product_id") is not None:
+            base_params["product_ids"] = str(order["product_id"])
+        params = dict(base_params)
+        out: list[BrokerFill] = []
+        for _ in range(50):                     # cursor-loop hard stop
+            resp = await self._request("GET", "/v2/fills", params=params)
+            if resp.status_code >= 500:
+                raise BrokerTimeout(
+                    f"fills for {client_order_id}: HTTP {resp.status_code}")
+            code = self._error_code(resp)
+            if code is not None:
+                raise BrokerError(f"fills for {client_order_id}: [{code}]")
+            body = resp.json()
+            rows = body.get("result") or []
+            if isinstance(rows, list):
+                out.extend(
+                    BrokerFill(
+                        client_order_id=client_order_id,
+                        exec_id=str(f["id"]),
+                        qty=self._to_qty(symbol, f["size"]),
+                        price=Decimal(str(f["price"])),
+                    )
+                    for f in rows if str(f.get("order_id", "")) == oid
+                )
+            after = (body.get("meta") or {}).get("after")
+            if not after:
+                return tuple(out)
+            params = dict(base_params, after=str(after))
+        raise BrokerTimeout(
+            f"fills for {client_order_id}: /v2/fills cursor exceeded 50 "
+            "pages — refusing to return a truncated fill set")
 
     async def query_positions(self) -> dict[str, Decimal]:
         """Wallet balances for the equity display (asset -> balance). The

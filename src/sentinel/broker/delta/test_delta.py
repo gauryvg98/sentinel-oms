@@ -427,8 +427,9 @@ async def test_query_reports_fill_with_base_qty_and_stable_exec_ids():
                 {"id": 77, "client_order_id": "K1", "product_id": 27,
                  "product_symbol": "BTCUSD", "state": "closed",
                  "size": 10, "unfilled_size": 0}),
-            # A foreign fill (order 78) rides along: the client-side order_id
-            # filter must drop it even if the server ignored our query param.
+            # A foreign fill (order 78) rides along: /v2/fills has NO
+            # order_id filter server-side, so the client-side filter is the
+            # only thing keeping someone else's fills off this order.
             "/v2/fills": lambda r: ok([
                 {"id": 9, "order_id": 77, "size": 10, "price": "60000"},
                 {"id": 10, "order_id": 78, "size": 5, "price": "1"},
@@ -474,6 +475,96 @@ async def test_query_partial_open_order_maps_to_partial():
     v = await adapter(handler).query_order("K1")
     assert v.state is BrokerOrderState.PARTIAL
     assert v.filled_qty == Decimal("0.004")
+
+
+# ------------------------------------------------------ fills pagination
+
+def fills_order(request):
+    """The order lookup every fills-pagination test shares: K1, 82 contracts
+    fully filled — the live shape (UI-013bc315021c backfilled 6 of 82)."""
+    return ok({"id": 77, "client_order_id": "K1", "product_id": 27,
+               "product_symbol": "BTCUSD", "state": "closed",
+               "size": 82, "unfilled_size": 0})
+
+
+async def test_fills_pagination_merges_all_pages_into_the_view():
+    """/v2/fills is cursor-paginated like /v2/products; an order filled in
+    many fragments overflows page 1, and a page-1-only read undercounted the
+    backfill (6 of 82) into a false ReconciliationDivergence HALT. The
+    adapter must follow meta.after until exhausted and the view's filled/
+    fills must reflect EVERY page."""
+    cursors = []
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/fills":
+            # Narrowed server-side by product (the only safe filter the API
+            # offers — no order_id param exists), full page size.
+            assert request.url.params.get("product_ids") == "27"
+            assert request.url.params.get("page_size") == "500"
+            after = request.url.params.get("after")
+            cursors.append(after)
+            if after is None:                    # page 1: fills 1..30
+                return paged([{"id": i, "order_id": 77, "size": 1,
+                               "price": "60000"} for i in range(1, 31)],
+                             after="cur-1")
+            if after == "cur-1":                 # page 2: fills 31..60 + noise
+                return paged([{"id": i, "order_id": 77, "size": 1,
+                               "price": "60100"} for i in range(31, 61)]
+                             + [{"id": 999, "order_id": 78, "size": 5,
+                                 "price": "1"}],  # foreign order's fill
+                             after="cur-2")
+            assert after == "cur-2"              # page 3: fills 61..82, last
+            return paged([{"id": i, "order_id": 77, "size": 1,
+                           "price": "60200"} for i in range(61, 83)])
+        return route(request, {
+            "/v2/orders/client_order_id/K1": fills_order})
+
+    v = await adapter(handler).query_order("K1")
+    assert cursors == [None, "cur-1", "cur-2"]   # each cursor passed back once
+    assert v.state is BrokerOrderState.FILLED
+    assert v.filled_qty == Decimal("0.082")      # 82 contracts * 0.001
+    assert len(v.fills) == 82                    # ALL pages; foreign row dropped
+    assert {f.exec_id for f in v.fills} == {str(i) for i in range(1, 83)}
+    assert sum(f.qty for f in v.fills) == Decimal("0.082")
+
+
+async def test_fills_mid_pagination_5xx_is_timeout_never_a_partial_set():
+    """Page 2 dying MID-WALK must raise BrokerTimeout — returning page 1 as
+    if complete is exactly the undercount that HALTed reconciliation live.
+    Unprovable -> reconcile retries."""
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/fills":
+            if request.url.params.get("after") is None:
+                return paged([{"id": 1, "order_id": 77, "size": 6,
+                               "price": "60000"}], after="cur-1")
+            return httpx.Response(502)
+        return route(request, {
+            "/v2/orders/client_order_id/K1": fills_order})
+
+    with pytest.raises(BrokerTimeout):
+        await adapter(handler).query_order("K1")
+
+
+async def test_fills_cursor_past_hard_cap_is_timeout_not_truncation():
+    """A cursor that never terminates (or a genuinely enormous sweep) hits
+    the 50-page hard stop: the fill set is unprovable, so BrokerTimeout —
+    NEVER a silently-truncated tuple handed to the reconciler as complete."""
+    pages = {"n": 0}
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/v2/fills":
+            pages["n"] += 1
+            return paged([{"id": pages["n"], "order_id": 77, "size": 1,
+                           "price": "60000"}], after=f"cur-{pages['n']}")
+        return route(request, {
+            "/v2/orders/client_order_id/K1": fills_order})
+
+    with pytest.raises(BrokerTimeout, match="truncated"):
+        await adapter(handler).query_order("K1")
+    assert pages["n"] == 50                      # walked to the cap, no further
 
 
 # ------------------------------------------------- positions & balances

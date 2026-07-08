@@ -280,6 +280,8 @@ async def _serve() -> None:
             stop_atr_mult=Decimal(os.environ.get("SENTINEL_STOP_ATR_MULT", "2")),
             fallback_stop_pct=Decimal(os.environ.get("SENTINEL_STOP_FALLBACK_PCT", "0.02")),
             rr=Decimal(os.environ.get("SENTINEL_RR", "2")),
+            trail=os.environ.get("SENTINEL_TRAIL", "").lower()
+                  in ("1", "true", "yes"),
         )
         print(f"  SIZING: risk-based · {risk_params.risk_pct} equity/trade · "
               f"{risk_params.max_leverage}x max lev · stop {risk_params.stop_atr_mult}×ATR "

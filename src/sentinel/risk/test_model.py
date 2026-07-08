@@ -108,3 +108,33 @@ def test_breach_detects_stop_and_take_for_both_sides():
     assert breached(False, Decimal("106"), Decimal("105"), Decimal("90")) == "STOP"
     assert breached(False, Decimal("89"), Decimal("105"), Decimal("90")) == "TAKE"
     assert breached(False, Decimal("100"), Decimal("105"), Decimal("90")) is None
+
+
+def test_trail_ratchet_long_only_tightens():
+    from sentinel.risk.model import trail_ratchet
+    e, sd = Decimal("100"), Decimal("1")
+    wm, s1 = trail_ratchet(True, e, Decimal("100"), sd, None, None)
+    assert s1 == Decimal("99")                    # entry-anchored start
+    wm, s2 = trail_ratchet(True, e, Decimal("105"), sd, wm, s1)
+    assert s2 == Decimal("104")                   # trails the new peak
+    wm, s3 = trail_ratchet(True, e, Decimal("102"), sd, wm, s2)
+    assert s3 == Decimal("104") and wm == Decimal("105")  # NEVER loosens
+
+
+def test_trail_ratchet_short_mirror():
+    from sentinel.risk.model import trail_ratchet
+    e, sd = Decimal("100"), Decimal("1")
+    wm, s1 = trail_ratchet(False, e, Decimal("100"), sd, None, None)
+    assert s1 == Decimal("101")
+    wm, s2 = trail_ratchet(False, e, Decimal("95"), sd, wm, s1)
+    assert s2 == Decimal("96")
+    wm, s3 = trail_ratchet(False, e, Decimal("98"), sd, wm, s2)
+    assert s3 == Decimal("96") and wm == Decimal("95")
+
+
+def test_trail_ratchet_widening_stop_dist_cannot_loosen():
+    from sentinel.risk.model import trail_ratchet
+    e = Decimal("100")
+    wm, s1 = trail_ratchet(True, e, Decimal("105"), Decimal("1"), None, None)
+    wm, s2 = trail_ratchet(True, e, Decimal("105"), Decimal("3"), wm, s1)
+    assert s2 == s1                               # wider sd -> ratchet holds

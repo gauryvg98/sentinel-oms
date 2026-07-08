@@ -55,6 +55,10 @@ primary_region = "sin"
   SENTINEL_SMA_STOP_CAP_PCT = "0.002"
   SENTINEL_SMA_STOP_FLOOR_PCT = "0.001"
   SENTINEL_RR = "2.5"
+  # Ratcheting trail: the SL follows the position's best price at the stop
+  # distance and only ever tightens; fixed TP is disabled while trailing (the
+  # trail is the profit-taker — runs are ridden, giveback bounded to ~one sd).
+  SENTINEL_TRAIL = "true"
 
 [http_service]
   internal_port = 8000

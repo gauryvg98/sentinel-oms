@@ -150,6 +150,7 @@ class StrategyRunner:
         self._entry_fn = entry_fn
         self._suppressed = None          # stance we exited on a stop/TP — no re-entry until it flips
         self._last_bracket: dict | None = None   # current SL/TP levels, for the UI
+        self._trail: dict | None = None          # ratchet state {sign, hwm, stop}
 
         self.running = False
         self.last_decision: Decision | None = None
@@ -275,10 +276,12 @@ class StrategyRunner:
         paused."""
         if not self.running or self._risk_params is None:
             self._last_bracket = None
+            self._trail = None
             return
         pos = await self._position_fn()
         if pos == 0:
             self._last_bracket = None
+            self._trail = None
             return
         entry = await self._entry_fn() if self._entry_fn is not None else None
         price = self._bid_fn() or self._ask_fn()
@@ -291,8 +294,24 @@ class StrategyRunner:
         if not sd or sd <= 0:
             return
         is_long = pos > 0
-        stop, take = brackets(entry, is_long, sd, p.rr)
-        self._last_bracket = {"stop": stop, "take": take, "is_long": is_long}
+        if p.trail:
+            # Ratcheting trail: stop follows the peak at sd and only tightens;
+            # no fixed TP — the trail IS the profit-taker (gains run, and a
+            # run's giveback is bounded to ~sd from its best price).
+            from sentinel.risk.model import trail_ratchet
+            sign = 1 if is_long else -1
+            t = self._trail
+            if t is None or t.get("sign") != sign:
+                t = {"sign": sign, "hwm": None, "stop": None}
+            t["hwm"], stop = trail_ratchet(is_long, entry, price, sd,
+                                           t["hwm"], t["stop"])
+            t["stop"] = stop
+            self._trail = t
+            take = None
+        else:
+            stop, take = brackets(entry, is_long, sd, p.rr)
+        self._last_bracket = {"stop": stop, "take": take, "is_long": is_long,
+                              "trail": bool(p.trail)}
         hit = breached(is_long, price, stop, take)
         if hit is None:
             return
@@ -303,6 +322,7 @@ class StrategyRunner:
             await self._reduce_buy_fn(qty)
         self._suppressed = d.stance if d is not None else None
         self._last_bracket = None
+        self._trail = None
         self.last_action = f"{hit} hit @ {format(price.normalize(), 'f')} — flattened"
         await self._on_change()
 

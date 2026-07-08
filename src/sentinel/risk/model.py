@@ -31,6 +31,9 @@ class RiskParams:
     #                             rr <= 0 disables the fixed take-profit entirely:
     #                             a trend-follower then rides to its own signal
     #                             flip (opposite cross), protected only by the stop.
+    trail: bool = False        # ratcheting trail: the stop follows the peak at
+    #                            stop_dist and only ever TIGHTENS; no fixed TP
+    #                            (the trail is the profit-taker — gains run).
 
 
 def atr(candles: list[dict], period: int = 14) -> Decimal | None:
@@ -106,3 +109,25 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
     qty = (params.risk_pct * equity * conviction) / stop_dist
     lev_cap_qty = (equity * params.max_leverage) / price   # never over-lever
     return min(qty, lev_cap_qty)
+
+
+def trail_ratchet(is_long: bool, entry: Decimal, price: Decimal,
+                  stop_dist: Decimal, hwm: Decimal | None,
+                  prev_stop: Decimal | None) -> tuple[Decimal, Decimal]:
+    """Ratcheting trailing stop. Track the position's best price (high-water
+    mark for longs, low-water for shorts) and keep the stop `stop_dist` behind
+    it — MONOTONIC: the stop may only tighten, never loosen, even if stop_dist
+    widens later. Floor/ceiling at the entry-anchored initial stop, so it is
+    never looser than the static bracket would have been. Returns
+    (new_watermark, new_stop). Pure."""
+    if is_long:
+        wm = price if hwm is None else max(hwm, price)
+        stop = max(entry - stop_dist, wm - stop_dist)
+        if prev_stop is not None:
+            stop = max(stop, prev_stop)          # ratchet: up only
+    else:
+        wm = price if hwm is None else min(hwm, price)
+        stop = min(entry + stop_dist, wm + stop_dist)
+        if prev_stop is not None:
+            stop = min(stop, prev_stop)          # ratchet: down only
+    return wm, stop

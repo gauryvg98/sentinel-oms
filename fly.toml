@@ -38,12 +38,14 @@ primary_region = "sin"
   # clear the 10x sizing headroom (~pool/3 × 10 ≈ 13.3k notional) or it would
   # silently clamp effective leverage; risk_pct + stops are the real protection.
   SENTINEL_MAX_NOTIONAL = "70000"
-  # 100x exchange margin setting: sizing stays RISK-driven (eff lev =
+  # 25x: Binance leverage BRACKETS cap max notional per position at each
+  # leverage tier — at 100x alts allow only ~5-10k notional and our 25-50k
+  # risk-sized orders got -2027 rejects. 25x brackets allow 100k+. Old note:: sizing stays RISK-driven (eff lev =
   # risk_pct/stop_pct = 10-20x with 2% risk and 0.1-0.2% stops), so 100x mostly
   # means less margin posted per position. Symbols whose Binance bracket caps
   # below 100 reject the setting and keep their previous leverage (non-fatal).
-  SENTINEL_LEVERAGE = "100"
-  SENTINEL_MAX_LEVERAGE = "100"
+  SENTINEL_LEVERAGE = "25"
+  SENTINEL_MAX_LEVERAGE = "25"
   # 5%: eff lev = risk_pct/stop_pct -> 25x at the 0.2% stop cap, 50x at the
   # 0.1% floor. A stop-out costs ~5% of the bot's equity share. Aggressive by
   # instruction — the 100x exchange setting keeps posted margin small.

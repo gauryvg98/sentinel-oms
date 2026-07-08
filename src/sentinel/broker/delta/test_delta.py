@@ -477,6 +477,103 @@ async def test_query_partial_open_order_maps_to_partial():
     assert v.filled_qty == Decimal("0.004")
 
 
+# ----------------------------------------------- self-trade prevention
+# Row shapes below are pinned VERBATIM from Delta India testnet (2026-07-08,
+# orders UI-1537ee9ee3a7 / UI-013bc315021c): the order row's exchange id is
+# `id` (INT) on both lookup paths, /v2/fills carries it as `order_id` (STR),
+# and STP-busted size is deducted from unfilled_size with the busted count in
+# meta_data.self_trade_size — state "closed", average_fill_price null, and NO
+# fills rows for the busted contracts.
+
+
+async def test_query_fully_self_traded_order_is_canceled_with_zero_filled():
+    """Live halt UI-1537ee9ee3a7: sell 76, entirely STP-busted. size 76 /
+    unfilled 0 reads as "filled 76" unless self_trade_size is netted out —
+    /v2/fills correctly has NOTHING, and reconciliation halted on
+    'filled 0 local vs 76 broker after backfill'. Net fill is 0, so the
+    fills sweep must not even run, and "closed" here means the venue killed
+    the order (STP), not that it filled -> CANCELED."""
+    paths = []
+
+    def handler(request):
+        paths.append(urlparse(str(request.url)).path)
+        return route(request, {
+            # Live: this endpoint refuses terminal orders with HTTP 400 +
+            # {"error":{"code":"order_not_found"}}, not a plain 404.
+            "/v2/orders/client_order_id/UI-1537ee9ee3a7":
+                lambda r: err("order_not_found", 400),
+            "/v2/orders/history": lambda r: ok([
+                {"id": 2165490960, "client_order_id": "UI-1537ee9ee3a7",
+                 "product_id": 27, "product_symbol": "BTCUSD",
+                 "state": "closed", "size": 76, "unfilled_size": 0,
+                 "average_fill_price": None, "paid_commission": "0",
+                 "meta_data": {"self_trade_size": "76", "otc": False}},
+            ]),
+        })
+
+    v = await adapter(handler).query_order("UI-1537ee9ee3a7")
+    assert v is not None
+    assert v.broker_order_id == "2165490960"
+    assert v.filled_qty == Decimal("0")
+    assert v.fills == ()
+    assert v.state is BrokerOrderState.CANCELED  # busted, not filled
+    assert "/v2/fills" not in paths              # nothing to attribute
+
+
+async def test_query_partially_self_traded_order_books_only_real_fills():
+    """Live counterpart UI-013bc315021c: buy 82, 6 really traded, 76 STP-
+    busted. filled must be 82 - 0 - 76 = 6, sourced from the one real fill —
+    whose order_id arrives as a STRING ('2165490970') against the order
+    row's INT id, so attribution must compare stringified."""
+    def handler(request):
+        return route(request, {
+            "/v2/orders/client_order_id/UI-013bc315021c":
+                lambda r: err("order_not_found", 400),
+            "/v2/orders/history": lambda r: ok([
+                {"id": 2165490970, "client_order_id": "UI-013bc315021c",
+                 "product_id": 27, "product_symbol": "BTCUSD",
+                 "state": "closed", "size": 82, "unfilled_size": 0,
+                 "average_fill_price": "1.073",
+                 "meta_data": {"self_trade_size": "76"}},
+            ]),
+            "/v2/fills": lambda r: ok([
+                # Live /v2/fills shape: string order_id, string size/price.
+                {"id": "8c6e11b827e14203b7c4c11c87eefd18",
+                 "order_id": "2165490970", "product_id": 27,
+                 "size": "6", "price": "1.073"},
+                {"id": "ffffffffffffffffffffffffffffffff",
+                 "order_id": "2165490197", "product_id": 27,
+                 "size": "82", "price": "1.071"},   # someone else's order
+            ]),
+        })
+
+    v = await adapter(handler).query_order("UI-013bc315021c")
+    assert v.filled_qty == Decimal("0.006")      # 6 contracts * 0.001
+    assert len(v.fills) == 1
+    assert v.fills[0].exec_id == "8c6e11b827e14203b7c4c11c87eefd18"
+    assert v.fills[0].qty == Decimal("0.006")
+    assert v.fills[0].price == Decimal("1.073")
+    # Remainder was venue-killed by STP, not filled.
+    assert v.state is BrokerOrderState.CANCELED
+
+
+async def test_fills_attribution_refuses_an_order_row_without_an_id():
+    """An order row missing `id` cannot be attributed: str('') would claim
+    every fills row that itself lacks order_id. Raise, never guess."""
+    def handler(request):
+        return route(request, {
+            "/v2/orders/client_order_id/K1": lambda r: ok(
+                {"client_order_id": "K1", "product_id": 27,
+                 "product_symbol": "BTCUSD", "state": "closed",
+                 "size": 10, "unfilled_size": 0}),
+            "/v2/fills": lambda r: ok([
+                {"id": 9, "size": 10, "price": "60000"}]),  # no order_id
+        })
+
+    with pytest.raises(BrokerError, match="no id"):
+        await adapter(handler).query_order("K1")
+
+
 # ------------------------------------------------------ fills pagination
 
 def fills_order(request):

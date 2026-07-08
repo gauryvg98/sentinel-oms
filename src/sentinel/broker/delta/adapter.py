@@ -408,6 +408,24 @@ class DeltaFuturesAdapter:
         raise BrokerError(f"cancel {client_order_id}: [{code}]")
 
     async def query_order(self, client_order_id: str) -> BrokerOrderView | None:
+        """Both lookup paths (direct GET and the history sweep) return the
+        same row shape — verified live: the exchange order id is `id` (int,
+        e.g. 2165490960) on BOTH, while /v2/fills rows carry it as `order_id`
+        (str, e.g. "2165490960"); attribution stringifies both sides.
+
+        SELF-TRADE PREVENTION is the sharp edge here. When an order crosses
+        the account's own resting order, Delta busts the matching size: the
+        row reports state "closed" with unfilled_size already REDUCED by the
+        busted contracts and meta_data.self_trade_size carrying the count —
+        but NOTHING traded for that size (average_fill_price null, zero
+        commission) and /v2/fills has NO rows for it. Live, a 76-contract
+        order fully STP-busted read as "filled 76" from size-unfilled while
+        the fills sweep correctly found 0, and reconciliation HALTed on
+        "filled 0 local vs 76 broker". Economic fill count is therefore
+        size - unfilled_size - self_trade_size, and a "closed" order whose
+        size was partly/fully busted maps to CANCELED — the STP remainder is
+        dead, exactly the unsolicited-cancel semantics the domain already
+        assigns to STP (transition.py, CancelConfirmed)."""
         order = await self._find_order(client_order_id)
         if order is None:
             return None
@@ -418,7 +436,11 @@ class DeltaFuturesAdapter:
             symbol = p["symbol"] if p else ""
         size = Decimal(str(order.get("size", "0")))
         unfilled = Decimal(str(order.get("unfilled_size", "0")))
-        filled_contracts = size - unfilled
+        meta = order.get("meta_data") or {}
+        self_traded = Decimal(str(meta.get("self_trade_size") or "0"))
+        filled_contracts = size - unfilled - self_traded
+        if filled_contracts < 0:                # defensive: never negative
+            filled_contracts = Decimal("0")
 
         fills: tuple[BrokerFill, ...] = ()
         if filled_contracts > 0:
@@ -427,6 +449,11 @@ class DeltaFuturesAdapter:
         state = _STATUS_MAP.get(order.get("state", ""), BrokerOrderState.WORKING)
         if state is BrokerOrderState.WORKING and filled_contracts > 0:
             state = BrokerOrderState.PARTIAL
+        if state is BrokerOrderState.FILLED and self_traded > 0 \
+                and filled_contracts < size:
+            # "closed" but part/all of the size was STP-busted, not traded:
+            # the remainder is venue-cancelled, so FILLED would overstate.
+            state = BrokerOrderState.CANCELED
         return BrokerOrderView(
             client_order_id=client_order_id,
             broker_order_id=str(order.get("id", "")),
@@ -501,8 +528,23 @@ class DeltaFuturesAdapter:
         partial tuple), and a cursor that outruns the hard page cap is
         UNPROVABLE -> BrokerTimeout so reconcile retries — a truncated fill
         set returned as complete is precisely the live bug. Fill ids are
-        Delta's stable exec ids; the ledger dedups on them (R1.7)."""
-        oid = str(order.get("id", ""))
+        Delta's stable exec ids; the ledger dedups on them (R1.7).
+
+        Attribution key, pinned live: the order row (direct GET and history
+        sweep alike) carries the exchange id as `id` (int); each fill row
+        carries it as `order_id` (str). Both sides are stringified before
+        comparing so an int/str drift on either can never zero the match. An
+        order row with NO id at all cannot be attributed — that raises rather
+        than matching rows whose own `order_id` is missing (str(None-ish) ==
+        "" would claim them)."""
+        raw_oid = order.get("id")
+        if raw_oid is None:                     # unattributable — never guess
+            raw_oid = order.get("order_id")
+        oid = str(raw_oid) if raw_oid is not None else ""
+        if not oid:
+            raise BrokerError(
+                f"fills for {client_order_id}: order row carries no id — "
+                "cannot attribute fills")
         base_params: dict[str, str] = {"page_size": "500"}
         if order.get("product_id") is not None:
             base_params["product_ids"] = str(order["product_id"])

@@ -57,6 +57,8 @@ primary_region = "sin"
   # instruction — the 100x exchange setting keeps posted margin small.
   SENTINEL_RISK_PCT = "0.10"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
+  # Delta settles in USD (not USDT/USDC) — count USD as the margin asset.
+  SENTINEL_MARGIN_ASSETS = "USD"
   # Tight stops (0.1-0.2% of price) with TP at 2.5x the stop — 5.5x proved
   # unreachable on 1m bars (stops always hit first). 2.5x breaks even at ~29%
   # winners. Loss per stop-out stays ~risk_pct of the bot's equity share.

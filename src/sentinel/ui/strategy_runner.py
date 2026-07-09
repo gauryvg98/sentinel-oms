@@ -148,6 +148,9 @@ class StrategyRunner:
         # (price) -> TOTAL |position| qty the bot's real margin can carry
         # (held + resting + free headroom). None -> open-loop sizing as before.
         margin_cap_fn: Callable[[Decimal], Awaitable[Decimal | None]] | None = None,
+        # (price) -> max |position| qty under the Binance leverage-bracket
+        # notionalCap at our leverage (kills -2027). None -> no bracket clamp.
+        bracket_cap_fn: Callable[[Decimal], Awaitable[Decimal | None]] | None = None,
         # (side, qty, stop) -> reduce-only STOP_MARKET resting ON the exchange
         # (Terminal.place_stop). None -> no exchange-native backstop possible.
         place_stop_fn: Callable[[str, Decimal, Decimal],
@@ -176,6 +179,7 @@ class StrategyRunner:
         self._risk_params = risk_params
         self._entry_fn = entry_fn
         self._margin_cap_fn = margin_cap_fn
+        self._bracket_cap_fn = bracket_cap_fn
         self._suppressed = None          # stance we exited on a stop/TP — no re-entry until it flips
         # Bars-based re-entry: >0 lets a bot re-enter the SAME regime after N
         # closed bars post-stop (0 = classic wait-for-flip only).
@@ -233,7 +237,8 @@ class StrategyRunner:
         return max(Decimal(0), min(Decimal(1), w))
 
     def _target(self, bid: Decimal | None, ask: Decimal | None,
-                margin_qty_cap: Decimal | None = None) -> Decimal | None:
+                margin_qty_cap: Decimal | None = None,
+                bracket_qty_cap: Decimal | None = None) -> Decimal | None:
         """Signed desired position from stance + conviction. LONG -> +qty (sized
         off the bid, the side we'd buy into); SHORT -> -qty (off the ask). FLAT
         -> 0 (needs no price, so exits never block on the feed). A SHORT on a
@@ -274,7 +279,7 @@ class StrategyRunner:
             raw = risk_sized_qty(
                 self._risk_params, equity=self._equity_fn(), price=price,
                 stop_dist=self._stop_dist(price), conviction=self._weight(d),
-                margin_qty_cap=margin_qty_cap)
+                margin_qty_cap=margin_qty_cap, bracket_qty_cap=bracket_qty_cap)
         else:
             raw = self._weight(d) * self._budget_fn() / price   # fixed-notional budget
         qty = raw.quantize(self._lot_step, rounding=ROUND_DOWN)
@@ -318,12 +323,18 @@ class StrategyRunner:
         # out) BEFORE sizing. Resolved here because it needs I/O and _target is
         # sync. Either touch price works as the reference — the cap's 10% safety
         # buffer dwarfs a spread's worth of difference.
-        margin_qty_cap = None
-        if self._margin_cap_fn is not None and (ref := bid or ask):
-            margin_qty_cap = await self._margin_cap_fn(ref)
+        margin_qty_cap = bracket_qty_cap = None
+        if (ref := bid or ask):
+            if self._margin_cap_fn is not None:
+                margin_qty_cap = await self._margin_cap_fn(ref)
+            # Binance leverage-bracket clamp: notional under the symbol's cap at
+            # our leverage. Async (fetches/caches the bracket), so resolved here
+            # like margin_qty_cap and passed into the sync/pure _target.
+            if self._bracket_cap_fn is not None:
+                bracket_qty_cap = await self._bracket_cap_fn(ref)
         plan = plan_action(
             await self._position_fn(), bid, ask, await self._open_entry_fn(),
-            self._target(bid, ask, margin_qty_cap),
+            self._target(bid, ask, margin_qty_cap, bracket_qty_cap),
             reprice_frac=self._reprice_frac, rebalance_frac=self._rebalance_frac,
             lot_step=self._lot_step,
         )

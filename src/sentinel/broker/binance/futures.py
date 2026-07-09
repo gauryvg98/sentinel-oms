@@ -115,6 +115,10 @@ class BinanceFuturesAdapter:
         self._synced = False
         self._configured = False
         self._symbol_of: dict[str, str] = {}   # client_order_id -> symbol
+        # Per-symbol leverage-bracket cap (max position notional at our leverage),
+        # lazily fetched from /fapi/v1/leverageBracket. A failed fetch is NOT
+        # cached (returns None, retried next call) — only known caps live here.
+        self._max_notional: dict[str, Decimal] = {}
         self._http = httpx.AsyncClient(
             base_url=base_url,
             headers={"X-MBX-APIKEY": api_key},
@@ -301,6 +305,57 @@ class BinanceFuturesAdapter:
                     liq_price=liq if liq > 0 else None,   # 0 = no liq (cross, safe)
                     mark_price=Decimal(p["markPrice"]))
         return out
+
+    async def max_notional(self, symbol: str) -> Decimal | None:
+        """Largest position notional `symbol` may hold at our configured leverage
+        — the Binance leverage-bracket cap. Crossing it is the -2027 rejection
+        ('Exceeded the maximum allowable position at current leverage').
+
+        Binance defines LEVERAGE BRACKETS per symbol: an ascending list of tiers,
+        each with an `initialLeverage` ceiling and a `notionalCap`. A position at
+        leverage L must fit under the notionalCap of the tier whose max leverage
+        still permits L — i.e. the LOWEST-tier bracket whose initialLeverage >= L.
+        That tier's notionalCap is the most notional we may hold at leverage L.
+
+        Lazily fetched (signed GET /fapi/v1/leverageBracket) and cached per
+        symbol. A fetch failure returns None (fail-open: callers apply no bracket
+        clamp, existing behavior) and is retried next call — None is never cached
+        as 'known'."""
+        cached = self._max_notional.get(symbol)
+        if cached is not None:
+            return cached
+        try:
+            resp = await self._signed("GET", "/fapi/v1/leverageBracket",
+                                       {"symbol": symbol})
+            if resp.status_code >= 400:
+                code, msg = self._error_code(resp)
+                log.warning("leverageBracket %s failed: [%s] %s", symbol, code, msg)
+                return None
+            body = resp.json()
+        except Exception as e:  # noqa: BLE001 — fail-open, retried next call
+            log.warning("leverageBracket %s error (%r); no bracket clamp", symbol, e)
+            return None
+
+        # Response is a list of {symbol, brackets:[...]}. With ?symbol= it holds
+        # one entry, but tolerate the account-wide shape by picking our symbol.
+        entry = None
+        for item in body if isinstance(body, list) else [body]:
+            if item.get("symbol") == symbol:
+                entry = item
+                break
+        if entry is None and isinstance(body, list) and len(body) == 1:
+            entry = body[0]
+        brackets = (entry or {}).get("brackets") or []
+        # Ascending tiers: the first whose initialLeverage >= our leverage is the
+        # binding one. Its notionalCap is the max position notional at leverage L.
+        for b in sorted(brackets, key=lambda x: int(x["initialLeverage"])):
+            if int(b["initialLeverage"]) >= self._leverage:
+                cap = Decimal(str(b["notionalCap"]))
+                self._max_notional[symbol] = cap
+                return cap
+        log.warning("leverageBracket %s: no tier covers leverage %d; no clamp",
+                    symbol, self._leverage)
+        return None
 
     # --------------------------------------------------------- user stream
 

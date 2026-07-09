@@ -138,5 +138,15 @@ class BrokerAdapter(Protocol):
         implement it; POSITION reconciliation simply skips them."""
         return {}
 
+    async def max_notional(self, symbol: str) -> Decimal | None:
+        """Largest position notional this symbol may hold at our configured
+        leverage — the Binance leverage-bracket cap (crossing it is the -2027
+        rejection). None = unknown / not enforced (fail-open: no extra clamp).
+
+        Optional, like open_positions: only leveraged futures venues implement
+        it. Callers reach it via getattr(broker, "max_notional", None) so
+        spot/sim/other adapters that don't define it simply skip the clamp."""
+        return None
+
     def events(self) -> AsyncIterator[BrokerEvent]:
         ...

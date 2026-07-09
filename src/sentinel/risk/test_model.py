@@ -88,6 +88,44 @@ def test_margin_cap_zero_or_negative_free_margin_sizes_to_zero():
     assert risk_sized_qty(P, margin_qty_cap=Decimal("-0.5"), **kw) == 0
 
 
+# ---- Binance leverage-bracket clamp (kills -2027) ---------------------------
+
+def test_bracket_cap_binds_when_tighter_than_risk_and_leverage():
+    # The bracket cap (max qty whose notional stays under the symbol's leverage
+    # bracket) is smaller than the risk-sized qty -> it wins.
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    cap = uncapped / 2
+    assert risk_sized_qty(P, bracket_qty_cap=cap, **kw) == cap
+
+
+def test_bracket_cap_absent_or_loose_leaves_sizing_unchanged():
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    # None (spot/sim/fail-open, backtests) is byte-identical to before.
+    assert risk_sized_qty(P, bracket_qty_cap=None, **kw) == uncapped
+    # A cap wider than the sized qty never inflates it.
+    assert risk_sized_qty(P, bracket_qty_cap=uncapped * 10, **kw) == uncapped
+    # Zero/negative (defensive) -> size to zero, never negative.
+    assert risk_sized_qty(P, bracket_qty_cap=Decimal(0), **kw) == 0
+    assert risk_sized_qty(P, bracket_qty_cap=Decimal("-1"), **kw) == 0
+
+
+def test_bracket_and_margin_caps_both_present_tighter_wins():
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    tight, loose = uncapped / 4, uncapped / 2
+    # Bracket tighter -> bracket wins.
+    assert risk_sized_qty(P, margin_qty_cap=loose, bracket_qty_cap=tight,
+                          **kw) == tight
+    # Margin tighter -> margin wins.
+    assert risk_sized_qty(P, margin_qty_cap=tight, bracket_qty_cap=loose,
+                          **kw) == tight
+
+
 # ---- stop distance / ATR ----------------------------------------------------
 
 def test_stop_falls_back_to_pct_without_atr():

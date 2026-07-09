@@ -11,6 +11,7 @@ thing most naive bots get wrong.
     qty         = risk_amount / stop_dist               (so a stop-out ≈ risk_amount)
     qty         = min(qty, equity · max_leverage / px)  (hard leverage cap)
     qty         = min(qty, margin_qty_cap)              (closed-loop margin clamp)
+    qty         = min(qty, bracket_qty_cap)             (Binance leverage-bracket cap)
 
 The last line is what makes sizing CLOSED-loop: the caller derives the cap from
 the margin actually still free (equity share minus the margin the open position
@@ -105,7 +106,8 @@ def breached(is_long: bool, mark: Decimal, stop: Decimal,
 def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
                    stop_dist: Decimal | None,
                    conviction: Decimal = Decimal(1),
-                   margin_qty_cap: Decimal | None = None) -> Decimal:
+                   margin_qty_cap: Decimal | None = None,
+                   bracket_qty_cap: Decimal | None = None) -> Decimal:
     """Base-asset quantity so that hitting the stop (`stop_dist` price units away)
     loses about `risk_pct · conviction` of equity — capped by max leverage.
     Takes the stop distance directly so sizing and the SL use the SAME stop,
@@ -115,7 +117,14 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
     actually-free margin can carry (position + resting-order margin already
     deducted upstream). None keeps the function pure open-loop — same result as
     before the clamp existed — so the risk math stays testable in isolation.
-    A zero/negative cap means no margin headroom: size to zero, never reject."""
+    A zero/negative cap means no margin headroom: size to zero, never reject.
+
+    `bracket_qty_cap` is the OPTIONAL Binance leverage-bracket clamp: the most
+    qty whose notional stays under the exchange's per-symbol notionalCap for our
+    configured leverage (the caller derives it as cap·SAFETY/price). Sizing past
+    it is the -2027 rejection ('Exceeded the maximum allowable position at
+    current leverage'), so this makes that structurally impossible. None leaves
+    sizing unchanged — pure/backtest-safe, like margin_qty_cap."""
     if equity <= 0 or price <= 0 or stop_dist is None or stop_dist <= 0:
         return Decimal(0)
     conviction = max(Decimal(0), min(Decimal(1), conviction))
@@ -124,6 +133,8 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
     qty = min(qty, lev_cap_qty)
     if margin_qty_cap is not None:
         qty = min(qty, max(Decimal(0), margin_qty_cap))
+    if bracket_qty_cap is not None:
+        qty = min(qty, max(Decimal(0), bracket_qty_cap))
     return qty
 
 

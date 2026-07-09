@@ -28,9 +28,9 @@ KEY, SECRET = "test-key", "test-secret"
 TIME = {"serverTime": 1_700_000_000_000}
 
 
-def adapter(handler) -> BinanceFuturesAdapter:
+def adapter(handler, *, leverage: int = 1) -> BinanceFuturesAdapter:
     return BinanceFuturesAdapter(
-        KEY, SECRET, symbols=("BTCUSDT",),
+        KEY, SECRET, symbols=("BTCUSDT",), leverage=leverage,
         transport=httpx.MockTransport(handler))
 
 
@@ -162,6 +162,72 @@ async def test_submit_4xx_is_reject_5xx_is_timeout():
     with pytest.raises(BrokerTimeout):
         await adapter(h5).submit(client_order_id="K1", instrument="BTCUSDT",
                                  side=Side.SELL, qty=Decimal("1"), limit_price=None)
+
+
+# ------------------------------------------------- leverage brackets (-2027)
+
+# Real-ish BTCUSDT bracket ladder: ascending tiers, each capping the position
+# NOTIONAL allowed at (and below) its initialLeverage ceiling.
+_BRACKETS = [
+    {"bracket": 1, "initialLeverage": 125, "notionalCap": 50000},
+    {"bracket": 2, "initialLeverage": 100, "notionalCap": 25000},
+    {"bracket": 3, "initialLeverage": 50, "notionalCap": 250000},
+    {"bracket": 4, "initialLeverage": 20, "notionalCap": 1000000},
+    {"bracket": 5, "initialLeverage": 10, "notionalCap": 5000000},
+]
+
+
+def _bracket_handler(seen=None):
+    def handler(request):
+        method, path, params = route(request)
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        assert (method, path) == ("GET", "/fapi/v1/leverageBracket")
+        if seen is not None:
+            seen.append(params.get("symbol"))
+        return ok([{"symbol": "BTCUSDT", "brackets": _BRACKETS}])
+    return handler
+
+
+async def test_max_notional_selects_lowest_tier_covering_leverage():
+    # At 100x, the binding tier is the LOWEST-tier bracket whose initialLeverage
+    # >= 100 -> the 100x tier, cap 25000.
+    a = adapter(_bracket_handler(), leverage=100)
+    assert await a.max_notional("BTCUSDT") == Decimal("25000")
+
+
+async def test_max_notional_at_lower_leverage_gets_higher_cap():
+    # At 50x the binding tier is initialLeverage 50 -> cap 250000 (more notional
+    # allowed at lower leverage).
+    a = adapter(_bracket_handler(), leverage=50)
+    assert await a.max_notional("BTCUSDT") == Decimal("250000")
+
+
+async def test_max_notional_caches_after_first_fetch():
+    seen: list = []
+    a = adapter(_bracket_handler(seen), leverage=100)
+    assert await a.max_notional("BTCUSDT") == Decimal("25000")
+    assert await a.max_notional("BTCUSDT") == Decimal("25000")
+    assert seen.count("BTCUSDT") == 1              # fetched once, then cached
+
+
+async def test_max_notional_fail_open_returns_none_and_is_retried():
+    # A fetch failure returns None (no clamp, existing behavior) and is NOT
+    # cached as known — the next call retries and can succeed.
+    calls = {"n": 0}
+
+    def handler(request):
+        _, path, _ = route(request)
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return err(400, -1000, "boom")         # first call fails
+        return ok([{"symbol": "BTCUSDT", "brackets": _BRACKETS}])
+
+    a = adapter(handler, leverage=100)
+    assert await a.max_notional("BTCUSDT") is None  # fail-open
+    assert await a.max_notional("BTCUSDT") == Decimal("25000")  # retried, cached
 
 
 # --------------------------------------------------------------- query

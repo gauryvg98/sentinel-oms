@@ -74,6 +74,11 @@ def _is_admin(request: "Request") -> bool:
 # sizing and fill, so a maximal order doesn't land exactly on the -2019 line.
 _MARGIN_BUFFER = Decimal("0.90")
 
+# Bracket-cap safety: hold a position's notional strictly UNDER the exchange's
+# exact leverage-bracket notionalCap. Sizing to 100% of the cap would land on
+# the -2027 line and any fee/price drift tips over it, so 0.95 keeps a margin.
+_BRACKET_SAFETY = Decimal("0.95")
+
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
     """Initial margin a resting limit ENTRY reserves: its remaining (unfilled)
@@ -187,7 +192,7 @@ async def order_stats(app: SentinelApp) -> dict:
 class Terminal:
     def __init__(self, app: SentinelApp, market: MarketData,
                  spec: InstrumentSpec, *,
-                 margin_cap_fn=None) -> None:
+                 margin_cap_fn=None, bracket_cap_fn=None) -> None:
         self.app = app
         self.market = market
         self.spec = spec                # the symbol's exchange rules (lot/tick/mins)
@@ -195,6 +200,9 @@ class Terminal:
         # margin (Bot.entry_headroom_qty). None (standalone terminal / tests)
         # leaves manual sizing unclamped, exactly as before.
         self._margin_cap_fn = margin_cap_fn
+        # (price) -> max |position| qty under the Binance leverage-bracket cap
+        # (Bot.bracket_qty_cap). None -> no bracket clamp (spot/sim/tests).
+        self._bracket_cap_fn = bracket_cap_fn
         # A bare manual order (no usdt/btc/pct) defaults to the exchange minimum
         # quantity for this symbol — never a hardcoded qty.
         self.trade_qty = spec.min_qty or spec.lot_step
@@ -336,14 +344,27 @@ class Terminal:
         # (not in _size) because the gate is the AUTHORITY, not the side: a BUY
         # that COVERS a short is a PROTECTIVE_EXIT and must never be clipped —
         # margin exhaustion is exactly when you most need the cover to go out.
-        if authority is Authority.ENTRY and self._margin_cap_fn is not None:
+        if authority is Authority.ENTRY:
             mark = self.market.latest(self.market.symbol)
-            cap = await self._margin_cap_fn(mark.price if mark else None)
-            if cap is not None and qty > cap:
+            price = mark.price if mark else None
+            # Both entry clamps are lower bounds on qty; the tighter wins. Margin
+            # kills -2019 (insufficient margin), bracket kills -2027 (over the
+            # leverage-bracket notional cap). Neither ever touches a reduce/cover
+            # (PROTECTIVE_EXIT) — those shrink the position and cannot hit either.
+            caps: list[Decimal] = []
+            if self._margin_cap_fn is not None:
+                m = await self._margin_cap_fn(price)
+                if m is not None:
+                    caps.append(m)
+            if self._bracket_cap_fn is not None:
+                b = await self._bracket_cap_fn(price)
+                if b is not None:
+                    caps.append(b)
+            if caps and qty > (cap := min(caps)):
                 qty = self.spec.round_qty(cap)
                 if qty <= 0:
                     return {"blocked": "ZeroSize",
-                            "reason": "no free margin for a new entry"}
+                            "reason": "no headroom for a new entry (margin / bracket cap)"}
         if qty <= 0:
             return {"blocked": "ZeroSize",
                     "reason": "nothing to trade at that size"}
@@ -411,7 +432,8 @@ class Bot:
         # Manual orders share the closed-loop margin clamp (headroom form): a
         # human BUY is capped by the same free margin the runner respects.
         self.terminal = Terminal(app, market, spec,
-                                 margin_cap_fn=self.entry_headroom_qty)
+                                 margin_cap_fn=self.entry_headroom_qty,
+                                 bracket_cap_fn=self.bracket_qty_cap)
         self.runner = self._build_runner(strategies[default_strategy]())
 
     # -- the peg's touch: rest at the near side; fall back to the mark --------
@@ -472,6 +494,9 @@ class Bot:
             entry_fn=self.avg_cost,
             # closed-loop clamp: total-position form (held + resting + headroom)
             margin_cap_fn=self.margin_qty_cap,
+            # Binance leverage-bracket clamp: notional under the symbol's cap at
+            # our leverage, so an alt never sizes into a -2027 rejection.
+            bracket_cap_fn=self.bracket_qty_cap,
             # exchange-native hard-stop backstop (SENTINEL_HARD_STOP_PCT-gated)
             place_stop_fn=lambda side, qty, stop: t.place_stop(side, qty, stop),
             price_tick=self.spec.price_tick,
@@ -605,6 +630,22 @@ class Bot:
         free, pos_qty, resting_qty = state
         lev = Decimal(self.venue.leverage or 1)
         return pos_qty + resting_qty + max(Decimal(0), free) * _MARGIN_BUFFER * lev / price
+
+    async def bracket_qty_cap(self, price: Decimal | None) -> Decimal | None:
+        """Largest |position| qty whose notional stays under Binance's
+        leverage-bracket notionalCap for this symbol at our leverage — the clamp
+        that makes -2027 ('Exceeded the maximum allowable position at current
+        leverage') structurally impossible. bracket notionalCap · SAFETY / price.
+
+        Fail-open: venues without max_notional (spot/sim/bybit/...) or a fetch
+        failure return None, so sizing is unchanged (no bracket clamp)."""
+        get_cap = getattr(self.venue.adapter, "max_notional", None)
+        if get_cap is None or price is None or price <= 0:
+            return None
+        cap = await get_cap(self.symbol)
+        if cap is None:
+            return None
+        return cap * _BRACKET_SAFETY / price
 
     async def card(self) -> dict:
         """Compact, always-live state for this bot's card. No candles (a

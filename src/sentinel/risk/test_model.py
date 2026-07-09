@@ -126,6 +126,49 @@ def test_bracket_and_margin_caps_both_present_tighter_wins():
                           **kw) == tight
 
 
+# ---- real-availableBalance clamp (kills -2019) ------------------------------
+
+def test_avail_cap_binds_when_tighter_than_risk_and_leverage():
+    # The availability cap (max qty whose margin fits the exchange's REAL
+    # availableBalance × safety) is tighter than the risk-sized qty -> it wins.
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    cap = uncapped / 2
+    assert risk_sized_qty(P, avail_qty_cap=cap, **kw) == cap
+
+
+def test_avail_cap_absent_or_loose_leaves_sizing_unchanged():
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    # None (spot/sim/fail-open, backtests) is byte-identical to before.
+    assert risk_sized_qty(P, avail_qty_cap=None, **kw) == uncapped
+    # A cap wider than the sized qty never inflates it.
+    assert risk_sized_qty(P, avail_qty_cap=uncapped * 10, **kw) == uncapped
+    # Zero/negative (exhausted / over-drawn) -> size to zero, never negative.
+    assert risk_sized_qty(P, avail_qty_cap=Decimal(0), **kw) == 0
+    assert risk_sized_qty(P, avail_qty_cap=Decimal("-1"), **kw) == 0
+
+
+def test_all_three_caps_present_tightest_wins():
+    # margin, bracket AND avail all present -> the minimum binds regardless of
+    # which one it is.
+    kw = dict(equity=Decimal("10000"), price=Decimal("60000"),
+              stop_dist=Decimal("1000"))
+    uncapped = risk_sized_qty(P, **kw)
+    a, b, c = uncapped / 2, uncapped / 3, uncapped / 4
+    # avail is the tightest -> avail wins.
+    assert risk_sized_qty(P, margin_qty_cap=a, bracket_qty_cap=b,
+                          avail_qty_cap=c, **kw) == c
+    # margin is the tightest -> margin wins even with avail present.
+    assert risk_sized_qty(P, margin_qty_cap=c, bracket_qty_cap=a,
+                          avail_qty_cap=b, **kw) == c
+    # bracket is the tightest -> bracket wins.
+    assert risk_sized_qty(P, margin_qty_cap=a, bracket_qty_cap=c,
+                          avail_qty_cap=b, **kw) == c
+
+
 # ---- stop distance / ATR ----------------------------------------------------
 
 def test_stop_falls_back_to_pct_without_atr():

@@ -148,5 +148,17 @@ class BrokerAdapter(Protocol):
         spot/sim/other adapters that don't define it simply skip the clamp."""
         return None
 
+    async def available_balance(self, asset: str) -> Decimal | None:
+        """The exchange's REAL free margin for `asset` (already net of all posted
+        margin, resting-order margin and unrealized loss) — Binance's
+        `availableBalance`. Clamping an entry so its initial margin fits under
+        this makes -2019 'Margin is insufficient' structurally impossible. None =
+        unknown / not enforced (fail-open: no availability clamp).
+
+        Optional, like max_notional: only leveraged futures venues implement it.
+        Callers reach it via getattr(broker, "available_balance", None) so
+        spot/sim adapters that don't define it simply skip the clamp."""
+        return None
+
     def events(self) -> AsyncIterator[BrokerEvent]:
         ...

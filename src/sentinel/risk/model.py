@@ -12,11 +12,13 @@ thing most naive bots get wrong.
     qty         = min(qty, equity · max_leverage / px)  (hard leverage cap)
     qty         = min(qty, margin_qty_cap)              (closed-loop margin clamp)
     qty         = min(qty, bracket_qty_cap)             (Binance leverage-bracket cap)
+    qty         = min(qty, avail_qty_cap)               (real availableBalance clamp)
 
-The last line is what makes sizing CLOSED-loop: the caller derives the cap from
-the margin actually still free (equity share minus the margin the open position
-and any resting entry already consume), so we never ask the exchange for more
-initial margin than exists (-2019 Margin is insufficient).
+The margin_qty_cap line is what makes sizing CLOSED-loop against our OWN estimate
+of the still-free equity share. avail_qty_cap tightens it to the exchange's REAL
+availableBalance (net of every other bot's margin and unrealized loss) so we
+never ask the exchange for more initial margin than truly exists (-2019 Margin is
+insufficient).
 
 Pure and unsigned — the runner applies the LONG/SHORT sign. No I/O, no clock, so
 every rule is unit-testable before any feed or broker exists.
@@ -107,7 +109,8 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
                    stop_dist: Decimal | None,
                    conviction: Decimal = Decimal(1),
                    margin_qty_cap: Decimal | None = None,
-                   bracket_qty_cap: Decimal | None = None) -> Decimal:
+                   bracket_qty_cap: Decimal | None = None,
+                   avail_qty_cap: Decimal | None = None) -> Decimal:
     """Base-asset quantity so that hitting the stop (`stop_dist` price units away)
     loses about `risk_pct · conviction` of equity — capped by max leverage.
     Takes the stop distance directly so sizing and the SL use the SAME stop,
@@ -124,7 +127,14 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
     configured leverage (the caller derives it as cap·SAFETY/price). Sizing past
     it is the -2027 rejection ('Exceeded the maximum allowable position at
     current leverage'), so this makes that structurally impossible. None leaves
-    sizing unchanged — pure/backtest-safe, like margin_qty_cap."""
+    sizing unchanged — pure/backtest-safe, like margin_qty_cap.
+
+    `avail_qty_cap` is the OPTIONAL real-availableBalance clamp: the most qty
+    whose initial margin fits inside the settlement asset's actual exchange
+    `availableBalance` × SAFETY (caller derives it as avail·SAFETY·leverage/price).
+    Unlike margin_qty_cap — our per-bot ESTIMATE of the free equity share — this
+    is the exchange's OWN net-of-everything figure, so an entry under it cannot be
+    refused for margin (-2019). None leaves sizing unchanged, like the others."""
     if equity <= 0 or price <= 0 or stop_dist is None or stop_dist <= 0:
         return Decimal(0)
     conviction = max(Decimal(0), min(Decimal(1), conviction))
@@ -135,6 +145,8 @@ def risk_sized_qty(params: RiskParams, *, equity: Decimal, price: Decimal,
         qty = min(qty, max(Decimal(0), margin_qty_cap))
     if bracket_qty_cap is not None:
         qty = min(qty, max(Decimal(0), bracket_qty_cap))
+    if avail_qty_cap is not None:
+        qty = min(qty, max(Decimal(0), avail_qty_cap))
     return qty
 
 

@@ -230,6 +230,75 @@ async def test_max_notional_fail_open_returns_none_and_is_retried():
     assert await a.max_notional("BTCUSDT") == Decimal("25000")  # retried, cached
 
 
+# ------------------------------------------------ availableBalance (-2019)
+
+# /fapi/v2/balance shape: per-asset wallet balance AND availableBalance (the
+# exchange's REAL free margin, already net of margin/orders/unrealized loss).
+_BALANCE = [
+    {"asset": "USDT", "balance": "9800.0", "availableBalance": "4200.5"},
+    {"asset": "USDC", "balance": "500.0", "availableBalance": "500.0"},
+]
+
+
+async def test_available_balance_parses_per_asset():
+    a = adapter(lambda r: ok(TIME) if urlparse(str(r.url)).path == "/fapi/v1/time"
+                else ok(_BALANCE))
+    assert await a.available_balance("USDT") == Decimal("4200.5")
+    # A second asset from the SAME payload resolves without a refetch.
+    assert await a.available_balance("USDC") == Decimal("500.0")
+
+
+async def test_available_balance_ttl_cache_second_call_within_ttl_no_refetch(monkeypatch):
+    import sentinel.broker.binance.futures as fut
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(fut.time, "monotonic", lambda: clock["t"])
+
+    calls = {"n": 0}
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        assert path == "/fapi/v2/balance"
+        calls["n"] += 1
+        return ok(_BALANCE)
+
+    a = adapter(handler)
+    assert await a.available_balance("USDT") == Decimal("4200.5")
+    # Within the TTL: served from cache, NO second /fapi/v2/balance hit.
+    clock["t"] += fut._AVAIL_TTL_S - 0.1
+    assert await a.available_balance("USDT") == Decimal("4200.5")
+    assert calls["n"] == 1
+    # Past the TTL: the memo expired -> exactly one refetch.
+    clock["t"] += 1.0
+    assert await a.available_balance("USDT") == Decimal("4200.5")
+    assert calls["n"] == 2
+
+
+async def test_available_balance_fail_open_returns_none_not_cached():
+    calls = {"n": 0}
+
+    def handler(request):
+        path = urlparse(str(request.url)).path
+        if path == "/fapi/v1/time":
+            return ok(TIME)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return err(400, -1000, "boom")      # first call fails
+        return ok(_BALANCE)
+
+    a = adapter(handler)
+    assert await a.available_balance("USDT") is None          # fail-open, no clamp
+    assert await a.available_balance("USDT") == Decimal("4200.5")  # retried, works
+
+
+async def test_available_balance_unknown_asset_is_none():
+    a = adapter(lambda r: ok(TIME) if urlparse(str(r.url)).path == "/fapi/v1/time"
+                else ok(_BALANCE))
+    assert await a.available_balance("DOGE") is None          # not in the payload
+
+
 # --------------------------------------------------------------- query
 
 async def test_query_order_absent_is_none():

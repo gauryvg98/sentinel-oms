@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,8 @@ from .instruments import InstrumentSpec
 from .logbuffer import LogRing
 from .market import MarketData
 from .strategy_runner import StrategyRunner
+
+log = logging.getLogger("sentinel.ui.server")
 
 STATIC = Path(__file__).parent / "static"
 # Stablecoins counted 1:1 as dollar margin collateral for the equity model.
@@ -76,8 +79,16 @@ _MARGIN_BUFFER = Decimal("0.90")
 
 # Bracket-cap safety: hold a position's notional strictly UNDER the exchange's
 # exact leverage-bracket notionalCap. Sizing to 100% of the cap would land on
-# the -2027 line and any fee/price drift tips over it, so 0.95 keeps a margin.
-_BRACKET_SAFETY = Decimal("0.95")
+# the -2027 line and any fee/price drift tips over it, so 0.90 keeps a margin.
+# (Lowered from 0.95: 0.95 still leaked a couple of -2027 rejects at boot.)
+_BRACKET_SAFETY = Decimal("0.90")
+
+# Availability-clamp safety: spend at most this fraction of the exchange's REAL
+# availableBalance as an entry's initial margin. availableBalance can tick down
+# between our sizing read and the order landing (another bot fills, a mark moves
+# against the book), and taker fees are charged on top — 0.90 keeps a maximal
+# order off the -2019 'Margin is insufficient' line.
+_AVAIL_SAFETY = Decimal("0.90")
 
 
 def _order_margin(entry: dict | None, lev: Decimal) -> Decimal:
@@ -192,7 +203,8 @@ async def order_stats(app: SentinelApp) -> dict:
 class Terminal:
     def __init__(self, app: SentinelApp, market: MarketData,
                  spec: InstrumentSpec, *,
-                 margin_cap_fn=None, bracket_cap_fn=None) -> None:
+                 margin_cap_fn=None, bracket_cap_fn=None,
+                 avail_cap_fn=None) -> None:
         self.app = app
         self.market = market
         self.spec = spec                # the symbol's exchange rules (lot/tick/mins)
@@ -203,6 +215,10 @@ class Terminal:
         # (price) -> max |position| qty under the Binance leverage-bracket cap
         # (Bot.bracket_qty_cap). None -> no bracket clamp (spot/sim/tests).
         self._bracket_cap_fn = bracket_cap_fn
+        # (price) -> max |position| qty whose margin fits the exchange's REAL
+        # availableBalance × SAFETY (Bot.avail_qty_cap). None -> no availability
+        # clamp (spot/sim/tests). Kills -2019 on the manual ENTRY path too.
+        self._avail_cap_fn = avail_cap_fn
         # A bare manual order (no usdt/btc/pct) defaults to the exchange minimum
         # quantity for this symbol — never a hardcoded qty.
         self.trade_qty = spec.min_qty or spec.lot_step
@@ -347,10 +363,12 @@ class Terminal:
         if authority is Authority.ENTRY:
             mark = self.market.latest(self.market.symbol)
             price = mark.price if mark else None
-            # Both entry clamps are lower bounds on qty; the tighter wins. Margin
-            # kills -2019 (insufficient margin), bracket kills -2027 (over the
-            # leverage-bracket notional cap). Neither ever touches a reduce/cover
-            # (PROTECTIVE_EXIT) — those shrink the position and cannot hit either.
+            # All three entry clamps are lower bounds on qty; the tighter wins.
+            # margin/avail kill -2019 (insufficient margin) — avail against the
+            # exchange's REAL free balance, margin against our per-bot estimate —
+            # and bracket kills -2027 (over the leverage-bracket notional cap).
+            # NONE ever touches a reduce/cover (PROTECTIVE_EXIT) — those shrink the
+            # position and cannot hit either rejection.
             caps: list[Decimal] = []
             if self._margin_cap_fn is not None:
                 m = await self._margin_cap_fn(price)
@@ -360,6 +378,10 @@ class Terminal:
                 b = await self._bracket_cap_fn(price)
                 if b is not None:
                     caps.append(b)
+            if self._avail_cap_fn is not None:
+                av = await self._avail_cap_fn(price)
+                if av is not None:
+                    caps.append(av)
             if caps and qty > (cap := min(caps)):
                 qty = self.spec.round_qty(cap)
                 if qty <= 0:
@@ -413,7 +435,8 @@ class Bot:
     def __init__(self, app: SentinelApp, venue: Venue, symbol: str, market,
                  bars, spec: InstrumentSpec, strategies: dict, *,
                  default_strategy: str, size_usdt: Decimal,
-                 equity_fn=None, risk_params=None, hub=None) -> None:
+                 equity_fn=None, risk_params=None, hub=None,
+                 settle_asset_fn=None) -> None:
         self.app = app
         self.hub = hub                          # shared MarketHub, or None
         self.venue = venue
@@ -426,6 +449,9 @@ class Bot:
         self.current = {"name": default_strategy}
         self.equity_fn = equity_fn        # account equity for risk-based sizing
         self.risk_params = risk_params    # None -> fixed-notional budget sizing
+        # () -> the symbol's settlement asset (USDT/USDC), for the real
+        # availableBalance clamp. Falls back to a quote_asset/suffix guess.
+        self._settle_asset_fn = settle_asset_fn
         self.liq_price: Decimal | None = None   # anchored liquidation price; the
                                                  # live distance is derived per
                                                  # mark tick in card()
@@ -433,7 +459,8 @@ class Bot:
         # human BUY is capped by the same free margin the runner respects.
         self.terminal = Terminal(app, market, spec,
                                  margin_cap_fn=self.entry_headroom_qty,
-                                 bracket_cap_fn=self.bracket_qty_cap)
+                                 bracket_cap_fn=self.bracket_qty_cap,
+                                 avail_cap_fn=self.avail_qty_cap)
         self.runner = self._build_runner(strategies[default_strategy]())
 
     # -- the peg's touch: rest at the near side; fall back to the mark --------
@@ -497,6 +524,9 @@ class Bot:
             # Binance leverage-bracket clamp: notional under the symbol's cap at
             # our leverage, so an alt never sizes into a -2027 rejection.
             bracket_cap_fn=self.bracket_qty_cap,
+            # Real-availableBalance clamp: margin under the exchange's actual free
+            # balance × SAFETY, so an entry can never draw a -2019 rejection.
+            avail_cap_fn=self.avail_qty_cap,
             # exchange-native hard-stop backstop (SENTINEL_HARD_STOP_PCT-gated)
             place_stop_fn=lambda side, qty, stop: t.place_stop(side, qty, stop),
             price_tick=self.spec.price_tick,
@@ -647,6 +677,30 @@ class Bot:
             return None
         return cap * _BRACKET_SAFETY / price
 
+    async def avail_qty_cap(self, price: Decimal | None) -> Decimal | None:
+        """Largest |position| qty a NEW entry may reach without exceeding the
+        exchange's REAL free margin: availableBalance · SAFETY · leverage / price.
+        This is the AUTHORITATIVE -2019 killer — availableBalance is already net
+        of every OTHER bot's posted margin, every resting order and all unrealized
+        loss, which our per-bot equity-share estimate (margin_qty_cap) cannot see.
+        An order whose margin fits under it cannot be refused for margin.
+
+        Fail-open: venues without available_balance (spot/sim/bybit/...) or a
+        fetch failure return None, so sizing is unchanged (no availability clamp).
+
+        NOTE: like the other entry caps, this is a bound on a NEW open only — the
+        runner/terminal apply it on the ENTRY path, never to a reduce/cover."""
+        get_avail = getattr(self.venue.adapter, "available_balance", None)
+        if get_avail is None or price is None or price <= 0:
+            return None
+        asset = (self._settle_asset_fn() if self._settle_asset_fn
+                 else getattr(self.spec, "quote_asset", "") or "USDT")
+        avail = await get_avail(asset)
+        if avail is None:
+            return None
+        lev = Decimal(self.venue.leverage or 1)
+        return max(Decimal(0), avail) * _AVAIL_SAFETY * lev / price
+
     async def card(self) -> dict:
         """Compact, always-live state for this bot's card. No candles (a
         sparkline stands in) so tens of these stay cheap on the wire."""
@@ -656,23 +710,30 @@ class Bot:
         q = lambda v: str(v.quantize(Decimal("0.01"))) if v is not None else None
         working = [o for o in await self.app.store.recent_orders(20, self.symbol)
                    if o["state"] not in ("FILLED", "CANCELED", "REJECTED")]
-        # Two P&L views on the position's cost basis (== margin at 1x):
-        #   running (roe)  — unrealized only: how the OPEN position is doing now
-        #   net (net_roe)  — realized + unrealized: total incl. closed trades
+        # eq_share = this bot's slice of its settlement pool — its CAPITAL. Needed
+        # both for the margin chain below AND for net_roe (a return on capital).
+        eq_share = self.equity_fn() if self.equity_fn else None
+        # Two P&L views, each on the RIGHT denominator:
+        #   running (roe)  — unrealized / current cost basis: how the OPEN
+        #                    position is doing now (a return ON that position).
+        #   net (net_roe)  — (realized + unrealized) / CAPITAL: realized P&L is a
+        #                    return on the capital deployed, NOT on the current
+        #                    (possibly tiny/closed) position. Dividing all-time
+        #                    P&L by a shrinking cost basis read absurd (+74% on a
+        #                    near-flat book) — the reported display bug.
         net = roe = net_roe = None
         if pnl:
             net = (pnl.realized or Decimal(0)) + (pnl.unrealized or Decimal(0))
             basis = (abs(pnl.avg_cost * pnl.position)
                      if pnl.avg_cost and pnl.position else None)
-            if basis and basis > 0:
-                if pnl.unrealized is not None:
-                    roe = pnl.unrealized / basis * 100
-                net_roe = net / basis * 100
+            if basis and basis > 0 and pnl.unrealized is not None:
+                roe = pnl.unrealized / basis * 100
+            if eq_share and eq_share > 0:
+                net_roe = net / eq_share * 100
         # The margin chain, live: risk already sized the position; show what it
         # costs in capital. equity_share = this bot's slice of its settlement
         # pool; notional = |position|·mark; margin = notional / leverage setting;
         # effective leverage = notional / equity_share; free = share − margin.
-        eq_share = self.equity_fn() if self.equity_fn else None
         lev = Decimal(self.venue.leverage or 1)
         notional = (abs(pnl.position) * mark.price
                     if pnl and mark and pnl.position else Decimal(0))
@@ -895,7 +956,8 @@ class InstrumentManager:
                       self.strategies, default_strategy=self.default_strategy,
                       size_usdt=self.default_usdt,
                       equity_fn=functools.partial(self.equity_for, symbol),
-                      risk_params=self.risk_params, hub=self.hub)
+                      risk_params=self.risk_params, hub=self.hub,
+                      settle_asset_fn=functools.partial(self._settle_asset, symbol))
             await bot.spawn()                       # loads history -> a mark exists
             self.bots[symbol] = bot                 # register BEFORE cap so it
                                                     # counts in its own pool share
@@ -924,6 +986,39 @@ class InstrumentManager:
             self.caps.pop(symbol, None)
         await self.app.changes.bump("roster")
         return {"removed": symbol}
+
+    async def _account_equity(self) -> Decimal:
+        """Current account equity = stablecoin cash + Σ unrealized on open
+        positions (Binance 'margin balance'). Same figure account_snapshot
+        reports as 'equity' — factored out so the boot baseline capture and the
+        live display agree by construction."""
+        cash = sum((v for a, v in self.app.latest_balances.items()
+                    if a in self.margin_assets), Decimal(0))
+        unrealized = Decimal(0)
+        for bot in list(self.bots.values()):
+            pnl = await bot._pnl()
+            if pnl is not None and pnl.unrealized is not None:
+                unrealized += pnl.unrealized
+        return cash + unrealized
+
+    async def capture_starting_equity(self) -> Decimal | None:
+        """Persist the account's STARTING equity once, on first boot against a
+        fresh (or wiped) ledger — the ground-truth baseline for wallet-anchored
+        Net P&L (equity − starting_equity), which unlike the ledger's realized+
+        unrealized correctly includes fees/funding and ignores the phantom
+        realized P&L that adopted-position synthetic fills inject.
+
+        Idempotent via the ledger checkpoint: a restart with a baseline already
+        set is a no-op and keeps the original. Returns the effective baseline, or
+        None if there's no cash/equity view yet (deferred to a later boot)."""
+        equity = await self._account_equity()
+        if equity <= 0:
+            return None            # no balances loaded yet — capture next boot
+        try:
+            return await self.app.store.set_starting_equity_if_absent(equity)
+        except Exception as e:  # noqa: BLE001 — display anchor, never halt boot
+            log.warning("starting-equity capture failed (%r)", e)
+            return None
 
     async def account_snapshot(self) -> dict:
         """Account-wide state every card shares (topic 'account'/'roster'):
@@ -966,9 +1061,22 @@ class InstrumentManager:
             # number (no balance event on placement) — we derive it from the
             # working order we already track.
             blocked += _order_margin(await self.app.store.open_entry(bot.symbol), lev)
-        net = realized + unrealized     # total P&L across the whole account
+        net_ledger = realized + unrealized     # ledger P&L (fees/funding-blind)
         equity = cash + unrealized
         available = cash - committed - blocked   # free to open more
+        # WALLET-ANCHORED Net P&L = equity − starting_equity: the ground truth
+        # incl. fees/funding, immune to the phantom realized P&L that adopted-
+        # position synthetic opening fills inject into net_ledger. The headline
+        # 'net' MUST be this — net_ledger disagreed with reality (prod showed
+        # equity down $251 but net_ledger +$258). Guard: until the baseline is
+        # captured (or if the read fails), fall back to net_ledger so nothing
+        # crashes; the split (fees + phantom = net_ledger − net) stays visible.
+        try:
+            baseline = await self.app.store.get_starting_equity()
+        except Exception as e:  # noqa: BLE001 — display only, never halt a push
+            log.warning("starting-equity read failed (%r)", e)
+            baseline = None
+        net = (equity - baseline) if baseline is not None else net_ledger
         # Leverage: the configured exchange setting (the 1x/2x/3x cap) vs. the
         # EFFECTIVE leverage actually in use = gross position notional / equity.
         # committed is notional/lev, so committed*lev recovers the gross notional.
@@ -1008,7 +1116,14 @@ class InstrumentManager:
                 "unrealized": q(unrealized),
                 "running": q(unrealized),     # portfolio running P&L (open)
                 "realized": q(realized),
-                "net": q(net),                # portfolio net P&L (realized+unreal)
+                # Headline net = WALLET-ANCHORED (equity − starting_equity): the
+                # ground truth incl. fees/funding. net_ledger is the old
+                # realized+unrealized sum, kept so the fees+phantom gap
+                # (net_ledger − net) stays visible. starting_equity is the
+                # persisted baseline (None until captured on first boot).
+                "net": q(net),
+                "net_ledger": q(net_ledger),
+                "starting_equity": q(baseline),
             },
         }
 
@@ -1127,6 +1242,14 @@ def build_ui(app: SentinelApp, venue: Venue, *, strategies: dict | None = None,
 
         mgr.seed_done = True
         await app.changes.bump("account")               # reveal the grid
+
+        # Capture the starting-equity baseline ONCE, now that balances are loaded
+        # (app.start seeded them) and adopted positions are marked — the anchor
+        # for wallet-anchored Net P&L. Idempotent: a restart keeps the original.
+        try:
+            await mgr.capture_starting_equity()
+        except Exception as e:  # noqa: BLE001 — a display anchor, never halt boot
+            print(f"  starting-equity capture failed: {e!r}", flush=True)
 
         # Reconcile positions to their strategy target in the background, AFTER
         # the page is live — this does network I/O and must not gate the reveal.

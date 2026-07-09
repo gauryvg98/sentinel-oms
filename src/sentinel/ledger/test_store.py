@@ -305,3 +305,38 @@ async def test_load_nonterminal_orders_finds_crash_survivors(pool):
 
     survivors = {s.core.client_order_id for s in await store.load_nonterminal_orders()}
     assert survivors == {"STUCK", "FRESH"}
+
+
+# ----------------------------------------------------- starting-equity baseline
+
+
+async def test_starting_equity_absent_on_fresh_db(pool):
+    """A fresh (or wiped) ledger has no baseline -> None, so the account snapshot
+    falls back to ledger P&L until first boot captures it."""
+    store = LedgerStore(pool)
+    assert await store.get_starting_equity() is None
+
+
+async def test_starting_equity_captured_once_and_stable(pool):
+    """First capture persists the baseline exactly; a second call (restart) is a
+    no-op that keeps the ORIGINAL — the anchor never drifts with the account."""
+    store = LedgerStore(pool)
+    stored = await store.set_starting_equity_if_absent(Decimal("10000.00"))
+    assert stored == Decimal("10000.00")
+    assert await store.get_starting_equity() == Decimal("10000.00")
+    # A later boot at a different equity must NOT overwrite the baseline.
+    again = await store.set_starting_equity_if_absent(Decimal("9748.13"))
+    assert again == Decimal("10000.00")
+    assert await store.get_starting_equity() == Decimal("10000.00")
+
+
+async def test_starting_equity_preserves_cents(pool):
+    """Persisted via integer cents in the BIGINT checkpoint column — round-trips
+    exactly, so the wallet-anchored net isn't off by fractions of a dollar."""
+    store = LedgerStore(pool)
+    await store.set_starting_equity_if_absent(Decimal("9748.13"))
+    baseline = await store.get_starting_equity()
+    assert baseline == Decimal("9748.13")
+    # equity − starting_equity is the wallet-anchored net; verify the arithmetic.
+    equity = Decimal("9497.62")
+    assert equity - baseline == Decimal("-250.51")

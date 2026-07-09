@@ -623,6 +623,40 @@ class LedgerStore:
         )
         return {r["instrument"]: r["qty"] for r in rows}
 
+    # ---------------------------------------------------------- baseline equity
+
+    # The checkpoints table stores a single BIGINT (last_seq) per name, so the
+    # starting-equity baseline is persisted as integer CENTS to keep exact cents
+    # without a schema change. A DB wipe drops the row -> the baseline is simply
+    # re-captured on the next boot (a fresh start correctly gets a fresh baseline).
+    _STARTING_EQUITY = "starting_equity"
+
+    async def get_starting_equity(self) -> Decimal | None:
+        """The persisted account starting equity (baseline for wallet-anchored
+        Net P&L), or None if it was never captured (fresh/wiped DB)."""
+        cents = await self._pool.fetchval(
+            "SELECT last_seq FROM checkpoints WHERE name = $1", self._STARTING_EQUITY
+        )
+        return Decimal(cents) / 100 if cents is not None else None
+
+    async def set_starting_equity_if_absent(self, equity: Decimal) -> Decimal:
+        """Persist `equity` as the starting-equity baseline ONCE. Idempotent: a
+        second call (or a restart with the baseline already set) leaves the
+        original untouched and returns whatever is stored — so the baseline is a
+        stable ground-truth anchor, captured exactly at first boot on a fresh DB.
+        Returns the effective (stored) baseline."""
+        cents = int((equity * 100).to_integral_value())
+        row = await self._pool.fetchrow(
+            """
+            INSERT INTO checkpoints (name, last_seq) VALUES ($1, $2)
+            ON CONFLICT (name) DO UPDATE SET name = checkpoints.name
+            RETURNING last_seq
+            """,
+            self._STARTING_EQUITY,
+            cents,
+        )
+        return Decimal(row["last_seq"]) / 100
+
     # -------------------------------------------------------------- rebuild
 
     async def rebuild_projections(self) -> int:

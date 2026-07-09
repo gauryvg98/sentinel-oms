@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from decimal import Decimal
 from typing import AsyncIterator
 
@@ -50,6 +51,11 @@ TESTNET_BASE = "https://demo-fapi.binance.com"
 TESTNET_WS = "wss://demo-fstream.binance.com"
 
 _ABSENT_CODE = -2013           # "Order does not exist" — the ONLY proof of absence
+
+# availableBalance is polled at sizing rate (every reconcile tick, per bot); a
+# SHORT memo keeps that from hammering /fapi/v2/balance while staying fresh
+# enough that a fill seconds ago is reflected before the next entry sizes.
+_AVAIL_TTL_S = 5.0
 
 _STATUS_MAP = {
     "NEW": BrokerOrderState.WORKING,
@@ -119,6 +125,12 @@ class BinanceFuturesAdapter:
         # lazily fetched from /fapi/v1/leverageBracket. A failed fetch is NOT
         # cached (returns None, retried next call) — only known caps live here.
         self._max_notional: dict[str, Decimal] = {}
+        # Short-TTL memo of /fapi/v2/balance's per-asset availableBalance (the
+        # exchange's REAL free margin, already net of every bot's posted margin,
+        # resting-order margin and unrealized loss). Keyed by asset ->
+        # (monotonic_deadline, value); a miss/expiry refetches the WHOLE balance
+        # payload once and refreshes every asset. Fail-open (None) is not cached.
+        self._avail: dict[str, tuple[float, Decimal]] = {}
         self._http = httpx.AsyncClient(
             base_url=base_url,
             headers={"X-MBX-APIKEY": api_key},
@@ -288,6 +300,42 @@ class BinanceFuturesAdapter:
             raise BrokerError(f"balance: {resp.text}")
         return {b["asset"]: Decimal(b["balance"])
                 for b in resp.json() if Decimal(b["balance"]) != 0}
+
+    async def available_balance(self, asset: str) -> Decimal | None:
+        """The exchange's REAL free margin for `asset` — /fapi/v2/balance's
+        `availableBalance`, which Binance has ALREADY netted of every position's
+        posted margin, every resting order's reserved margin and all unrealized
+        loss across the whole account. Sizing an entry so its initial margin fits
+        under this (× a safety factor) is what makes -2019 'Margin is insufficient'
+        structurally impossible — unlike our per-bot wallet-share estimate, this
+        is the number the exchange itself checks the order against.
+
+        Memoized with a SHORT TTL (monotonic clock) so per-poll sizing across the
+        fleet doesn't hammer REST. A fetch failure returns None (fail-open: the
+        caller then applies no availability clamp, existing behavior) and is NOT
+        cached — the next call retries."""
+        now = time.monotonic()
+        hit = self._avail.get(asset)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        try:
+            resp = await self._signed("GET", "/fapi/v2/balance", {})
+            if resp.status_code >= 400:
+                code, msg = self._error_code(resp)
+                log.warning("availableBalance fetch failed: [%s] %s", code, msg)
+                return None
+            body = resp.json()
+        except Exception as e:  # noqa: BLE001 — fail-open, retried next call
+            log.warning("availableBalance error (%r); no availability clamp", e)
+            return None
+        deadline = now + _AVAIL_TTL_S
+        found: Decimal | None = None
+        for b in body:
+            av = Decimal(b["availableBalance"])
+            self._avail[b["asset"]] = (deadline, av)   # refresh the whole payload
+            if b["asset"] == asset:
+                found = av
+        return found
 
     async def open_positions(self) -> dict[str, BrokerPosition]:
         """Actual open positions (signed qty + entry price) for POSITION

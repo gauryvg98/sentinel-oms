@@ -30,7 +30,7 @@ primary_region = "sin"
   SENTINEL_VENUE = "futures"
   # 6 bots, majors-biased (tight stops need low-noise books), split 3/3 across
   # the USDT and USDC margin pools so both fund evenly.
-  SENTINEL_SYMBOLS = "BTCUSDT,XRPUSDT,BNBUSDT,ETHUSDC,SOLUSDC,DOGEUSDC"
+  SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDC,XRPUSDC,LTCUSDC"
   SENTINEL_STRATEGY = "sma-ls"
   SENTINEL_STRATEGY_INTERVAL = "1m"
   SENTINEL_STRATEGY_USDT = "200"

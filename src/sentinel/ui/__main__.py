@@ -236,6 +236,10 @@ async def _serve() -> None:
         # keeps the pool's connections fresh; the single-writer lock connection
         # (necessarily long-lived) handles its own drop by re-acquiring.
         max_inactive_connection_lifetime=300.0,
+        # No DB call may hang forever: a proxy-killed connection with no TCP RST
+        # left a query awaiting eternally, wedging the PnL basis lock and every
+        # card/account send behind it (board served zero frames, machine idle).
+        command_timeout=30.0,
     )
     async with pool.acquire() as conn:
         await apply_migrations(conn)

@@ -27,10 +27,10 @@ primary_region = "sin"
   SENTINEL_PUBLIC_READONLY = "true"
 
   # Non-secret trading config (mirror of .env, minus keys/DSN).
-  SENTINEL_VENUE = "futures"
+  SENTINEL_VENUE = "delta"
   # 6 bots, majors-biased (tight stops need low-noise books), split 3/3 across
   # the USDT and USDC margin pools so both fund evenly.
-  SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDT,BTCUSDC,ETHUSDC"
+  SENTINEL_SYMBOLS = "BTCUSD,ETHUSD"
   SENTINEL_STRATEGY = "sma-ls"
   SENTINEL_STRATEGY_INTERVAL = "1m"
   SENTINEL_STRATEGY_USDT = "200"

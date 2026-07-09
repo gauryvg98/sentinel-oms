@@ -512,3 +512,48 @@ async def test_strategy_reduce_cancels_backstop_first(monkeypatch):
     await r.reconcile_now()
     i = seq.index(("cancel", "BS1"))
     assert seq[i + 1] == ("reduce_sell", Decimal("0.15"))
+
+
+def _rejecting_hard_stop(monkeypatch, reason):
+    """A backstop runner whose place_stop ALWAYS rejects with `reason` — the
+    real shape place_stop returns on a broker reject: {"rejected", "reason"}.
+    Records every attempt so a flood is visible as call count."""
+    r, state, seq, clock = make_hard_stop(monkeypatch)
+
+    async def rejecting(side, qty, stop):
+        seq.append(("place_stop", side, qty, stop))
+        return {"rejected": "BX", "reason": reason}
+
+    r._place_stop_fn = rejecting
+    return r, state, seq, clock
+
+
+async def test_rejecting_backstop_retries_at_most_once_per_repeg_window(monkeypatch):
+    """A transient reject leaves _backstop None; without attempt-time backoff
+    the venue is re-hit EVERY poll (the 579-reject flood). It must be retried
+    at most once per _BACKSTOP_REPEG_S, regardless of failure."""
+    r, state, seq, clock = _rejecting_hard_stop(
+        monkeypatch, reason="[-1001] internal error, try again")
+    for _ in range(20):                           # 20 polls, clock frozen at 0
+        await r._check_brackets()
+    assert seq.count(("place_stop", "SELL", Decimal("0.15"), Decimal("98.5"))) == 1
+    clock["t"] = 31.0                             # window elapsed -> one more try
+    await r._check_brackets()
+    assert len([s for s in seq if s[0] == "place_stop"]) == 2
+    assert r._backstop is None                    # still never placed
+
+
+async def test_unsupported_reject_disables_backstop_entirely(monkeypatch):
+    """A -4120 'not supported' reject is permanent — the manager must set the
+    unsupported flag and NEVER attempt again this process, even across many
+    polls and elapsed repeg windows. place_stop called exactly once."""
+    r, state, seq, clock = _rejecting_hard_stop(
+        monkeypatch, reason="[-4120] Order type not supported for this endpoint")
+    await r._check_brackets()
+    assert r._hard_stop_unsupported is True
+    for t in (31.0, 62.0, 999.0):                 # windows come and go
+        clock["t"] = t
+        for _ in range(5):
+            await r._check_brackets()
+    assert len([s for s in seq if s[0] == "place_stop"]) == 1
+    assert r._backstop is None

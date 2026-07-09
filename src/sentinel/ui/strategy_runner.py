@@ -23,6 +23,7 @@ short-side callables. plan_action is pure -> every case is tested without a brok
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
@@ -31,6 +32,8 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 from typing import Awaitable, Callable
 
 from sentinel.strategy import Bar, Decision, Stance, Strategy
+
+log = logging.getLogger("sentinel.strategy_runner")
 
 _RESTING = ("WORKING", "PARTIAL")             # cleanly resting -> safe to re-price
 _DEFAULT_REPRICE_FRAC = Decimal("0.0005")     # 5 bps: re-peg once the touch drifts
@@ -44,6 +47,12 @@ _HISTORY_CAP = 400
 # than every 30s — a cancel+place per trail tick would spam the venue.
 _BACKSTOP_REPEG_FRAC = Decimal("0.0005")
 _BACKSTOP_REPEG_S = 30.0
+
+# A placement result whose reason matches this is a PERMANENT venue limitation
+# (e.g. Binance demo-fapi -4120 "Order type not supported for this endpoint"),
+# not a transient reject — retrying it every poll floods the broker (see the
+# 579-reject incident). Detected in the reason string place_stop surfaces.
+_HARD_STOP_UNSUPPORTED_MARKERS = ("-4120", "not supported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +200,16 @@ class StrategyRunner:
         # ratchet): a replacement may never rest looser than any level this
         # position's backstop has already held.
         self._backstop_floor: dict | None = None       # {side, level}
+        # Last place-ATTEMPT time (success OR failure). A failed placement
+        # leaves self._backstop None, so without this a rejecting venue would
+        # be retried EVERY poll (~2s) — the 579-reject flood. Gating a fresh
+        # attempt on this at _BACKSTOP_REPEG_S caps a rejecting venue to one
+        # retry per repeg window. Cleared on a successful place (real _backstop
+        # gates thereafter).
+        self._backstop_attempt_at: float | None = None
+        # Set once when the venue conclusively can't rest stop orders (e.g.
+        # -4120). Stops all further attempts this process; logged once.
+        self._hard_stop_unsupported = False
         self._now = time.monotonic          # injectable clock (repeg rate limit)
 
         self.running = False
@@ -422,6 +441,18 @@ class StrategyRunner:
         if bs is not None:
             await self._cancel_fn(bs["key"])
 
+    @staticmethod
+    def _reject_is_unsupported(r) -> bool:
+        """Does a place_stop result mean the venue permanently can't rest stop
+        orders? place_stop returns {"rejected": key, "reason": <broker reason>}
+        (or {"blocked": ..., "reason": ...}); the broker reason for Binance
+        demo-fapi is "[-4120] Order type not supported for this endpoint". Match
+        against that text — the reason IS surfaced, so no threading needed."""
+        if not isinstance(r, dict):
+            return False
+        reason = str(r.get("reason", "")).lower()
+        return any(m in reason for m in _HARD_STOP_UNSUPPORTED_MARKERS)
+
     async def _manage_backstop(self, pos: Decimal, price: Decimal,
                                stop: Decimal, is_long: bool) -> None:
         """Exchange-NATIVE trailing hard-stop: a reduce-only STOP_MARKET
@@ -439,6 +470,8 @@ class StrategyRunner:
         the desired level only ever tightens."""
         if self._place_stop_fn is None or self._hard_stop_pct <= 0:
             return
+        if self._hard_stop_unsupported:
+            return                               # venue can't rest stops — gave up
         side = "SELL" if is_long else "BUY"
         if self._backstop is not None and self._backstop["side"] != side:
             await self._cancel_backstop()        # position flipped
@@ -461,12 +494,29 @@ class StrategyRunner:
         qty = abs(pos)
         bs = self._backstop
         if bs is None:
+            # Rate-limit the ATTEMPT itself, not just successes: a failed place
+            # leaves _backstop None, so without this a rejecting venue is retried
+            # every poll forever (the 579-reject flood). One attempt per repeg
+            # window whether it succeeds or fails.
+            if self._backstop_attempt_at is not None and \
+                    self._now() - self._backstop_attempt_at < _BACKSTOP_REPEG_S:
+                return
+            self._backstop_attempt_at = self._now()
             r = await self._place_stop_fn(side, qty, desired)
             if isinstance(r, dict) and "placed" in r:
                 self._backstop = {"key": r["placed"], "side": side,
                                   "stop": desired, "qty": qty, "at": self._now()}
                 self._backstop_floor = {"side": side, "level": desired}
-            return                               # blocked/rejected: retry next poll
+                self._backstop_attempt_at = None   # real _backstop gates now
+                return
+            # Rejected/blocked. If the reason says the venue can't rest stop
+            # orders at all (e.g. -4120), it's permanent — stop trying entirely
+            # this process and log ONCE, rather than retrying every window.
+            if self._reject_is_unsupported(r):
+                self._hard_stop_unsupported = True
+                log.warning("hard-stop backstop unsupported on this venue "
+                            "(-4120); disabling for this session")
+            return                               # transient: retry next window
         if self._now() - bs["at"] < _BACKSTOP_REPEG_S:
             return                               # repeg rate limit
         tighter = desired - bs["stop"] if is_long else bs["stop"] - desired

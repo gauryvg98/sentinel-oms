@@ -37,36 +37,36 @@ primary_region = "sin"
   # Fat-finger backstop only (per-symbol |position| cap = this / price). Must
   # clear the 25x sizing headroom (~pool/3 × 25 ≈ 33k notional) or it would
   # silently clamp effective leverage; risk_pct + stops are the real protection.
-  SENTINEL_MAX_NOTIONAL = "70000"
+  SENTINEL_MAX_NOTIONAL = "200000"
   # 25x: Binance leverage BRACKETS cap max notional per position at each
   # leverage tier — at 100x alts allow only ~5-10k notional and our 25-50k
   # risk-sized orders got -2027 rejects. 25x brackets allow 100k+. Old note:: sizing stays RISK-driven (eff lev =
   # risk_pct/stop_pct = 10-20x with 2% risk and 0.1-0.2% stops), so 100x mostly
   # means less margin posted per position. Symbols whose Binance bracket caps
   # below 100 reject the setting and keep their previous leverage (non-fatal).
-  SENTINEL_LEVERAGE = "25"
+  SENTINEL_LEVERAGE = "100"
   # 25 (= the exchange setting): sizing may now use the FULL equity share as
   # margin. The old conservative static cap (10x, before that 15x) existed only
   # to leave room for margin sizing couldn't see; the closed-loop margin clamp
   # (risk sizing subtracts the position's and the resting entry's ACTUAL margin,
   # with a 10% buffer) supersedes it — -2019 is prevented by measurement, not by
   # under-levering every order.
-  SENTINEL_MAX_LEVERAGE = "25"
+  SENTINEL_MAX_LEVERAGE = "100"
   # 5%: eff lev = risk_pct/stop_pct -> 25x at the 0.2% stop cap, 50x at the
   # 0.1% floor. A stop-out costs ~5% of the bot's equity share. Aggressive by
   # instruction — the 100x exchange setting keeps posted margin small.
-  SENTINEL_RISK_PCT = "0.05"
+  SENTINEL_RISK_PCT = "0.10"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Tight stops (0.1-0.2% of price) with TP at 2.5x the stop — 5.5x proved
   # unreachable on 1m bars (stops always hit first). 2.5x breaks even at ~29%
   # winners. Loss per stop-out stays ~risk_pct of the bot's equity share.
-  SENTINEL_SMA_STOP_CAP_PCT = "0.002"
-  SENTINEL_SMA_STOP_FLOOR_PCT = "0.001"
-  SENTINEL_RR = "2.5"
+  SENTINEL_SMA_STOP_CAP_PCT = "0.001"
+  SENTINEL_SMA_STOP_FLOOR_PCT = "0.0005"
+  SENTINEL_RR = "1.5"
   # Ratcheting trail: the SL follows the position's best price at the stop
   # distance and only ever tightens; fixed TP is disabled while trailing (the
   # trail is the profit-taker — runs are ridden, giveback bounded to ~one sd).
-  SENTINEL_TRAIL = "true"
+  SENTINEL_TRAIL = "false"
   # After a stop-out, re-enter the SAME regime after 2 closed bars (0 = only on flip)
   SENTINEL_REENTRY_BARS = "2"
   # Exchange-native hard-stop backstop: a reduce-only STOP_MARKET rests ON the

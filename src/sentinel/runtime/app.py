@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from decimal import Decimal
+from uuid import uuid4
 
 import asyncpg
 
@@ -150,7 +151,18 @@ class SentinelApp:
 
     # ------------------------------------------------------------ lifecycle
 
+    async def _record_halt(self, reason: str) -> None:
+        """Durable halt evidence: every halt writes a decision_log row with
+        its reason. supervisor.halted is in-memory and the CRITICAL log line
+        scrolls away — the ledger row is what survives a restart."""
+        await self.store.record_decision(
+            uuid4(), "ACCOUNT", "supervisor", "HALTED", {"reason": reason}
+        )
+
     async def start(self, *, arm_protection: bool = True) -> RecoveryReport:
+        # Halts must leave durable evidence, and tasks spawned below can halt
+        # us — so wire the hook before the first spawn.
+        self.supervisor.on_halt = self._record_halt
         # FIRST of all: claim exclusive ownership of the account. If another
         # process holds it, raise AnotherWriterActive and boot nothing — the
         # two-writer interleave that HALTED us before can't even begin.
@@ -195,6 +207,9 @@ class SentinelApp:
                   flush=True)
             self.supervisor.halted.set()
             self.supervisor.alert(f"STARTUP HALT (boot divergence): {e}")
+            # Inline (not via the async hook): the DB just served recovery,
+            # and start() should not proceed until the halt row is durable.
+            await self._record_halt(f"STARTUP HALT (boot divergence): {e}")
             report = RecoveryReport()
         if report.positions_imported:
             print(f"  RECONCILED positions from exchange: "

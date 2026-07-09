@@ -48,6 +48,11 @@ class TaskSupervisor:
         self._children: list[_Child] = []
         self.failures: list[TaskFailure] = []
         self.halted = asyncio.Event()
+        # Durable halt hook: set by the app to write the halt reason to the
+        # ledger. self.halted is in-memory and the CRITICAL log line lives in
+        # a short buffer — without this, a restart erases all evidence of WHAT
+        # halted the account and WHEN.
+        self.on_halt: Callable[[str], Awaitable[None]] | None = None
 
     def spawn(
         self,
@@ -90,7 +95,20 @@ class TaskSupervisor:
         else:
             log.critical("task %s failed (%r); HALTING", child.name, error)
             self.halted.set()
-            self.alert(f"task {child.name} failed: {error!r}")
+            message = f"task {child.name} failed: {error!r}"
+            self.alert(message)
+            if self.on_halt is not None:
+                asyncio.get_running_loop().create_task(
+                    self._record_halt(message))
+
+    async def _record_halt(self, message: str) -> None:
+        """Run the on_halt hook, absorbing its failures: a halt-record
+        failure must never cascade — the halt itself already stands."""
+        try:
+            await self.on_halt(message)  # type: ignore[misc]
+        except Exception as e:  # noqa: BLE001
+            log.warning("durable halt record failed (%r); "
+                        "halt reason survives only in logs", e)
 
     async def _restart_later(self, child: _Child, delay: float) -> None:
         await asyncio.sleep(delay)

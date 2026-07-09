@@ -125,6 +125,81 @@ async def test_clean_exit_is_not_a_failure():
     assert sup.failures == [] and not sup.halted.is_set()
 
 
+async def test_halt_invokes_on_halt_with_the_reason():
+    """A halt must leave durable evidence: the on_halt hook receives the
+    halt reason so the app can write it to the ledger."""
+    sup = TaskSupervisor()
+    recorded: list[str] = []
+    seen = asyncio.Event()
+
+    async def on_halt(message: str) -> None:
+        recorded.append(message)
+        seen.set()
+
+    sup.on_halt = on_halt
+
+    async def doomed():
+        raise RuntimeError("boom")
+
+    sup.spawn("critical", doomed, restart=False)
+    await asyncio.wait_for(sup.halted.wait(), timeout=1)
+    await asyncio.wait_for(seen.wait(), timeout=1)
+    assert recorded == ["task critical failed: RuntimeError('boom')"]
+
+
+async def test_on_halt_failure_never_cascades():
+    """The halt record failing (ledger down, exactly when things are bad)
+    must not take anything else with it — the halt itself already stands."""
+    sup = TaskSupervisor()
+    called = asyncio.Event()
+
+    async def broken_on_halt(message: str) -> None:
+        called.set()
+        raise RuntimeError("ledger unavailable")
+
+    sup.on_halt = broken_on_halt
+
+    async def doomed():
+        raise RuntimeError("boom")
+
+    sup.spawn("critical", doomed, restart=False)
+    await asyncio.wait_for(sup.halted.wait(), timeout=1)
+    await asyncio.wait_for(called.wait(), timeout=1)
+    await asyncio.sleep(0.01)          # let the record task finish/fail
+    assert sup.halted.is_set()
+    assert len(sup.failures) == 1      # the hook failure adds no failure
+
+
+async def test_on_halt_not_invoked_for_restarted_tasks(monkeypatch):
+    """on_halt fires on the HALT branch and nowhere else: a restart=True
+    failure respawns without writing a halt record."""
+    from sentinel.runtime import supervisor as sup_mod
+    monkeypatch.setattr(sup_mod, "_RESTART_BASE_S", 0.01)
+
+    sup = TaskSupervisor()
+    halt_calls: list[str] = []
+
+    async def on_halt(message: str) -> None:
+        halt_calls.append(message)
+
+    sup.on_halt = on_halt
+    runs = 0
+    done = asyncio.Event()
+
+    async def flaky():
+        nonlocal runs
+        runs += 1
+        if runs < 2:
+            raise RuntimeError("transient")
+        done.set()
+        await asyncio.sleep(3600)
+
+    sup.spawn("flaky", flaky, restart=True)
+    await asyncio.wait_for(done.wait(), timeout=1)
+    assert halt_calls == []            # restarts are not halts
+    await sup.shutdown()
+
+
 # ------------------------------------------------- graceful drain semantics
 
 
@@ -191,3 +266,27 @@ async def test_app_lifecycle_end_to_end(pool):
     await app.stop()
     assert not app.accepting
     assert app.supervisor.failures == []          # clean lifecycle throughout
+
+
+async def test_halt_writes_a_durable_decision_row(pool):
+    """start() wires supervisor.on_halt to the ledger: firing it lands a
+    decision_log row carrying the reason — the evidence that survives a
+    restart, unlike the in-memory halted flag or the log buffer."""
+    from sentinel.broker.sim import BrokerScript, ScriptedBroker
+    from sentinel.runtime import SentinelApp
+
+    app = SentinelApp(pool, ScriptedBroker(BrokerScript()))
+    await app.start()
+    assert app.supervisor.on_halt is not None     # wired by start()
+
+    # Fire the hook exactly as the supervisor's halt branch would.
+    await app.supervisor.on_halt("task reconcile failed: divergence")
+
+    halts = [d for d in await app.store.recent_decisions()
+             if d["decision"] == "HALTED"]
+    assert len(halts) == 1
+    assert halts[0]["actor"] == "supervisor"
+    assert halts[0]["instrument"] == "ACCOUNT"
+    assert halts[0]["detail"] == {
+        "reason": "task reconcile failed: divergence"}
+    await app.stop()

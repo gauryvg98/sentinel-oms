@@ -798,17 +798,19 @@ function sparkSVG(vals, cls){
     `<path class="fill ${cls}" d="${area}"/><path class="line ${cls}" d="${line}"/></svg>`;
 }
 function latencyCard(key, d){
-  const cls = healthCls(d.p50), b = bigMs(d.p50);
+  // p99 is the hero number: worst-case speed is what an OMS answers for.
+  // p50 tells you the happy path; p99 tells you the incident.
+  const cls = healthCls(d.p99), b = bigMs(d.p99);
   return `<div class="ss-card">
     <div class="ss-ch"><span>${nice(key,LAT_NAMES)}</span><span class="dot ${dotCls(cls)}"></span></div>
-    <div class="ss-big ${cls}">${b.n}<span class="ss-u">${b.u}</span><span class="ss-lbl">p50</span></div>
+    <div class="ss-big ${cls}">${b.n}<span class="ss-u">${b.u}</span><span class="ss-lbl">p99</span></div>
     ${sparkSVG(d.spark, cls)}
     <div class="ss-sub3">
-      <div><span>avg</span><b>${fmtMs(d.avg)}</b></div>
+      <div><span>p50</span><b>${fmtMs(d.p50)}</b></div>
       <div><span>p95</span><b>${fmtMs(d.p95)}</b></div>
       <div><span>max</span><b>${fmtMs(d.max)}</b></div>
     </div>
-    <div class="ss-foot"><span>${(d.count||0).toLocaleString()} samples</span><span>p99 ${fmtMs(d.p99)}</span></div>
+    <div class="ss-foot"><span>${(d.count||0).toLocaleString()} samples</span><span>avg ${fmtMs(d.avg)}</span></div>
   </div>`;
 }
 function statCard(name, valHtml, footL, footR){

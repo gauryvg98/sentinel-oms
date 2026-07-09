@@ -68,7 +68,7 @@ primary_region = "sin"
   # trail is the profit-taker — runs are ridden, giveback bounded to ~one sd).
   SENTINEL_TRAIL = "true"
   # After a stop-out, re-enter the SAME regime after 2 closed bars (0 = only on flip)
-  SENTINEL_REENTRY_BARS = "2"
+  SENTINEL_REENTRY_BARS = "0"
   # Exchange-native hard-stop backstop: a reduce-only STOP_MARKET rests ON the
   # venue 0.5% of price BEYOND the software trail and ratchets with it.
   # Catastrophe insurance — if the process dies, the position still has a real

@@ -62,6 +62,15 @@ _READONLY = os.environ.get("SENTINEL_PUBLIC_READONLY", "false").strip().lower() 
 _ADMIN_TOKEN = os.environ.get("SENTINEL_ADMIN_TOKEN", "")
 _ADMIN_COOKIE = "sentinel_admin"
 
+# --- execution mode -----------------------------------------------------------
+# SENTINEL_EXECUTION="market" turns on reactive market execution: the strategy
+# runner fires MARKET entries (instead of resting maker pegs), evaluates the
+# signal intra-bar off the forming bar every poll (not only on bar close), and
+# flips stance instantly (market reduce then market open). Anything else (unset /
+# "peg", the default) leaves the peg behaviour byte-identical. SLs stay software-
+# market in BOTH modes. Read once at import — a process runs one execution mode.
+_MARKET_EXECUTION = os.environ.get("SENTINEL_EXECUTION", "peg").strip().lower() == "market"
+
 
 def _is_admin(request: "Request") -> bool:
     """A request may write when the deployment isn't read-only, or it carries the
@@ -508,6 +517,15 @@ class Bot:
             place_entry_fn=lambda qty, price: t.place_limit("BUY", qty, price),
             reduce_sell_fn=lambda qty: t.trade("SELL", btc=float(qty)),
             place_short_fn=lambda qty, price: t.place_limit("SELL", qty, price),
+            # Reactive market-execution mode (SENTINEL_EXECUTION="market"): the
+            # runner's OPEN branch fires a MARKET entry through the same guarded
+            # gateway (limit_price=None -> market). BUY = ENTRY; a SELL open (a
+            # short) must pass ENTRY explicitly, else trade() defaults a SELL to
+            # PROTECTIVE_EXIT and never-over-exit would clamp it to nothing.
+            market_execution=_MARKET_EXECUTION,
+            place_market_buy_fn=lambda qty: t.trade("BUY", btc=float(qty)),
+            place_market_sell_fn=lambda qty: t.trade(
+                "SELL", btc=float(qty), authority=Authority.ENTRY),
             reduce_buy_fn=lambda qty: t.trade(
                 "BUY", btc=float(qty), authority=Authority.PROTECTIVE_EXIT),
             cancel_fn=lambda key: t.cancel(key),

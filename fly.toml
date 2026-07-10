@@ -75,6 +75,14 @@ primary_region = "sin"
   # stop at the exchange; in normal operation the software trail exits first
   # because it is strictly tighter. Unset/0 disables.
   SENTINEL_HARD_STOP_PCT = "0.005"
+  # Reactive momentum via MARKET execution: entries fill instantly at market (no
+  # resting maker peg), the signal is evaluated intra-bar off the forming bar
+  # EVERY poll (not just on bar close), and a stance reversal flips instantly
+  # (market reduce to zero, then market open the other side) without waiting for
+  # a bar close. SLs stay software-market either way. Trade-off: taker fees
+  # (~2x maker) and higher turnover — chosen deliberately so signals act the
+  # moment they form. Unset/"peg" restores the maker-peg behaviour.
+  SENTINEL_EXECUTION = "market"
 
 [http_service]
   internal_port = 8000

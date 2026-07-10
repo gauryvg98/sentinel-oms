@@ -131,6 +131,16 @@ class StrategyRunner:
         place_entry_fn: Callable[[Decimal, Decimal], Awaitable[dict]],  # maker BUY at bid
         reduce_sell_fn: Callable[[Decimal], Awaitable[dict]],           # market SELL qty
         cancel_fn: Callable[[str], Awaitable[dict]],
+        # Reactive MARKET-execution mode (SENTINEL_EXECUTION="market"). Off by
+        # default -> byte-identical peg behaviour. On -> the "open" branch fires
+        # a MARKET entry instead of a resting peg, and the run loop re-evaluates
+        # the signal off the FORMING bar every poll (intra-bar) so entries/flips
+        # react without waiting for a bar close. Reduces are market either way.
+        market_execution: bool = False,
+        # Market entries: (qty) -> market BUY / SELL. Used only in market mode's
+        # "open" branch; None falls back to the peg path (e.g. tests/spot).
+        place_market_buy_fn: Callable[[Decimal], Awaitable[dict]] | None = None,
+        place_market_sell_fn: Callable[[Decimal], Awaitable[dict]] | None = None,
         bid_fn: Callable[[], Decimal | None],
         ask_fn: Callable[[], Decimal | None],
         budget_fn: Callable[[], Decimal],         # risk budget in USDT (100% conviction)
@@ -169,6 +179,9 @@ class StrategyRunner:
         self._place_short_fn = place_short_fn
         self._reduce_buy_fn = reduce_buy_fn
         self._cancel_fn = cancel_fn
+        self._market_execution = market_execution
+        self._place_market_buy_fn = place_market_buy_fn
+        self._place_market_sell_fn = place_market_sell_fn
         self._bid_fn = bid_fn
         self._ask_fn = ask_fn
         self._budget_fn = budget_fn
@@ -297,6 +310,36 @@ class StrategyRunner:
             return ohlcv(Bar(high=Decimal(str(c["h"])), low=Decimal(str(c["l"])),
                              close=Decimal(str(c["c"]))))
         return self.strategy.on_bar(Decimal(str(c["c"])))
+
+    def _replay_closed(self) -> Decision | None:
+        """Reset the (stateful) strategy and re-feed ONLY the closed bars
+        (candles[:-1]), returning the last closed-bar decision. Pure w.r.t. the
+        runner's bookkeeping — touches strategy indicator state ONLY, never
+        _last_closed_t / _history / _suppress_age. The intra-bar evaluator uses
+        it to undo a forming-bar feed, so the deque never accretes duplicate
+        forming closes (which would corrupt the SMA)."""
+        reset = getattr(self.strategy, "reset", None)
+        if callable(reset):
+            reset()
+        d: Decision | None = None
+        for c in self._bars.candles[:-1]:
+            d = self._feed(c)
+        return d
+
+    def _decide_intrabar(self) -> Decision | None:
+        """Decision from CLOSED history + the live FORMING bar (candles[-1],
+        whose close updates each tick) — WITHOUT permanently advancing the
+        strategy's indicator state. Feed the forming bar to read the decision,
+        then replay closed history to restore the exact pre-forming state. The
+        runner's closed-bar bookkeeping is untouched, so suppression/history
+        still advance only on a real bar close (done in run())."""
+        candles = self._bars.candles
+        if not candles:
+            return self.last_decision
+        forming = candles[-1]
+        d = self._feed(forming)          # transient: strategy now includes forming
+        self._replay_closed()            # undo it — strategy back to closed-only
+        return d
 
     def _seed_from_history(self) -> None:
         reset = getattr(self.strategy, "reset", None)
@@ -553,6 +596,16 @@ class StrategyRunner:
             await self._cancel_fn(plan.cancel_key)
             return f"CANCEL {plan.cancel_key} — {plan.reason}"
         if plan.kind == "open":
+            # Market-execution mode: fire a MARKET entry (instant fill) instead
+            # of resting a maker peg. Falls back to the peg path when the market
+            # fn for this side isn't wired (spot / tests). Reduces stay market.
+            if self._market_execution:
+                if plan.side == "BUY" and self._place_market_buy_fn is not None:
+                    r = await self._place_market_buy_fn(plan.qty)
+                    return f"MARKET {plan.side} {self._fmt(r)}"
+                if plan.side == "SELL" and self._place_market_sell_fn is not None:
+                    r = await self._place_market_sell_fn(plan.qty)
+                    return f"MARKET {plan.side} {self._fmt(r)}"
             if plan.side == "BUY":
                 r = await self._place_entry_fn(plan.qty, plan.price)
             elif self._place_short_fn is not None:
@@ -603,17 +656,36 @@ class StrategyRunner:
             if len(candles) < 2:
                 continue
             closed = candles[-2]
-            if self._last_closed_t is not None and closed["t"] <= self._last_closed_t:
-                continue
-            self._last_closed_t = closed["t"]
+            new_close = self._last_closed_t is None or closed["t"] > self._last_closed_t
 
-            if self._suppressed is not None:
-                self._suppress_age += 1          # one more closed bar in timeout
-            self.last_decision = self._feed(closed)
-            self._history.append({"t": closed["t"], "detail": self.last_decision.detail})
-            del self._history[:-_HISTORY_CAP]
-            await self.reconcile_now()
-            await self._on_change()
+            if new_close:
+                # REAL bar close: advance the closed-bar bookkeeping exactly as
+                # peg mode always has — suppression counting and _history move
+                # ONLY here. Feeding `closed` also leaves the strategy's indicator
+                # state warmed on real closes (the intra-bar path below restores
+                # to this same closed-only state after each forming-bar peek).
+                self._last_closed_t = closed["t"]
+                if self._suppressed is not None:
+                    self._suppress_age += 1      # one more closed bar in timeout
+                self.last_decision = self._feed(closed)
+                self._history.append({"t": closed["t"], "detail": self.last_decision.detail})
+                del self._history[:-_HISTORY_CAP]
+
+            if self._market_execution:
+                # Intra-bar: re-derive the decision from closed history + the live
+                # FORMING bar EVERY poll and reconcile on it, so market entries and
+                # flips react without waiting for a bar close. _decide_intrabar
+                # restores the strategy to its closed-only state, so the
+                # bookkeeping advanced above is never corrupted.
+                d = self._decide_intrabar()
+                if d is not None:
+                    self.last_decision = d
+                await self.reconcile_now()
+                await self._on_change()
+            elif new_close:
+                # Peg mode: bar-close-only path, byte-identical to before.
+                await self.reconcile_now()
+                await self._on_change()
 
     def _view_spec(self) -> dict:
         vs = getattr(self.strategy, "view_spec", None)

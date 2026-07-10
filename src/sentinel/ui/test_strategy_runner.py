@@ -178,12 +178,14 @@ class _Strat:
 
 
 def make(*, stance=Stance.LONG, detail=None, position="0", entry_=None,
-         running=True, allow_short=True):
+         running=True, allow_short=True, market_execution=False,
+         strategy=None, candles=None):
     calls = {"open_buy": [], "open_sell": [], "reduce_sell": [],
-             "reduce_buy": [], "cancel": []}
+             "reduce_buy": [], "cancel": [],
+             "mkt_buy": [], "mkt_sell": []}
 
     async def position_fn():
-        return Decimal(position)
+        return Decimal(position) if isinstance(position, str) else position()
 
     async def open_entry_fn():
         return entry_
@@ -203,61 +205,199 @@ def make(*, stance=Stance.LONG, detail=None, position="0", entry_=None,
     async def cancel_fn(key):
         calls["cancel"].append(key); return {"canceling": key}
 
+    async def market_buy_fn(qty):
+        calls["mkt_buy"].append(qty); return {"placed": "MB1", "qty": str(qty)}
+
+    async def market_sell_fn(qty):
+        calls["mkt_sell"].append(qty); return {"placed": "MS1", "qty": str(qty)}
+
     async def on_change():
         return None
 
+    bars = SimpleNamespace(candles=candles if candles is not None else [])
     r = StrategyRunner(
-        _Strat(stance, detail), SimpleNamespace(candles=[]),
+        strategy if strategy is not None else _Strat(stance, detail), bars,
         position_fn=position_fn, open_entry_fn=open_entry_fn,
         place_entry_fn=place_entry_fn, reduce_sell_fn=reduce_sell_fn,
         cancel_fn=cancel_fn, bid_fn=lambda: PX, ask_fn=lambda: PX,
         budget_fn=lambda: B, on_change=on_change,
         place_short_fn=place_short_fn, reduce_buy_fn=reduce_buy_fn,
-        allow_short=allow_short)
+        allow_short=allow_short, market_execution=market_execution,
+        place_market_buy_fn=market_buy_fn, place_market_sell_fn=market_sell_fn)
     r.running = running
-    r.last_decision = Decision(stance, detail or {}) if stance is not None else None
-    return r, calls
+    if strategy is None:
+        r.last_decision = Decision(stance, detail or {}) if stance is not None else None
+    return r, calls, bars
 
 
 async def test_reconcile_opens_a_long_maker_when_flat():
-    r, c = make(stance=Stance.LONG, position="0")
+    r, c, _bars = make(stance=Stance.LONG, position="0")
     a = await r.reconcile_now()
     assert c["open_buy"] == [(Decimal("0.15"), PX)] and a.startswith("PEG BUY")
 
 
 async def test_reconcile_opens_a_short_maker_when_flat():
-    r, c = make(stance=Stance.SHORT, position="0")
+    r, c, _bars = make(stance=Stance.SHORT, position="0")
     a = await r.reconcile_now()
     assert c["open_sell"] == [(Decimal("0.15"), PX)] and a.startswith("PEG SELL")
 
 
 async def test_reconcile_reduces_an_oversized_long_at_market():
-    r, c = make(stance=Stance.LONG, position="0.20")
+    r, c, _bars = make(stance=Stance.LONG, position="0.20")
     a = await r.reconcile_now()
     assert c["reduce_sell"] == [Decimal("0.05")] and a.startswith("REDUCE SELL")
 
 
 async def test_reconcile_covers_a_short_at_market():
-    r, c = make(stance=Stance.SHORT, position="-0.20")
+    r, c, _bars = make(stance=Stance.SHORT, position="-0.20")
     a = await r.reconcile_now()
     assert c["reduce_buy"] == [Decimal("0.05")] and a.startswith("REDUCE BUY")
 
 
 async def test_short_stance_on_spot_does_not_short():
-    r, c = make(stance=Stance.SHORT, position="0", allow_short=False)
+    r, c, _bars = make(stance=Stance.SHORT, position="0", allow_short=False)
     assert await r.reconcile_now() is None            # target 0, flat -> noop
     assert c["open_sell"] == [] and c["reduce_sell"] == []
 
 
 async def test_half_conviction_sizes_the_entry_down():
-    r, c = make(detail={"target_weight": "0.5"}, position="0")
+    r, c, _bars = make(detail={"target_weight": "0.5"}, position="0")
     await r.reconcile_now()
     assert c["open_buy"] == [(Decimal("0.075"), PX)]
 
 
 async def test_paused_runner_does_nothing():
-    r, c = make(position="0", running=False)
+    r, c, _bars = make(position="0", running=False)
     assert await r.reconcile_now() is None
+
+
+# ------------------------------------------------ market-execution mode (reactive)
+#
+# Off (default = peg): the "open" branch rests a maker peg and the run loop
+# evaluates the signal ONLY on bar close. On ("market"): the open branch fires a
+# MARKET entry, the signal is re-evaluated intra-bar off the forming bar every
+# poll, and a stance flip executes both legs at once (market reduce, then market
+# open). SLs stay software-market either way. These follow the fake-fn patterns
+# above; the intra-bar/flip tests drive one iteration of run()'s per-poll body.
+
+async def _one_poll(r):
+    """Run exactly one iteration of the market-mode per-poll body (the loop in
+    run(), minus the sleep/supervision) so intra-bar behaviour is testable
+    without the infinite loop. Mirrors run() step for step."""
+    await r._check_brackets()
+    candles = r._bars.candles
+    if len(candles) < 2:
+        return
+    closed = candles[-2]
+    new_close = r._last_closed_t is None or closed["t"] > r._last_closed_t
+    if new_close:
+        r._last_closed_t = closed["t"]
+        if r._suppressed is not None:
+            r._suppress_age += 1
+        r.last_decision = r._feed(closed)
+        r._history.append({"t": closed["t"], "detail": r.last_decision.detail})
+    if r._market_execution:
+        d = r._decide_intrabar()
+        if d is not None:
+            r.last_decision = d
+        await r.reconcile_now()
+
+
+async def test_market_mode_places_a_market_entry_not_a_peg():
+    r, c, _bars = make(stance=Stance.LONG, position="0", market_execution=True)
+    a = await r.reconcile_now()
+    # MARKET open path taken (limit_price=None), NOT a resting peg.
+    assert c["mkt_buy"] == [Decimal("0.15")] and c["open_buy"] == []
+    assert a.startswith("MARKET BUY")
+
+
+async def test_market_mode_short_open_is_a_market_sell():
+    r, c, _bars = make(stance=Stance.SHORT, position="0", market_execution=True)
+    a = await r.reconcile_now()
+    assert c["mkt_sell"] == [Decimal("0.15")] and c["open_sell"] == []
+    assert a.startswith("MARKET SELL")
+
+
+async def test_peg_mode_still_places_a_peg_limit():
+    # Flag OFF -> byte-identical peg behaviour: resting maker limit, no market fn.
+    r, c, _bars = make(stance=Stance.LONG, position="0", market_execution=False)
+    a = await r.reconcile_now()
+    assert c["open_buy"] == [(Decimal("0.15"), PX)] and c["mkt_buy"] == []
+    assert a.startswith("PEG BUY")
+
+
+def _ohlcv(closes):
+    """OHLCV candle series (SMA reads only close). t is bar-aligned."""
+    return [{"t": i, "h": str(c), "l": str(c), "c": str(c)}
+            for i, c in enumerate(closes, start=1)]
+
+
+async def test_intrabar_reevaluates_and_acts_between_bar_closes():
+    # Closed bars 100,99,98 -> SMA(2/3) fast<=slow -> FLAT (no position).
+    # A FORMING bar whose close climbs to 200 lifts fast>slow -> LONG intra-bar:
+    # market mode must OPEN off the forming bar without waiting for it to close.
+    candles = _ohlcv([100, 99, 98]) + [{"t": 4, "h": "98", "l": "98", "c": "98"}]
+    r, c, bars = make(strategy=SmaCross(fast=2, slow=3), position="0",
+                      market_execution=True, candles=candles)
+    r._seed_from_history()
+    hist_before = len(r._history)
+
+    await _one_poll(r)                        # forming close 98 -> still FLAT
+    assert c["mkt_buy"] == [] and r.last_decision.stance is Stance.FLAT
+    closed_t_before = r._last_closed_t
+
+    bars.candles[-1] = {"t": 4, "h": "200", "l": "200", "c": "200"}  # forming climbs
+    await _one_poll(r)                        # intra-bar flip to LONG -> market open
+    assert r.last_decision.stance is Stance.LONG
+    assert c["mkt_buy"] == [Decimal("0.15")]  # acted BETWEEN closes
+    # Bookkeeping untouched by the forming-bar peek: no new close was booked.
+    assert r._last_closed_t == closed_t_before
+    assert len(r._history) == hist_before     # only the real closed decisions
+
+
+async def test_intrabar_history_and_suppression_advance_only_on_close():
+    # Suppress LONG (as after a stop); with a forming bar re-evaluated every poll,
+    # _suppress_age and _history must advance ONLY when a real bar closes.
+    candles = _ohlcv([100, 101, 102]) + [{"t": 4, "h": "103", "l": "103", "c": "103"}]
+    r, c, bars = make(strategy=SmaCross(fast=2, slow=3), position="0",
+                      market_execution=True, candles=candles)
+    r._seed_from_history()
+    hist0, age0 = len(r._history), r._suppress_age
+    r._suppressed = Stance.LONG
+
+    await _one_poll(r)                        # forming bar peeked, no new close
+    assert r._suppress_age == age0 and len(r._history) == hist0
+
+    await _one_poll(r)                        # still the same forming bar
+    assert r._suppress_age == age0 and len(r._history) == hist0
+
+    # A REAL close appears (the forming bar closes, a new one forms) -> advance.
+    bars.candles[-1] = {"t": 4, "h": "103", "l": "103", "c": "103"}
+    bars.candles.append({"t": 5, "h": "104", "l": "104", "c": "104"})
+    await _one_poll(r)
+    assert r._suppress_age == age0 + 1 and len(r._history) == hist0 + 1
+
+
+async def test_long_to_short_flip_closes_and_opens_instantly_in_market_mode():
+    # LONG position; strategy now says SHORT. Market mode must reduce the long to
+    # zero AND open the short in the SAME reconcile pass — no waiting for a bar
+    # close between the two legs (the peg's one-bar cadence).
+    pos = {"q": Decimal("0.15")}
+
+    r, c, bars = make(stance=Stance.SHORT, position=lambda: pos["q"],
+                      market_execution=True, allow_short=True)
+    r.last_decision = Decision(Stance.SHORT, {})
+
+    # First pass reduces the long to zero (market), then the position is flat...
+    a1 = await r.reconcile_now()
+    assert c["reduce_sell"] == [Decimal("0.15")]    # long closed at market
+    pos["q"] = Decimal("0")                          # reduce booked -> flat
+
+    # ...second pass opens the short at market — both legs fire promptly, no bar
+    # close needed between them.
+    a2 = await r.reconcile_now()
+    assert c["mkt_sell"] == [Decimal("0.15")]       # short opened at market
+    assert a1.startswith("REDUCE SELL") and a2.startswith("MARKET SELL")
 
 
 # ---------------------------------------------------------------- reseed (SMA)

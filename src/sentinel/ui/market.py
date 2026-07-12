@@ -42,12 +42,18 @@ MAX_BOOK_AGE_S = 15.0
 class MarketData:
     def __init__(self, symbol: str, *, rest_base: str = REST_BASE,
                  stream_base: str = STREAM_BASE,
-                 kline_path: str = "/api/v3/klines") -> None:
+                 kline_path: str = "/api/v3/klines",
+                 interval: str = "1m") -> None:
         self.symbol = symbol
         self._rest = rest_base
         self._stream = stream_base
         self._kline_path = kline_path          # /fapi/v1/klines on futures
-        self.interval = "1m"
+        # Chart candle interval. Defaults to 1m but is set to the STRATEGY
+        # interval at wiring time so the chart draws the same timeframe the
+        # strategy decides on (1h candles under a 1h SMA), not 1m candles under
+        # 1h SMA lines. The live mark still comes from @bookTicker, so PnL stays
+        # tick-fresh regardless of the candle interval.
+        self.interval = interval
         self.candles: list[dict] = []          # {t, o, h, l, c} — t in seconds
         self._price: Decimal | None = None
         self._price_ts: float = 0.0

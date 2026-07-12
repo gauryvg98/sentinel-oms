@@ -129,7 +129,8 @@ def _venue() -> Venue:
             adapter=adapter, allow_short=True, predefined=PERP_SYMBOLS,
             default_symbol=SYMBOL, default_interval=interval,
             make_market=lambda s: MarketData(s, rest_base=rest, stream_base=stream,
-                                             kline_path="/fapi/v1/klines"),
+                                             kline_path="/fapi/v1/klines",
+                                             interval=interval),
             make_bars=lambda s, iv: BarFeed(s, iv, rest_base=rest, stream_base=stream,
                                             kline_path="/fapi/v1/klines"),
             fetch_spec=lambda s: fetch_binance_spec(rest, "/fapi/v1/exchangeInfo", s),
@@ -143,7 +144,7 @@ def _venue() -> Venue:
     return Venue(
         adapter=adapter, allow_short=False, predefined=SPOT_SYMBOLS,
         default_symbol=SYMBOL, default_interval=interval,
-        make_market=lambda s: MarketData(s),
+        make_market=lambda s: MarketData(s, interval=interval),
         make_bars=lambda s, iv: BarFeed(s, iv),
         fetch_spec=lambda s: fetch_binance_spec(SPOT_REST, "/api/v3/exchangeInfo", s),
         cap_for=lambda spec, price: None,

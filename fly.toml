@@ -32,7 +32,7 @@ primary_region = "sin"
   # the USDT and USDC margin pools so both fund evenly.
   SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDT"
   SENTINEL_STRATEGY = "sma-ls"
-  SENTINEL_STRATEGY_INTERVAL = "1m"
+  SENTINEL_STRATEGY_INTERVAL = "15m"
   SENTINEL_STRATEGY_USDT = "200"
   # Fat-finger backstop only (per-symbol |position| cap = this / price). Must
   # clear the 25x sizing headroom (~pool/3 × 25 ≈ 33k notional) or it would

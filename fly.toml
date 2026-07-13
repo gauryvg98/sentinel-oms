@@ -67,8 +67,12 @@ primary_region = "sin"
   # distance and only ever tightens; fixed TP is disabled while trailing (the
   # trail is the profit-taker — runs are ridden, giveback bounded to ~one sd).
   SENTINEL_TRAIL = "true"
-  # After a stop-out, re-enter the SAME regime after 2 closed bars (0 = only on flip)
-  SENTINEL_REENTRY_BARS = "0"
+  # After a stop-out, re-enter the SAME regime once 1 closed bar confirms the
+  # signal still points the same way (0 = only re-enter on a full signal flip,
+  # which benches the bot for hours when a wick trips the trail mid-trend). 1
+  # gives one 1h bar of confirmation that the stop wasn't the start of a real
+  # reversal, then re-arms — far less time sitting flat while the trade is live.
+  SENTINEL_REENTRY_BARS = "1"
   # Exchange-native hard-stop backstop: a reduce-only STOP_MARKET rests ON the
   # venue 0.5% of price BEYOND the software trail and ratchets with it.
   # Catastrophe insurance — if the process dies, the position still has a real

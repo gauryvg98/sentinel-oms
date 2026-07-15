@@ -52,12 +52,17 @@ primary_region = "sin"
   # with a 10% buffer) supersedes it — -2019 is prevented by measurement, not by
   # under-levering every order.
   SENTINEL_MAX_LEVERAGE = "100"
-  # 4%: sizing knob. size = risk_pct*equity / stop_dist, so with the stops held
-  # fixed (0.3-0.5%) this is a straight 2x on the old 2% position size. Eff lev =
-  # risk_pct/stop_pct -> ~8x at the 0.5% cap, ~13x at the 0.3% floor; a stop-out
-  # costs ~4% of the bot's equity share. Still well under the 100x exchange cap
-  # and the closed-loop margin/bracket clamps, so nothing silently shrinks it.
-  SENTINEL_RISK_PCT = "0.04"
+  # 10%: sized to COMMIT ~20% of the bot's pool as margin per trade (1k on a 5k
+  # pool). qty = risk_pct*equity/stop_dist, so notional = risk_pct*equity/stop_pct
+  # and margin = notional/leverage; hence margin/equity = risk_pct/(stop_pct*lev)
+  # = 0.10/(0.005*100) = 0.20 at the 0.5% stop cap, rising to ~33% (1.67k/5k) at
+  # the 0.3% floor since a tighter stop buys more size for the same risk.
+  # Stops are UNCHANGED (0.3-0.5%) — this is 2.5x the old 4% sizing.
+  # The cost of that: loss-at-stop = risk_pct*equity, so a full stop-out now
+  # costs ~10% of the bot's pool (was ~4%). Eff lev = risk_pct/stop_pct = 20-33x,
+  # still under the 100x cap; bracket/availableBalance clamps remain the backstop
+  # against -2027/-2019 if a symbol's bracket won't carry the notional.
+  SENTINEL_RISK_PCT = "0.10"
   SENTINEL_MULTI_ASSET_MARGIN = "false"
   # Tight stops (0.1-0.2% of price) with TP at 2.5x the stop — 5.5x proved
   # unreachable on 1m bars (stops always hit first). 2.5x breaks even at ~29%

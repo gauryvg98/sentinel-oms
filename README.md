@@ -1,5 +1,7 @@
 # Sentinel OMS
 
+**Live demo:** [sentinel-oms.fly.dev](https://sentinel-oms.fly.dev) &nbsp;·&nbsp; **Engineering write-up:** [sentinel-oms.fly.dev/engineering](https://sentinel-oms.fly.dev/engineering)
+
 An **execution-integrity-first Order Management System** for automated trading.
 Python 3.11 · asyncio · PostgreSQL. Broker-agnostic by construction — all broker
 behavior lives behind an adapter boundary, with a deterministic, failure-scriptable

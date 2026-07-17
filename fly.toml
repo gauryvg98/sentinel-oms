@@ -28,9 +28,12 @@ primary_region = "sin"
 
   # Non-secret trading config (mirror of .env, minus keys/DSN).
   SENTINEL_VENUE = "futures"
-  # 2 bots, majors-only. BTC on the USDT margin pool, ETH on the USDC pool, so
-  # each pool funds one position and they don't contend for the same balance.
-  SENTINEL_SYMBOLS = "BTCUSDT,ETHUSDC"
+  # 2 bots, BTC only: BTCUSDT on the USDT margin pool, BTCUSDC on the USDC pool.
+  # Same underlying on both pools, so both fund from separate balances but take
+  # the SAME directional signal (identical SMA on BTC) — this is 2x BTC exposure,
+  # not diversification. Chosen deliberately to concentrate on BTC's deep book
+  # (best fills, lowest churn) after ETHUSDC's thin-book fragmentation bled fees.
+  SENTINEL_SYMBOLS = "BTCUSDT,BTCUSDC"
   SENTINEL_STRATEGY = "sma-ls"
   SENTINEL_STRATEGY_INTERVAL = "1h"
   SENTINEL_STRATEGY_USDT = "200"

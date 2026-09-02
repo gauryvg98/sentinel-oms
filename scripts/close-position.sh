@@ -12,10 +12,25 @@ set -euo pipefail
 INSTRUMENT="${1:-BTCUSDT}"
 HOST="${SENTINEL_HOST:-https://sentinel-v2.fly.dev}"
 
+# The token, in order of preference: the environment, then .env beside this
+# repo. A Fly secret cannot be read back, so .env is the only durable copy —
+# rotate both together or this stops matching what the app will accept.
+if [ -z "${SENTINEL_TOKEN:-}" ] && [ -f "$(dirname "$0")/../.env" ]; then
+  SENTINEL_TOKEN=$(grep -m1 '^SENTINEL_ADMIN_TOKEN=' "$(dirname "$0")/../.env" | cut -d= -f2-)
+fi
 if [ -z "${SENTINEL_TOKEN:-}" ]; then
-  echo "set SENTINEL_TOKEN (the SENTINEL_ADMIN_TOKEN secret on the app)" >&2
+  echo "no token: set SENTINEL_TOKEN, or put SENTINEL_ADMIN_TOKEN in .env" >&2
   exit 1
 fi
+
+# Fail on a wrong token now, with a clear message, rather than at the order.
+# Invalid JSON is checked *after* auth, so this probes the credential without
+# asking the system to do anything.
+case "$(curl -s -m 20 -X POST "$HOST/api/command" -H "X-Sentinel-Token: $SENTINEL_TOKEN" -d 'not-json')" in
+  *read-only*)
+    echo "the app rejects this token — it is not the SENTINEL_ADMIN_TOKEN on $HOST" >&2
+    exit 1 ;;
+esac
 
 state() { curl -fsS -m 20 "$HOST/api/state"; }
 

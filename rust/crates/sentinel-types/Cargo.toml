@@ -1,0 +1,15 @@
+[package]
+name = "sentinel-types"
+description = "The units. Fixed-point money and quantity, ids, enums."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies, on purpose. Everything above this crate depends on it, so a
+# dependency here is a dependency everywhere.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/sentinel-types", "crates/sentinel-domain", "crates/sentinel-journal", "crates/sentinel-record", "crates/sentinel-ledger", "crates/sentinel-venue", "crates/sentinel-engine", "crates/sentinel-risk", "crates/sentinel-binance", "crates/sentinel-delta", "crates/sentineld"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# 1.89 is where `File::try_lock` stabilised. That call is the single-writer
+# proof, and it is the reason this workspace does not need a lock crate.
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/gauryvg98/sentinel-oms"
+
+[workspace.lints.rust]
+# The hot path must not silently lose precision or wrap. These are denials, not
+# warnings, because every one of them is a money bug in this codebase.
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# `as` casts between integer widths are how a fixed-point system loses its high
+# bits. Every narrowing in this workspace goes through an explicit checked path.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+# Arithmetic that can wrap has no place in a ledger.
+integer_division = "deny"
+# A float in a money type is the bug this workspace exists to prevent.
+float_arithmetic = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# The engine's guarantees are asserted, not assumed. Keeping debug assertions
+# out of release but overflow checks IN is deliberate: a wrapped i64 in a
+# position is worse than a crash, and the check costs a single instruction.
+overflow-checks = true
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

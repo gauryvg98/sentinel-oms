@@ -1,0 +1,65 @@
+// Command gatewayd serves the journal to browsers.
+//
+// Read-only unless SENTINEL_ADMIN_TOKEN is set, and read-only for everyone if
+// it is not — the safe configuration is the one you get by not configuring
+// anything.
+//
+// It never asks the engine for state. It tails the same log the engine writes
+// and folds its own projection, so a browser attached to this cannot slow the
+// writer down, whatever it does.
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gauryvg98/sentinel-oms/go/internal/gateway"
+)
+
+func main() {
+	config := gateway.Config{
+		JournalDir: env("SENTINEL_JOURNAL", "/data/journal"),
+		AdminToken: os.Getenv("SENTINEL_ADMIN_TOKEN"),
+		Addr:       env("SENTINEL_GATEWAY_ADDR", ":8000"),
+	}
+
+	g := gateway.New(config)
+	if config.AdminToken == "" {
+		log.Print("gatewayd: read-only — set SENTINEL_ADMIN_TOKEN to enable controls")
+	}
+
+	// The tailer runs alongside the server rather than before it: a gateway
+	// that refused to serve until the journal existed would be unreachable
+	// during exactly the boot it is most useful for watching.
+	go func() {
+		// 20ms: fast enough that a fill appears on screen before anyone
+		// notices, slow enough to cost nothing. It is a poll only because
+		// there is no portable way to be woken by a file growing; everything
+		// above it is event-driven.
+		if err := g.Tail(20 * time.Millisecond); err != nil {
+			log.Fatalf("gatewayd: %v", err)
+		}
+	}()
+
+	server := &http.Server{
+		Addr:              config.Addr,
+		Handler:           g.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		// No write timeout. The event stream is a long-lived response by
+		// design, and a write deadline would cut it at a fixed interval
+		// forever.
+	}
+	log.Printf("gatewayd: listening on %s, journal %s", config.Addr, config.JournalDir)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("gatewayd: %v", err)
+	}
+}
+
+func env(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}

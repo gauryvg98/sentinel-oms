@@ -1,0 +1,94 @@
+# Sentinel v2 on Fly. ONE machine, one volume, three processes.
+#
+# The single-writer proof is a flock on a file in /data. A second machine would
+# have its own volume and its own journal, so it would not be a second writer on
+# this log — it would be a second account trading the same venue, with neither
+# aware of the other. The lock cannot help with that. Do not scale this.
+
+app = "sentinel-v2"
+# Singapore — close to Binance's matching engines in Asia, so placing an order
+# is one short round trip (~5-50ms) rather than ~400ms from the US. Same region
+# as the Python deployment, for the same reason.
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile.v2"
+
+# Recreate the single machine in place, so two writers never overlap.
+[deploy]
+  strategy = "immediate"
+
+[env]
+  # A fresh journal for the live venue, named for the format it holds.
+  #
+  # Two reasons it is not /data/journal. The simulator's log lives there, and
+  # its records describe orders that never reached an exchange — interleaving
+  # those with real ones would leave a log that cannot be read back as an
+  # account of what happened. And journal format 2 added a byte that a format-1
+  # record cannot supply, so a v1 segment is refused rather than guessed at: a
+  # format bump always needs a new directory, and naming it after the format
+  # means the next one is obvious rather than archaeological.
+  #
+  # /data/journal-live holds the format-1 records from the first Binance boot.
+  SENTINEL_JOURNAL = "/data/journal-fmt2"
+  SENTINEL_GATEWAY_ADDR = ":8000"
+  # BTCUSDT: what the Python deployment trades. BTC's deep USDT book gives the
+  # cleanest fills and the lowest churn.
+  SENTINEL_INSTRUMENTS = "BTCUSDT"
+
+  # Unset means the simulator, which reaches no venue at all. "binance" (or
+  # "futures", the word the Python deployment uses) is Binance USD-M futures;
+  # "delta" is Delta India.
+  SENTINEL_VENUE = "futures"
+
+  # Production is opt-in by this exact word. Anything else — unset, misspelt,
+  # "yes" — is Demo Trading, which is what the Python deployment runs on:
+  # ui/__main__.py defaults to demo-fapi.binance.com and fly.toml never
+  # overrides it. Measured 2026-08-27: demo-fstream streams fine from here and
+  # production fstream accepts the handshake and then sends nothing, from this
+  # machine and from Fly alike.
+  # SENTINEL_BINANCE_ENV = "production"
+
+  # The Python deployment's value. Unset leaves the account's own, which is the
+  # safe default.
+  SENTINEL_LEVERAGE = "100"
+
+  # Fat-finger backstop on absolute position, in BTC. Not a risk model: sizing
+  # decides how much to trade, and this only decides what is obviously wrong.
+  #
+  # The Python deployment caps notional instead (SENTINEL_MAX_NOTIONAL=200000),
+  # which at ~78,600 is about 2.5 BTC. This caps base units, because the guard
+  # runs before there is a price to convert with — so it is deliberately far
+  # tighter than the notional cap it replaces, and should be raised knowingly
+  # rather than matched by arithmetic nobody checked.
+  SENTINEL_MAX_POSITION = "0.05"
+
+[[mounts]]
+  source = "sentinel_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  # Liveness only. This deliberately does NOT fail when the account is halted:
+  # a halt is an intentional safety state, and restarting would not clear a real
+  # divergence — it would hide it behind a crash loop. That mistake is why the
+  # previous deployment looked healthy for five days while refusing to trade.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+# The writer is one thread that does no I/O, the venue worker blocks on the
+# network, and the gateway serves. Two shared CPUs is enough for all three at
+# this order rate, with the headroom that matters being the writer's — it must
+# never wait for anything but the disk.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "512mb"

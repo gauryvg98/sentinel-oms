@@ -1,0 +1,38 @@
+# Two builders and a small runtime. The Rust and Go halves compile
+# independently — they share a file format, not a toolchain.
+
+FROM rust:1.89-slim AS rust-build
+WORKDIR /build
+COPY rust/ ./rust/
+COPY testdata/ ./testdata/
+WORKDIR /build/rust
+RUN cargo build --release -p sentineld
+
+FROM golang:1.25-alpine AS go-build
+WORKDIR /build
+COPY go/ ./go/
+COPY testdata/ ./testdata/
+WORKDIR /build/go
+RUN CGO_ENABLED=0 go build -o /out/gatewayd ./cmd/gatewayd \
+ && CGO_ENABLED=0 go build -o /out/projectord ./cmd/projectord \
+ && CGO_ENABLED=0 go build -o /out/adversary ./cmd/adversary
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=rust-build /build/rust/target/release/sentineld /app/sentineld
+COPY --from=go-build /out/gatewayd /out/projectord /out/adversary /app/
+COPY go/static/ /app/static/
+COPY docker/run.sh /app/run.sh
+RUN chmod +x /app/run.sh
+
+# The volume. The journal is the system of record, and a container filesystem
+# that vanishes on restart would take it with it.
+VOLUME ["/data"]
+ENV SENTINEL_JOURNAL=/data/journal
+EXPOSE 8000
+
+CMD ["/app/run.sh"]

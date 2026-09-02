@@ -3,9 +3,25 @@
 **Live demo:** [sentinel-oms.fly.dev](https://sentinel-oms.fly.dev) &nbsp;·&nbsp; **Engineering write-up:** [sentinel-oms.fly.dev/engineering](https://sentinel-oms.fly.dev/engineering)
 
 An **execution-integrity-first Order Management System** for automated trading.
-Python 3.11 · asyncio · PostgreSQL. Broker-agnostic by construction — all broker
-behavior lives behind an adapter boundary, with a deterministic, failure-scriptable
-simulator as the first adapter.
+Broker-agnostic by construction — all venue behaviour lives behind an adapter
+boundary, with a deterministic, failure-scriptable simulator as the first
+adapter.
+
+> **v2 is being built alongside this**, in Rust and Go: the same integrity model,
+> with the durability boundary moved off Postgres and onto a local append-only
+> journal. It exists because the deployed Python took **ten seconds at the median
+> to place an order** — it paid a database round trip per state transition and
+> held the instrument lock across the venue call. Start at
+> [docs/rewrite/ARCHITECTURE.md](docs/rewrite/ARCHITECTURE.md); the format both
+> languages read is [docs/rewrite/JOURNAL-FORMAT.md](docs/rewrite/JOURNAL-FORMAT.md);
+> deployment is [docs/rewrite/DEPLOY.md](docs/rewrite/DEPLOY.md).
+>
+> ```bash
+> ./run-v2-tests.sh
+> ```
+>
+> The Python below stays as the reference implementation until v2 has
+> paper-traded a week.
 
 Most trading-system failures aren't strategy failures — they're integrity failures:
 a timeout treated as a rejection, a blind retry that doubles a position, a fill that

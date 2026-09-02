@@ -1,0 +1,25 @@
+[package]
+name = "sentineld"
+description = "The single writer, its venue worker, and the clock that drives them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sentinel-binance = { path = "../sentinel-binance" }
+sentinel-delta = { path = "../sentinel-delta" }
+sentinel-domain = { path = "../sentinel-domain" }
+sentinel-engine = { path = "../sentinel-engine" }
+sentinel-journal = { path = "../sentinel-journal" }
+sentinel-ledger = { path = "../sentinel-ledger" }
+sentinel-record = { path = "../sentinel-record" }
+sentinel-risk = { path = "../sentinel-risk" }
+sentinel-types = { path = "../sentinel-types" }
+sentinel-venue = { path = "../sentinel-venue" }
+serde_json = "1.0.151"
+signal-hook = "0.4.4"
+
+[lints]
+workspace = true

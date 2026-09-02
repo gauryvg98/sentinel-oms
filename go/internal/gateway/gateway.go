@@ -1,0 +1,442 @@
+// Package gateway serves the journal to browsers and forwards commands to the
+// writer.
+//
+// Reads and writes take different paths on purpose.
+//
+// **Reads** come from the journal. The gateway tails it, folds a projection,
+// and streams changes. It never asks the engine anything — the log is an
+// ordered stream with a cursor per reader, which is the abstraction a
+// request-response API would be built on top of anyway. So a browser watching
+// this cannot slow the writer down, whatever it does.
+//
+// **Writes** go to the control socket, which is a Unix socket beside the
+// journal with four operations on it. They are forwarded, not interpreted:
+// every guard that decides whether an order may exist lives in the engine, and
+// a second opinion here would be a second thing to keep in step.
+//
+// Server-sent events rather than a websocket. The stream is one-way — commands
+// are ordinary POSTs — and SSE needs no library, survives proxies that mangle
+// upgrades, and reconnects in the browser without anyone writing that code.
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gauryvg98/sentinel-oms/go/internal/book"
+	"github.com/gauryvg98/sentinel-oms/go/internal/fanout"
+	"github.com/gauryvg98/sentinel-oms/go/internal/fixed"
+	"github.com/gauryvg98/sentinel-oms/go/internal/journal"
+	"github.com/gauryvg98/sentinel-oms/go/internal/record"
+)
+
+// Config is where the gateway reads and writes.
+type Config struct {
+	// JournalDir is the log to tail. The control socket sits beside it.
+	JournalDir string
+	// AdminToken unlocks the write endpoints. Empty means the gateway is
+	// read-only for everyone, which is what a public deployment wants.
+	AdminToken string
+	// Addr to listen on.
+	Addr string
+}
+
+// Gateway serves the journal.
+type Gateway struct {
+	config    Config
+	transport *fanout.RingTransport
+
+	mu   sync.RWMutex
+	book *book.Book
+}
+
+// New returns a gateway with an empty book.
+func New(config Config) *Gateway {
+	return &Gateway{
+		config:    config,
+		transport: fanout.NewRing(),
+		book:      book.New(),
+	}
+}
+
+// Tail folds the journal forever, publishing as it goes.
+//
+// Blocks. Returns only when the journal cannot be read at all, which is a
+// reason to stop rather than to retry: a gateway serving a projection it can no
+// longer update is showing a screen that has quietly stopped being true.
+func (g *Gateway) Tail(poll time.Duration) error {
+	tailer, err := journal.OpenTailer(g.config.JournalDir, 0)
+	if err != nil {
+		return fmt.Errorf("open journal: %w", err)
+	}
+	defer tailer.Close()
+
+	for {
+		published := 0
+		for {
+			frame, err := tailer.Next()
+			if err != nil {
+				return fmt.Errorf("read journal: %w", err)
+			}
+			if frame == nil {
+				break
+			}
+			g.fold(frame)
+			published++
+		}
+		if published > 0 {
+			// The book is published once per drain, not once per record: it is
+			// current state, so a burst of a hundred records is one snapshot's
+			// worth of news.
+			g.publishBook()
+		}
+		time.Sleep(poll)
+	}
+}
+
+func (g *Gateway) fold(frame *journal.Record) {
+	decoded, err := record.Decode(frame.Header.Kind, frame.Payload)
+	if err != nil {
+		// A record this build cannot read is skipped rather than fatal. The
+		// engine is the authority; a gateway that refuses to serve because it
+		// met a newer record kind turns a forward-compatible change into an
+		// outage.
+		log.Printf("gatewayd: skipping record %d: %v", frame.Header.Seq, err)
+		return
+	}
+
+	g.mu.Lock()
+	g.book.Apply(frame.Header, decoded)
+	g.mu.Unlock()
+
+	// Sequenced channels publish per record, because each one is an event that
+	// happened and dropping it would lose it.
+	switch decoded.Kind {
+	case journal.KindOrderEvent:
+		if decoded.Event.Kind == record.FillReceived && decoded.Event.Applied() {
+			g.publish(fanout.Fills, map[string]any{
+				"seq":             frame.Header.Seq,
+				"at":              frame.Header.Nanos,
+				"client_order_id": decoded.Event.ClientOrderID,
+				"exec_id":         decoded.Event.ExecID,
+				"qty":             decoded.Event.Qty,
+				"price":           decoded.Event.Price,
+			})
+		}
+		g.publish(fanout.Orders, map[string]any{
+			"seq":             frame.Header.Seq,
+			"at":              frame.Header.Nanos,
+			"client_order_id": decoded.Event.ClientOrderID,
+			"event":           decoded.Event.Kind.String(),
+			"from":            decoded.Event.From.String(),
+			"to":              decoded.Event.To.String(),
+			"applied":         decoded.Event.Applied(),
+		})
+	case journal.KindDecision:
+		g.publish(fanout.Account, map[string]any{
+			"seq":        frame.Header.Seq,
+			"at":         frame.Header.Nanos,
+			"kind":       decoded.Decision.Kind.String(),
+			"actor":      decoded.Decision.Actor.String(),
+			"instrument": decoded.Decision.Instrument,
+			"value":      decoded.Decision.Value,
+			"note":       decoded.Decision.Note,
+		})
+	case journal.KindMark:
+		// Conflating: the newest price is the only one worth having.
+		g.publish(fanout.Marks, map[string]any{
+			"instrument": decoded.MarkInstrument,
+			"price":      decoded.MarkPrice,
+			"at":         frame.Header.Nanos,
+		})
+	case journal.KindBalance:
+		g.publish(fanout.Account, map[string]any{
+			"seq":     frame.Header.Seq,
+			"at":      frame.Header.Nanos,
+			"kind":    "BALANCE",
+			"asset":   decoded.Asset,
+			"balance": decoded.Amount,
+		})
+	}
+}
+
+func (g *Gateway) publish(ch fanout.Channel, payload map[string]any) {
+	frame, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	g.transport.Publish(ch, frame)
+}
+
+func (g *Gateway) publishBook() {
+	snapshot := g.Snapshot()
+	frame, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	g.transport.Publish(fanout.Book, frame)
+}
+
+// State is everything a client needs to render from cold.
+type State struct {
+	Epoch      uint64               `json:"epoch"`
+	LastSeq    uint64               `json:"last_seq"`
+	Now        uint64               `json:"now"`
+	Halted     bool                 `json:"halted"`
+	Orders     []*book.Order        `json:"orders"`
+	Positions  []book.Position      `json:"positions"`
+	Balances   map[string]fixed.Dec `json:"balances"`
+	Marks      map[string]fixed.Dec `json:"marks"`
+	Realized   fixed.Dec            `json:"realized"`
+	Unrealized fixed.Dec            `json:"unrealized"`
+	Fills      int                  `json:"fills"`
+	Decisions  []book.Decision      `json:"decisions"`
+	Activity   []book.Activity      `json:"activity"`
+}
+
+// Snapshot is the whole current picture.
+//
+// A client with nothing gets a complete one rather than a promise of one: the
+// alternative is a screen that fills in as events happen to arrive, which for a
+// quiet account means a screen that stays blank.
+func (g *Gateway) Snapshot() State {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	marks := map[string]fixed.Dec{}
+	for _, p := range g.book.Positions() {
+		marks[p.Instrument] = g.book.Mark(p.Instrument)
+	}
+	for _, o := range g.book.LiveOrders() {
+		marks[o.Instrument] = g.book.Mark(o.Instrument)
+	}
+
+	return State{
+		Epoch:      g.book.Epoch(),
+		LastSeq:    g.book.LastSeq(),
+		Now:        g.book.Now(),
+		Halted:     g.book.IsHalted(),
+		Orders:     g.book.Orders(),
+		Positions:  g.book.Positions(),
+		Balances:   g.book.Balances(),
+		Marks:      marks,
+		Realized:   g.book.Realized(),
+		Unrealized: g.book.Unrealized(),
+		Fills:      g.book.Fills(),
+		Decisions:  g.book.Decisions(),
+		Activity:   g.book.Activity(),
+	}
+}
+
+// Handler is the HTTP surface.
+func (g *Gateway) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", g.health)
+	mux.HandleFunc("GET /api/state", g.state)
+	mux.HandleFunc("GET /api/stream", g.stream)
+	mux.HandleFunc("POST /api/command", g.command)
+	mux.Handle("GET /", http.FileServer(http.Dir("static")))
+	return mux
+}
+
+// health proves the process is up, and says whether the account is trading.
+//
+// Deliberately 200 even when halted. A halt is an intentional safety state, and
+// failing the check would make an orchestrator restart a process whose whole
+// point is that it has stopped — the restart would not clear a real divergence,
+// it would just hide it behind a crash loop. That mistake cost the previous
+// system five days of looking healthy while refusing to trade.
+func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
+	g.mu.RLock()
+	halted, seq := g.book.IsHalted(), g.book.LastSeq()
+	g.mu.RUnlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"halted":   halted,
+		"last_seq": seq,
+	})
+}
+
+func (g *Gateway) state(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, g.Snapshot())
+}
+
+// stream is the server-sent event feed.
+func (g *Gateway) stream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	var subs []*fanout.Subscription
+	for _, ch := range fanout.Channels() {
+		sub := g.transport.Subscribe(ch)
+		defer sub.Close()
+		subs = append(subs, sub)
+	}
+
+	// A complete picture first, for the same reason /api/state exists.
+	if snapshot, err := json.Marshal(g.Snapshot()); err == nil {
+		fmt.Fprintf(w, "event: book\ndata: %s\n\n", snapshot)
+		flusher.Flush()
+	}
+
+	// One goroutine per channel, all writing through one mutex: an
+	// http.ResponseWriter is not safe for concurrent use, and a torn SSE frame
+	// is a parse error in the browser rather than a missing update.
+	var writeMu sync.Mutex
+	done := r.Context().Done()
+	frames := make(chan [2]string, 64)
+
+	for _, sub := range subs {
+		go func(sub *fanout.Subscription) {
+			for {
+				select {
+				case <-done:
+					return
+				case <-sub.Resync():
+					select {
+					case frames <- [2]string{"resync", `{"reason":"fell behind"}`}:
+					case <-done:
+					}
+					return
+				case frame, ok := <-sub.Frames():
+					if !ok {
+						return
+					}
+					select {
+					case frames <- [2]string{string(sub.Channel()), string(frame)}:
+					case <-done:
+						return
+					}
+				}
+			}
+		}(sub)
+	}
+
+	// A comment every fifteen seconds keeps proxies from closing an idle
+	// stream. It is not a poll: it produces no data and asks no question.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case f := <-frames:
+			writeMu.Lock()
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", f[0], f[1])
+			flusher.Flush()
+			writeMu.Unlock()
+		case <-heartbeat.C:
+			writeMu.Lock()
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+			writeMu.Unlock()
+		}
+	}
+}
+
+// command forwards one operation to the writer.
+//
+// Forwarded, not interpreted. Every guard that decides whether an order may
+// exist is in the engine, and a second opinion here would be a second thing to
+// keep in step.
+func (g *Gateway) command(w http.ResponseWriter, r *http.Request) {
+	if !g.isAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"ok":    false,
+			"error": "read-only",
+		})
+		return
+	}
+
+	body := make([]byte, 4096)
+	n, _ := r.Body.Read(body)
+	line := body[:n]
+	if !json.Valid(line) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "not json",
+		})
+		return
+	}
+
+	answer, err := g.forward(line)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(answer)
+}
+
+// forward sends one line to the control socket and reads one line back.
+func (g *Gateway) forward(line []byte) ([]byte, error) {
+	socket := g.config.JournalDir + "/control.sock"
+	conn, err := net.DialTimeout("unix", socket, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("the writer is not listening: %w", err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write(append(line, '\n')); err != nil {
+		return nil, err
+	}
+	answer := make([]byte, 4096)
+	n, err := conn.Read(answer)
+	if err != nil {
+		return nil, err
+	}
+	return answer[:n], nil
+}
+
+// isAdmin reports whether this request may change anything.
+//
+// An empty token means nobody can, which is what a public deployment wants: the
+// safe configuration is the one you get by not configuring anything.
+func (g *Gateway) isAdmin(r *http.Request) bool {
+	if g.config.AdminToken == "" {
+		return false
+	}
+	supplied := r.Header.Get("X-Sentinel-Token")
+	if supplied == "" {
+		if cookie, err := r.Cookie("sentinel_admin"); err == nil {
+			supplied = cookie.Value
+		}
+	}
+	return constantTimeEqual(supplied, g.config.AdminToken)
+}
+
+// constantTimeEqual compares without leaking the answer in its timing.
+func constantTimeEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := range len(a) {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}

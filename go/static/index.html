@@ -1,0 +1,187 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #12161b; --line: #1e242c;
+    --text: #d7dee6; --dim: #7c8794; --accent: #6fb3ff;
+    --up: #4ec9a0; --down: #e06c75; --warn: #d9a441;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+  header {
+    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+    padding: .75rem 1rem; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 13px; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
+  .dim { color: var(--dim); }
+  .pill {
+    padding: .1rem .5rem; border: 1px solid var(--line); border-radius: 999px;
+    font-size: 11px; letter-spacing: .04em;
+  }
+  .pill.halted { color: var(--warn); border-color: var(--warn); }
+  .pill.live { color: var(--up); border-color: var(--up); }
+  main {
+    display: grid; gap: 1px; background: var(--line);
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  }
+  section { background: var(--panel); padding: .75rem 1rem; min-height: 8rem; }
+  h2 {
+    font-size: 11px; margin: 0 0 .5rem; color: var(--dim);
+    letter-spacing: .08em; text-transform: uppercase;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: .2rem .35rem; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: normal; font-size: 11px; }
+  tbody tr:nth-child(odd) { background: #ffffff06; }
+  .pos { color: var(--up); } .neg { color: var(--down); }
+  .num { font-variant-numeric: tabular-nums; }
+  ul { list-style: none; margin: 0; padding: 0; max-height: 15rem; overflow-y: auto; }
+  li { padding: .15rem 0; border-bottom: 1px solid #ffffff08; }
+  footer { padding: .5rem 1rem; color: var(--dim); font-size: 11px; }
+</style>
+
+<header>
+  <h1>Sentinel</h1>
+  <span id="status" class="pill dim">connecting</span>
+  <span class="dim">epoch <span id="epoch" class="num">–</span></span>
+  <span class="dim">seq <span id="seq" class="num">–</span></span>
+  <span class="dim">fills <span id="fills" class="num">–</span></span>
+</header>
+
+<main>
+  <section>
+    <h2>Positions</h2>
+    <table>
+      <thead><tr><th>Instrument</th><th>Qty</th><th>Avg</th><th>Mark</th><th>Unrealised</th></tr></thead>
+      <tbody id="positions"></tbody>
+    </table>
+    <p class="dim" style="margin-top:.75rem">
+      realised <span id="realized" class="num">–</span> ·
+      unrealised <span id="unrealized" class="num">–</span>
+    </p>
+  </section>
+
+  <section>
+    <h2>Orders</h2>
+    <table>
+      <thead><tr><th>Id</th><th>Side</th><th>Qty</th><th>Filled</th><th>State</th></tr></thead>
+      <tbody id="orders"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Activity</h2>
+    <ul id="activity"></ul>
+  </section>
+
+  <section>
+    <h2>Decisions <span class="dim">— including the trades that did not happen</span></h2>
+    <ul id="decisions"></ul>
+  </section>
+</main>
+
+<footer>
+  Read-only. Every number here is folded from the journal; nothing on this page
+  asks the engine anything.
+</footer>
+
+<script>
+  // Numbers arrive as strings and stay strings until they are rendered.
+  // JavaScript has one numeric type and it is a float64, so parsing a quantity
+  // here would be the one place in the whole system a value gets rounded.
+  const $ = (id) => document.getElementById(id);
+  const text = (v) => (v === undefined || v === null ? "–" : String(v));
+
+  // Signed styling without arithmetic: the sign is a character.
+  const signClass = (s) => (String(s).startsWith("-") ? "neg" : Number(s) ? "pos" : "");
+
+  function renderBook(state) {
+    $("epoch").textContent = text(state.epoch);
+    $("seq").textContent = text(state.last_seq);
+    $("fills").textContent = text(state.fills);
+    $("realized").textContent = text(state.realized);
+    $("realized").className = "num " + signClass(state.realized);
+    $("unrealized").textContent = text(state.unrealized);
+    $("unrealized").className = "num " + signClass(state.unrealized);
+
+    const status = $("status");
+    status.textContent = state.halted ? "halted" : "trading";
+    status.className = "pill " + (state.halted ? "halted" : "live");
+
+    $("positions").innerHTML = (state.positions || []).map((p) => {
+      const mark = (state.marks || {})[p.instrument] ?? "–";
+      const unreal = p.unrealized ?? "";
+      return `<tr>
+        <td>${p.instrument}</td>
+        <td class="num ${signClass(p.qty)}">${p.qty}</td>
+        <td class="num">${p.cost_basis}</td>
+        <td class="num">${mark}</td>
+        <td class="num ${signClass(unreal)}">${unreal || "–"}</td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="5" class="dim">flat</td></tr>`;
+
+    // Live orders first, then the rest — most recent first within each.
+    const orders = (state.orders || []).slice().reverse();
+    $("orders").innerHTML = orders.map((o) => `<tr>
+      <td>${o.client_order_id}</td>
+      <td>${o.side}</td>
+      <td class="num">${o.qty}</td>
+      <td class="num">${o.filled_qty}</td>
+      <td>${o.state}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="dim">none</td></tr>`;
+
+    $("activity").innerHTML = (state.activity || []).slice(-40).reverse().map((a) =>
+      `<li><span class="dim">${a.seq}</span> ${a.client_order_id}
+       <span class="dim">${a.event}</span> ${a.from} → ${a.to}</li>`).join("");
+
+    $("decisions").innerHTML = (state.decisions || []).slice(-40).reverse().map((d) =>
+      `<li><span class="dim">${d.actor}</span> ${d.kind}
+       <span class="dim">${d.note || ""}</span></li>`).join("");
+  }
+
+  function prepend(id, html) {
+    const list = $(id);
+    list.insertAdjacentHTML("afterbegin", html);
+    while (list.children.length > 40) list.lastElementChild.remove();
+  }
+
+  function connect() {
+    const source = new EventSource("/api/stream");
+
+    // The book arrives complete on connect and once per drain after that, so a
+    // client with nothing gets a whole picture rather than a promise of one.
+    source.addEventListener("book", (e) => renderBook(JSON.parse(e.data)));
+
+    source.addEventListener("orders", (e) => {
+      const o = JSON.parse(e.data);
+      prepend("activity",
+        `<li><span class="dim">${o.seq}</span> ${o.client_order_id}
+         <span class="dim">${o.event}</span> ${o.from} → ${o.to}</li>`);
+    });
+
+    source.addEventListener("account", (e) => {
+      const a = JSON.parse(e.data);
+      prepend("decisions",
+        `<li><span class="dim">${a.actor || ""}</span> ${a.kind}
+         <span class="dim">${a.note || a.asset || ""}</span></li>`);
+    });
+
+    // The server says so rather than just hanging up: a client that reconnects
+    // assuming continuity is worse off than one that knows it missed something.
+    source.addEventListener("resync", () => {
+      source.close();
+      location.reload();
+    });
+
+    source.onerror = () => {
+      $("status").textContent = "reconnecting";
+      $("status").className = "pill dim";
+    };
+  }
+
+  fetch("/api/state").then((r) => r.json()).then(renderBook).finally(connect);
+</script>

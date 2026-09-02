@@ -14,3 +14,14 @@ build/
 dist/
 .DS_Store
 DEPLOY.md
+
+# v2 build artefacts. The Rust target directory alone is ~1.7 GB, and every byte
+# of it would be uploaded to the remote builder only to be ignored: the image
+# compiles from source in its own builder stage. Excluding it takes the build
+# context from gigabytes to megabytes.
+rust/target/
+go/bin/
+target/
+*.log
+scripts/bitquery/
+docs/

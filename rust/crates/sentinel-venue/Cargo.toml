@@ -1,0 +1,16 @@
+[package]
+name = "sentinel-venue"
+description = "The venue adapter boundary, and a deterministic simulator behind it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sentinel-domain = { path = "../sentinel-domain" }
+sentinel-record = { path = "../sentinel-record" }
+sentinel-types = { path = "../sentinel-types" }
+
+[lints]
+workspace = true

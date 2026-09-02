@@ -174,11 +174,18 @@
       marks[instrument].price = price;
     }
     const rows = Object.entries(marks).sort(([a], [b]) => a.localeCompare(b));
-    $("marks").innerHTML = rows.map(([instrument, m]) => `<tr>
+    $("marks").innerHTML = rows.map(([instrument, m]) => {
+      // A price that has not ticked since this page connected came out of the
+      // log, not the feed — an instrument no longer subscribed keeps its last
+      // mark for ever. Saying so is the difference between a stale number and
+      // a wrong one.
+      const stale = !m.at;
+      return `<tr${stale ? ' class="dim"' : ""}>
         <td>${instrument}</td>
         <td class="num">${m.price}</td>
-        <td class="dim">${m.at ? m.at.toLocaleTimeString() : "–"}</td>
-      </tr>`).join("") || `<tr><td colspan="3" class="dim">no marks yet</td></tr>`;
+        <td class="dim">${stale ? "stale — not streaming" : m.at.toLocaleTimeString()}</td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="3" class="dim">no marks yet</td></tr>`;
   }
 
   // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the

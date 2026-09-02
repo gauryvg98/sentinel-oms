@@ -40,16 +40,18 @@ primary_region = "sin"
   # Anything not listed here is invisible to the sweep, so its position is
   # never reconciled against the venue. That is the whole cost of narrowing
   # this list while something is still open elsewhere.
-  # BTCUSDC is what this trades. BTCUSDT is listed only because the short
-  # adopted from the Python is still open on it, and an unlisted instrument is
-  # one the sweep never asks about, the stream never quotes, and `submit`
-  # refuses outright for want of symbol rules — so it would show a frozen
-  # position at a frozen mark and could not be closed through here at all.
+  # BTCUSDC only: the inherited BTCUSDT short was closed on 2026-09-03 at a
+  # realised -40.45, so there is nothing left to keep reconciled there.
   #
-  # Listing it costs nothing: nothing in this system opens a position by
-  # itself, every entry arrives over the control socket. Drop it the moment
-  # BTCUSDT is flat.
-  SENTINEL_INSTRUMENTS = "BTCUSDC,BTCUSDT"
+  # Note the grid is coarser than BTCUSDT's — step 0.001 against 0.0001, and
+  # minNotional 100 against 50 — so the smallest placeable order is 0.002, not
+  # 0.001. Read from exchangeInfo at boot, never hardcoded: demo and production
+  # do not agree on these.
+  #
+  # Anything not listed here is never swept, never quoted, and refused outright
+  # by `submit` for want of symbol rules. Do not narrow this list while a
+  # position is open on what it drops.
+  SENTINEL_INSTRUMENTS = "BTCUSDC"
 
   # Unset means the simulator, which reaches no venue at all. "binance" (or
   # "futures", the word the Python deployment uses) is Binance USD-M futures;

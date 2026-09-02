@@ -52,6 +52,22 @@ run and quietly make every backtest a fiction.
 The cost is warm-up: at 1m bars with a slow window of 20, a cold start has no
 opinion for twenty minutes.
 
+## Replay warms up; it does not trade
+
+At startup the journal already holds hours of marks, and folding them is what
+lets the averages fill in a second instead of twenty minutes. But the stances
+those bars produce are stances about the past. Acting on them means placing a
+live order for every bar that ever closed — which is exactly what happened the
+first time this ran live: twenty-three orders in about a second, before the
+position reached target and the reconciler went quiet.
+
+So `strategyd` trades only once the tailer has returned "nothing further" at
+least once. Everything before that is folded in silence: the marks reach the
+strategy, the book reaches the runner, and no order reaches the venue. Replay to
+learn, trade on what happens next.
+
+The smoke test asserts the line that says so.
+
 ## Reconciling
 
 One order per bar, and never one that crosses zero. A flip from long to short is

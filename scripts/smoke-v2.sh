@@ -55,6 +55,11 @@ sleep 3
 kill "$STRATEGY" 2>/dev/null || true
 head -3 "$JOURNAL/strategy.log"
 grep -q "dry run" "$JOURNAL/strategy.log" || { echo "FAILED: strategyd did not default to a dry run"; exit 1; }
+grep -q "caught up with the journal" "$JOURNAL/strategy.log" || {
+  echo "FAILED: strategyd never reported catching up — without that gate it"
+  echo "        places a live order for every bar in the replayed history"
+  exit 1
+}
 
 echo "── strategyd refuses to trade without being told ───────"
 out=$(SENTINEL_JOURNAL="$JOURNAL" SENTINEL_STRATEGY_INSTRUMENT="BTCUSDT,BTCUSDC" \

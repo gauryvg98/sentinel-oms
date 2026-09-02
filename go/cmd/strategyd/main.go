@@ -121,6 +121,16 @@ type runner struct {
 	bars  *strategy.Bars
 	book  *book.Book
 
+	// caughtUp is false while folding the journal that already existed when
+	// this process started.
+	//
+	// Those records are history. Their marks must reach the strategy — that is
+	// what warms the averages up in a second instead of twenty minutes — but
+	// the stances they produce are stances about the past, and acting on them
+	// means placing a live order for every bar that ever closed. Replay to
+	// learn; trade only on what happens next.
+	caughtUp bool
+
 	placed int
 }
 
@@ -142,6 +152,12 @@ func (r *runner) run() error {
 				break
 			}
 			r.fold(frame)
+		}
+		// Nothing left to read means the log that existed at startup has been
+		// folded and everything from here is live.
+		if !r.caughtUp {
+			r.caughtUp = true
+			log.Printf("strategyd: caught up with the journal, trading from here")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -168,7 +184,9 @@ func (r *runner) fold(frame *journal.Record) {
 func (r *runner) onBar(closed fixed.Dec) {
 	d := r.strat.OnBar(closed)
 	if d.Stance == strategy.NoOpinion {
-		log.Printf("strategyd: bar %s — warming up, %d/%d", closed, d.Have, d.Need)
+		if r.caughtUp {
+			log.Printf("strategyd: bar %s — warming up, %d/%d", closed, d.Have, d.Need)
+		}
 		return
 	}
 
@@ -181,8 +199,16 @@ func (r *runner) onBar(closed fixed.Dec) {
 
 	order, needed := strategy.Reconcile(desired, actual, r.step)
 	if !needed {
-		log.Printf("strategyd: bar %s — %s, fast %s slow %s, holding %s",
-			closed, d.Stance, d.Fast, d.Slow, actual)
+		if r.caughtUp {
+			log.Printf("strategyd: bar %s — %s, fast %s slow %s, holding %s",
+				closed, d.Stance, d.Fast, d.Slow, actual)
+		}
+		return
+	}
+
+	if !r.caughtUp {
+		// Replayed history: the book already contains whatever this bar led to
+		// at the time, so there is nothing to say and nothing to do.
 		return
 	}
 
@@ -193,7 +219,7 @@ func (r *runner) onBar(closed fixed.Dec) {
 	log.Printf("strategyd: bar %s — %s, fast %s slow %s, %s -> %s: %s %s%s",
 		closed, d.Stance, d.Fast, d.Slow, actual, desired, order.Side, order.Qty, exit)
 
-	if !r.live {
+	if !r.live || !r.caughtUp {
 		return
 	}
 	if err := r.place(order); err != nil {

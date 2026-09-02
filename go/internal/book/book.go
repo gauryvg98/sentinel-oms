@@ -446,6 +446,19 @@ func (b *Book) PositionIn(instrument string) Position {
 // Mark returns the last price seen.
 func (b *Book) Mark(instrument string) fixed.Dec { return b.marks[instrument] }
 
+// Marks returns every mark the book has seen.
+//
+// Every one, not only those with a position behind them: a screen that shows a
+// price only while you hold something cannot tell you why you are not holding
+// anything.
+func (b *Book) Marks() map[string]fixed.Dec {
+	out := make(map[string]fixed.Dec, len(b.marks))
+	for instrument, price := range b.marks {
+		out[instrument] = price
+	}
+	return out
+}
+
 // Balances returns every balance, sorted by asset.
 func (b *Book) Balances() map[string]fixed.Dec {
 	out := make(map[string]fixed.Dec, len(b.balances))

@@ -126,6 +126,25 @@ pub fn parse(line: &str) -> Result<Command, Malformed> {
         "resume" => Ok(Command::Resume {
             note: Note::new(text("note").unwrap_or("resumed by operator")).unwrap_or_default(),
         }),
+        // A strategy saying what it wants to hold. It changes nothing — the
+        // orders that follow come through "place" like anyone else's — but it
+        // puts the reasoning in the same log as the consequence, so a stretch
+        // of doing nothing has an explanation rather than a silence.
+        "decide" => Ok(Command::Decide {
+            actor: sentinel_record::Actor::Strategy,
+            instrument: sentinel_types::Instrument::new(
+                text("instrument").ok_or_else(|| missing("instrument"))?,
+            )
+            .map_err(|e| Malformed(e.to_string()))?,
+            kind: sentinel_record::DecisionKind::StanceDeclared,
+            trace_id: TraceId::NONE,
+            value: text("value")
+                .map(sentinel_types::Money::parse)
+                .transpose()
+                .map_err(|e| Malformed(e.to_string()))?
+                .unwrap_or(sentinel_types::Money::ZERO),
+            note: Note::new(text("note").unwrap_or("")).unwrap_or_default(),
+        }),
         other => Err(Malformed(format!("unknown op {other:?}"))),
     }
 }

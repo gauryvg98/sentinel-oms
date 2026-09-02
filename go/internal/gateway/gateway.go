@@ -189,7 +189,7 @@ type State struct {
 	Now        uint64               `json:"now"`
 	Halted     bool                 `json:"halted"`
 	Orders     []*book.Order        `json:"orders"`
-	Positions  []book.Position      `json:"positions"`
+	Positions  []PositionView       `json:"positions"`
 	Balances   map[string]fixed.Dec `json:"balances"`
 	Marks      map[string]fixed.Dec `json:"marks"`
 	Realized   fixed.Dec            `json:"realized"`
@@ -204,16 +204,36 @@ type State struct {
 // A client with nothing gets a complete one rather than a promise of one: the
 // alternative is a screen that fills in as events happen to arrive, which for a
 // quiet account means a screen that stays blank.
+// PositionView is a position with the two numbers a screen needs beside it.
+//
+// Computed here, in exact arithmetic, because the browser has none: a P&L put
+// together from strings in a double is a number that disagrees with the ledger
+// about money, and the disagreement would be invisible.
+type PositionView struct {
+	book.Position
+	Mark       fixed.Dec `json:"mark"`
+	Unrealized fixed.Dec `json:"unrealized"`
+}
+
 func (g *Gateway) Snapshot() State {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	marks := map[string]fixed.Dec{}
+	// Every mark, not just the ones behind a position: the price is the thing
+	// you look at to understand why there is no position.
+	marks := g.book.Marks()
+
+	// Unrealised is attached per position here rather than left to the client.
+	// The browser has no exact arithmetic, and a P&L rounded through a double
+	// is a number that disagrees with the ledger about money.
+	positions := make([]PositionView, 0, len(g.book.Positions()))
 	for _, p := range g.book.Positions() {
-		marks[p.Instrument] = g.book.Mark(p.Instrument)
-	}
-	for _, o := range g.book.LiveOrders() {
-		marks[o.Instrument] = g.book.Mark(o.Instrument)
+		mark := g.book.Mark(p.Instrument)
+		positions = append(positions, PositionView{
+			Position:   p,
+			Mark:       mark,
+			Unrealized: p.Unrealized(mark),
+		})
 	}
 
 	return State{
@@ -222,7 +242,7 @@ func (g *Gateway) Snapshot() State {
 		Now:        g.book.Now(),
 		Halted:     g.book.IsHalted(),
 		Orders:     g.book.Orders(),
-		Positions:  g.book.Positions(),
+		Positions:  positions,
 		Balances:   g.book.Balances(),
 		Marks:      marks,
 		Realized:   g.book.Realized(),

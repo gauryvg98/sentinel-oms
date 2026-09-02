@@ -199,12 +199,13 @@ impl Engine {
             Command::Halt { note } => self.on_halt(note),
             Command::Resume { note } => self.on_resume(note),
             Command::Decide {
+                actor,
                 instrument,
                 kind,
                 trace_id,
                 value,
                 note,
-            } => self.decide(instrument, Actor::Gateway, kind, trace_id, value, note),
+            } => self.decide(instrument, actor, kind, trace_id, value, note),
         }
     }
 

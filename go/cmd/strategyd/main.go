@@ -197,6 +197,14 @@ func (r *runner) onBar(closed fixed.Dec) {
 	desired = strategy.RoundToStep(desired, r.step)
 	actual := r.book.PositionIn(r.instrument).Qty
 
+	// Say what it wants, every bar, whether or not anything follows. Most bars
+	// ask for the position already held, and those are exactly the ones the log
+	// was silent about: without them, a strategy that has stopped deciding
+	// looks the same as one that keeps deciding to hold.
+	if r.caughtUp {
+		r.declare(d, closed, desired, actual)
+	}
+
 	order, needed := strategy.Reconcile(desired, actual, r.step)
 	if !needed {
 		if r.caughtUp {
@@ -230,6 +238,25 @@ func (r *runner) onBar(closed fixed.Dec) {
 	}
 }
 
+// declare records the stance in the journal, through the same socket the
+// orders go through. Best effort: failing to explain a decision must never stop
+// the decision being acted on.
+func (r *runner) declare(d strategy.Decision, closed, desired, actual fixed.Dec) {
+	line, err := json.Marshal(map[string]any{
+		"op":         "decide",
+		"instrument": r.instrument,
+		"value":      desired.String(),
+		"note": fmt.Sprintf("%s bar %s fast %s slow %s holding %s",
+			d.Stance, closed, d.Fast, d.Slow, actual),
+	})
+	if err != nil {
+		return
+	}
+	if _, err := r.send(line); err != nil {
+		log.Printf("strategyd: could not record the stance: %v", err)
+	}
+}
+
 func (r *runner) place(o strategy.Order) error {
 	r.placed++
 	authority := "entry"
@@ -249,20 +276,29 @@ func (r *runner) place(o strategy.Order) error {
 		return err
 	}
 
+	answer, err := r.send(line)
+	if err != nil {
+		return err
+	}
+	log.Printf("strategyd: %s", answer)
+	return nil
+}
+
+// send writes one line to the control socket and reads one line back.
+func (r *runner) send(line []byte) ([]byte, error) {
 	conn, err := net.DialTimeout("unix", r.journalDir+"/control.sock", 2*time.Second)
 	if err != nil {
-		return fmt.Errorf("the writer is not listening: %w", err)
+		return nil, fmt.Errorf("the writer is not listening: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := conn.Write(append(line, '\n')); err != nil {
-		return err
+		return nil, err
 	}
 	answer := make([]byte, 4096)
 	n, err := conn.Read(answer)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	log.Printf("strategyd: %s", answer[:n])
-	return nil
+	return answer[:n], nil
 }

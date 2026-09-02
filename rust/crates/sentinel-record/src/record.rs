@@ -64,6 +64,13 @@ wire_enum! {
         Halted = 7 => "HALTED",
         /// The account resumed.
         Resumed = 8 => "RESUMED",
+        /// A strategy said what it wants to hold.
+        ///
+        /// Most bars ask for the position that is already held, so this is
+        /// usually the record of nothing happening — which is the case the log
+        /// was otherwise silent about. Without it, a strategy that has quietly
+        /// stopped deciding looks exactly like one that keeps deciding to hold.
+        StanceDeclared = 9 => "STANCE_DECLARED",
     }
 }
 

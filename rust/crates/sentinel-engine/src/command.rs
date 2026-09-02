@@ -118,6 +118,13 @@ pub enum Command {
 
     /// Record something that happened, or did not.
     Decide {
+        /// Who decided it.
+        ///
+        /// Stated rather than assumed to be the gateway: a stance a strategy
+        /// declared and a refusal the guards raised are both decisions, and a
+        /// log that filed them under the same actor would answer "who stopped
+        /// trading" with the name of the socket they arrived on.
+        actor: sentinel_record::Actor,
         /// What it concerned.
         instrument: sentinel_types::Instrument,
         /// What was decided.

@@ -66,6 +66,25 @@
   </section>
 
   <section>
+    <h2>Market <span class="dim">— mark price, live</span></h2>
+    <table>
+      <thead><tr><th>Instrument</th><th>Mark</th><th>Updated</th></tr></thead>
+      <tbody id="marks"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Strategy <span class="dim">— what it wants to hold</span></h2>
+    <p><span id="stance" class="pill dim">no opinion yet</span></p>
+    <table>
+      <tbody id="strategy"></tbody>
+    </table>
+    <p class="dim" id="strategy-note" style="margin-top:.5rem">
+      waiting for the first bar to close
+    </p>
+  </section>
+
+  <section>
     <h2>Orders</h2>
     <table>
       <thead><tr><th>Id</th><th>Side</th><th>Qty</th><th>Filled</th><th>State</th></tr></thead>
@@ -112,17 +131,20 @@
     status.textContent = state.halted ? "halted" : "trading";
     status.className = "pill " + (state.halted ? "halted" : "live");
 
-    $("positions").innerHTML = (state.positions || []).map((p) => {
-      const mark = (state.marks || {})[p.instrument] ?? "–";
-      const unreal = p.unrealized ?? "";
-      return `<tr>
+    $("positions").innerHTML = (state.positions || []).map((p) => `<tr>
         <td>${p.instrument}</td>
         <td class="num ${signClass(p.qty)}">${p.qty}</td>
         <td class="num">${p.cost_basis}</td>
-        <td class="num">${mark}</td>
-        <td class="num ${signClass(unreal)}">${unreal || "–"}</td>
-      </tr>`;
-    }).join("") || `<tr><td colspan="5" class="dim">flat</td></tr>`;
+        <td class="num">${p.mark ?? "–"}</td>
+        <td class="num ${signClass(p.unrealized)}">${p.unrealized ?? "–"}</td>
+      </tr>`).join("") || `<tr><td colspan="5" class="dim">flat</td></tr>`;
+
+    renderMarks(state.marks || {});
+
+    // The strategy speaks through the log like everything else, so the newest
+    // stance is simply the newest decision it wrote.
+    const stances = (state.decisions || []).filter((d) => d.kind === "STANCE_DECLARED");
+    if (stances.length) showStance(stances[stances.length - 1]);
 
     // Live orders first, then the rest — most recent first within each.
     const orders = (state.orders || []).slice().reverse();
@@ -143,6 +165,41 @@
        <span class="dim">${d.note || ""}</span></li>`).join("");
   }
 
+  // Marks arrive once a second per instrument. Kept in a map so a quiet
+  // instrument keeps its last price on screen instead of vanishing.
+  const marks = {};
+  function renderMarks(fromBook) {
+    for (const [instrument, price] of Object.entries(fromBook)) {
+      marks[instrument] = marks[instrument] || { price, at: null };
+      marks[instrument].price = price;
+    }
+    const rows = Object.entries(marks).sort(([a], [b]) => a.localeCompare(b));
+    $("marks").innerHTML = rows.map(([instrument, m]) => `<tr>
+        <td>${instrument}</td>
+        <td class="num">${m.price}</td>
+        <td class="dim">${m.at ? m.at.toLocaleTimeString() : "–"}</td>
+      </tr>`).join("") || `<tr><td colspan="3" class="dim">no marks yet</td></tr>`;
+  }
+
+  // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the
+  // strategy, parsed back for display only. Anything unrecognised is shown
+  // whole rather than dropped: a note this cannot read is still evidence.
+  function showStance(decision) {
+    const note = decision.note || "";
+    const stance = (note.split(" ")[0] || "").toUpperCase();
+    const pill = $("stance");
+    pill.textContent = stance || "unknown";
+    pill.className = "pill " + (stance === "LONG" ? "live"
+      : stance === "SHORT" ? "halted" : "dim");
+
+    const pairs = [...note.matchAll(/(bar|fast|slow|holding) ([-\d.]+)/g)];
+    $("strategy").innerHTML = pairs.map(([, label, value]) => `<tr>
+        <td class="dim">${label === "bar" ? "last close" : label}</td>
+        <td class="num">${value}</td>
+      </tr>`).join("");
+    $("strategy-note").textContent = pairs.length ? "" : note;
+  }
+
   function prepend(id, html) {
     const list = $(id);
     list.insertAdjacentHTML("afterbegin", html);
@@ -156,6 +213,12 @@
     // client with nothing gets a whole picture rather than a promise of one.
     source.addEventListener("book", (e) => renderBook(JSON.parse(e.data)));
 
+    source.addEventListener("marks", (e) => {
+      const m = JSON.parse(e.data);
+      marks[m.instrument] = { price: m.price, at: new Date() };
+      renderMarks({});
+    });
+
     source.addEventListener("orders", (e) => {
       const o = JSON.parse(e.data);
       prepend("activity",
@@ -165,6 +228,7 @@
 
     source.addEventListener("account", (e) => {
       const a = JSON.parse(e.data);
+      if (a.kind === "STANCE_DECLARED") showStance(a);
       prepend("decisions",
         `<li><span class="dim">${a.actor || ""}</span> ${a.kind}
          <span class="dim">${a.note || a.asset || ""}</span></li>`);

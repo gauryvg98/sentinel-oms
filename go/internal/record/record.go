@@ -217,6 +217,7 @@ const (
 	ReconcileScheduled DecisionKind = 6
 	Halted             DecisionKind = 7
 	Resumed            DecisionKind = 8
+	StanceDeclared     DecisionKind = 9
 )
 
 var decisionNames = map[DecisionKind]string{
@@ -224,6 +225,7 @@ var decisionNames = map[DecisionKind]string{
 	ExitPlaced: "EXIT_PLACED", ExitClamped: "EXIT_CLAMPED",
 	SizingComputed: "SIZING_COMPUTED", ReconcileScheduled: "RECONCILE_SCHEDULED",
 	Halted: "HALTED", Resumed: "RESUMED",
+	StanceDeclared: "STANCE_DECLARED",
 }
 
 func (d DecisionKind) String() string {

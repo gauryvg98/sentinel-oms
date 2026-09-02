@@ -1,0 +1,582 @@
+<title>Sentinel &mdash; Engineering</title>
+<style>
+  :root{
+    --bg:#0a0e0d; --panel:#101614; --panel2:#0d1210; --edge:#1d2a25; --edge2:#26362f;
+    --ink:#cfe3da; --head:#eaf5ef; --dim:#5e7268; --dimr:#7d928a;
+    --green:#22e07b; --amber:#fbbf24; --red:#f87171; --violet:#a78bfa;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(1100px 520px at 50% -140px, #10201a 0%, rgba(16,32,26,0) 70%),
+      var(--bg);
+    color:var(--ink);font-family:var(--sans);line-height:1.65;
+    font-size:17px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 120px;}
+  .col{max-width:720px;margin:0 auto;}
+  a{color:var(--green);text-decoration:none;border-bottom:1px solid rgba(34,224,123,.3)}
+  a:hover{border-bottom-color:var(--green)}
+  code{font-family:var(--mono);font-size:.88em;background:#0e1512;border:1px solid var(--edge);
+    border-radius:5px;padding:1px 6px;color:var(--head);white-space:nowrap}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.24em;text-transform:uppercase;
+    color:var(--green);}
+  /* header */
+  header{padding:64px 0 40px;border-bottom:1px solid var(--edge);}
+  .brandrow{display:flex;align-items:center;gap:12px;justify-content:space-between;margin-bottom:44px;
+    font-family:var(--mono);font-size:13px;color:var(--dimr);}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.02em}
+  .wm{background:linear-gradient(90deg,#22e07b,#8ff7c4 45%,#22e07b);-webkit-background-clip:text;
+    background-clip:text;-webkit-text-fill-color:transparent;color:transparent;
+    text-shadow:0 0 22px rgba(34,224,123,.18)}
+  .shield{width:22px;height:22px;flex:none;filter:drop-shadow(0 0 5px rgba(34,224,123,.5));
+    animation:shieldpulse 3s ease-in-out infinite}
+  @keyframes shieldpulse{0%,100%{opacity:.9;filter:drop-shadow(0 0 3px rgba(34,224,123,.4))}
+    50%{opacity:1;filter:drop-shadow(0 0 11px rgba(34,224,123,.85))}}
+  @media (prefers-reduced-motion: reduce){.shield{animation:none}}
+  h1{font-size:clamp(38px,6vw,60px);line-height:1.02;letter-spacing:-.03em;font-weight:800;
+    color:var(--head);margin:16px 0 0;text-wrap:balance;}
+  h1 .lo{color:var(--dimr);font-weight:800}
+  .standfirst{font-size:20px;color:var(--dimr);margin:22px 0 0;max-width:640px;text-wrap:pretty}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:30px;font-family:var(--mono);
+    font-size:12.5px;color:var(--dim);}
+  .meta b{color:var(--ink);font-weight:600}
+  .tag{border:1px solid var(--edge);border-radius:999px;padding:4px 11px;color:var(--dimr)}
+  /* tldr */
+  .tldr{margin:40px auto 0;background:linear-gradient(180deg,#0f1714,#0c1210);
+    border:1px solid var(--edge2);border-left:3px solid var(--green);border-radius:12px;padding:22px 26px;}
+  .tldr .k{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--green)}
+  .tldr p{margin:8px 0 0;color:var(--ink);font-size:16.5px}
+  /* sections */
+  section{padding-top:56px}
+  h2{font-size:30px;line-height:1.1;letter-spacing:-.02em;font-weight:800;color:var(--head);
+    margin:14px 0 0;text-wrap:balance}
+  h3{font-size:18px;font-weight:700;color:var(--head);margin:34px 0 0;letter-spacing:-.01em}
+  .num{font-family:var(--mono);font-size:13px;color:var(--green);letter-spacing:.1em}
+  p{margin:16px 0 0}
+  .col p, .col ul, .col h3{max-width:720px}
+  ul{margin:14px 0 0;padding-left:0;list-style:none}
+  li{position:relative;padding-left:22px;margin:9px 0}
+  li::before{content:"";position:absolute;left:2px;top:11px;width:6px;height:6px;border-radius:50%;
+    background:var(--green);opacity:.7}
+  .lede{font-size:19px;color:var(--dimr)}
+  strong{color:var(--head);font-weight:650}
+  .pull{font-family:var(--mono);font-size:15px;color:var(--head);border-left:2px solid var(--amber);
+    padding:4px 0 4px 18px;margin:26px 0;line-height:1.55}
+  /* figure */
+  figure{margin:34px 0 0}
+  .fig{background:var(--panel2);border:1px solid var(--edge);border-radius:14px;padding:22px 18px 14px;
+    overflow-x:auto}
+  .fig svg{display:block;width:100%;height:auto;min-width:560px}
+  figcaption{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:12px;padding-left:2px;
+    display:flex;gap:8px}
+  figcaption b{color:var(--dimr);font-weight:600}
+  /* svg shared */
+  svg .box{fill:var(--panel);stroke:var(--edge2);stroke-width:1}
+  svg .box.hl{stroke:var(--green)}
+  svg .box.warn{stroke:var(--amber)} svg .box.bad{stroke:var(--red)}
+  svg .box.led{fill:#0c1512;stroke:var(--edge)}
+  svg text{font-family:var(--mono)}
+  svg .t{fill:var(--head);font-size:13px;font-weight:600}
+  svg .ts{fill:var(--dimr);font-size:11px}
+  svg .tg{fill:var(--green);font-size:11px} svg .ta{fill:var(--amber);font-size:11px}
+  svg .tr{fill:var(--red);font-size:11px} svg .tv{fill:var(--violet);font-size:11px}
+  svg .lane{fill:var(--dim);font-size:11px;letter-spacing:1.5px;font-weight:600}
+  svg .th{fill:var(--head);font-size:14px;font-weight:700} svg .tk{fill:var(--ink);font-size:11px}
+  svg .flow{stroke:var(--dim);stroke-width:1.4;fill:none}
+  svg .flow.g{stroke:var(--green)} svg .flow.a{stroke:var(--amber)} svg .flow.r{stroke:var(--red)}
+  svg .flow.dash{stroke-dasharray:4 4;stroke:var(--dimr)}
+  svg .grp{fill:none;stroke:var(--edge);stroke-dasharray:3 5}
+  /* table */
+  .tbl{margin-top:26px;overflow-x:auto;border:1px solid var(--edge);border-radius:12px}
+  table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:520px}
+  th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--edge);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+    background:var(--panel2);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  td:first-child{font-family:var(--mono);font-size:13px;color:var(--head);white-space:nowrap}
+  .callout{margin:26px 0 0;background:#0e1512;border:1px solid var(--edge);border-radius:12px;padding:18px 22px}
+  .callout .k{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--amber)}
+  .callout.good .k{color:var(--green)}
+  .callout p{margin:7px 0 0;font-size:15.5px}
+  hr{border:none;border-top:1px solid var(--edge);margin:0}
+  footer{margin-top:70px;padding-top:28px;border-top:1px solid var(--edge);font-family:var(--mono);
+    font-size:13px;color:var(--dim);display:flex;flex-wrap:wrap;gap:6px 20px;justify-content:space-between}
+  .topnav{position:sticky;top:0;z-index:5;background:rgba(10,14,13,.86);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--edge);font-family:var(--mono);font-size:12.5px;
+    display:flex;align-items:center;gap:18px;padding:9px 24px}
+  .topnav a{color:var(--dimr);border-bottom:none}
+  .topnav a:hover{color:var(--head)}
+  .topnav .home{color:var(--green);font-weight:600}
+  .topnav .sp{flex:1}
+  @media(max-width:640px){body{font-size:16px} .standfirst{font-size:18px} h2{font-size:25px}}
+</style>
+
+<nav class="topnav">
+  <a class="home" href="/">&larr; Sentinel terminal</a>
+  <span class="sp"></span>
+  <a href="https://github.com/gauryvg98/sentinel-oms" target="_blank" rel="noopener">source &#8599;</a>
+</nav>
+
+<div class="wrap">
+<header>
+  <div class="brandrow">
+    <span class="brand">
+      <svg class="shield" viewBox="0 0 24 24" fill="none"><path d="M12 2 20 5v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3Z" stroke="#22e07b" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12.2l2.4 2.4 4.6-5" stroke="#22e07b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="wm">SENTINEL</span>
+    </span>
+    <span>Engineering &middot; <b style="color:var(--dimr)">Yashvardhan&nbsp;Gaur</b></span>
+  </div>
+  <div class="col" style="margin:0">
+    <div class="eyebrow">Execution-integrity-first OMS</div>
+    <h1>An order management system that <span class="lo">refuses to lie about your position.</span></h1>
+    <p class="standfirst">Sentinel is an automated-trading OMS built on one uncompromising rule: when the ledger and the exchange disagree, it <em>halts</em> &mdash; it never guesses. Everything else &mdash; the event-sourced core, the pure state machine, the multi-bot risk layer &mdash; falls out of taking that rule seriously.</p>
+    <div class="meta">
+      <span class="tag">Python 3.11 &middot; asyncio</span>
+      <span class="tag">PostgreSQL</span>
+      <span class="tag">FastAPI + WebSocket</span>
+      <span class="tag">Binance / Bybit perps</span>
+      <span class="tag">315 tests</span>
+    </div>
+  </div>
+  <div class="tldr col">
+    <div class="k">TL;DR</div>
+    <p>The OMS is an <strong>append-only event ledger</strong> with a <strong>pure state machine</strong>; orders, positions and fills are <strong>derived projections</strong> you can rebuild from the log at any time. On restart or any divergence it <strong>reconciles against broker truth and halts on genuine disagreement</strong> &mdash; "halt, don't absorb." On top sits a fleet of independent per-symbol bots sharing one account, sized by a <strong>risk layer</strong> that ties position size to where the stop is, and a <strong>topic-pushed UI</strong> where the browser never polls.</p>
+  </div>
+</header>
+
+<div class="col">
+
+<!-- 1 -->
+<section>
+  <span class="num">01</span>
+  <h2>The thesis: integrity over cleverness</h2>
+  <p class="lede">In automated trading the strategy is the glamorous part and the least important. The thing that actually loses money is an OMS that <em>thinks</em> it holds a position it doesn't &mdash; or doesn't hold one it does.</p>
+  <p>A na&iuml;ve bot fires an order, assumes it filled, and updates a number in memory. Then the request times out, or the socket drops mid-fill, or the exchange partially fills and cancels the rest via self-trade prevention. Now local belief and exchange reality have forked, and every subsequent decision compounds the error &mdash; it sells what it doesn't own, doubles a position it already closed, sizes off phantom equity.</p>
+  <p>Sentinel is built so that fork <strong>cannot go unnoticed</strong>. The exchange is the source of truth for <em>exposure</em>; the ledger is the source of truth for <em>intent and history</em>; and any contradiction between them is a first-class, halt-worthy event rather than something to paper over.</p>
+  <div class="pull">"Halt, don't absorb." A timeout is not a rejection. An unknown is not a zero. When we can't prove state, we stop trading and reconcile &mdash; we never invent exposure the exchange doesn't hold.</div>
+</section>
+
+<!-- 2 -->
+</div>
+<section>
+  <div class="col"><span class="num">02</span>
+  <h2>System overview</h2>
+  <p>One account-scoped <code>SentinelApp</code> owns the durable machinery &mdash; the ledger, the command gateway, the reconciler, a task supervisor, and a single-writer coordinator. Above it, an <code>InstrumentManager</code> runs a fleet of independent <strong>bots</strong>, one per symbol, each a self-contained bundle: market feed, bar clock, exchange rules, strategy, and an order terminal. A <code>Venue</code> abstraction hides whether the exchange is Binance-futures, Bybit, or spot. The browser talks to it all over a single WebSocket that pushes only what changed.</p></div>
+
+  <figure><div class="col"><div class="fig">
+  <svg viewBox="0 0 960 470" role="img" aria-label="System architecture">
+    <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#5e7268"/></marker>
+    <marker id="ahg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#22e07b"/></marker></defs>
+
+    <!-- browser -->
+    <rect class="box" x="24" y="150" width="180" height="170" rx="12"/>
+    <text class="t" x="44" y="180">Browser UI</text>
+    <text class="ts" x="44" y="202">lightweight-charts</text>
+    <text class="ts" x="44" y="220">status &middot; logs &middot; risk</text>
+    <text class="ts" x="44" y="238">markers &middot; SL/TP</text>
+    <text class="tg" x="44" y="296">pushes: nothing</text>
+    <text class="tg" x="44" y="312">receives: topics</text>
+
+    <path class="flow g" d="M204 210 H250" marker-end="url(#ahg)"/>
+    <text class="tg" x="206" y="200">WS</text>
+    <path class="flow dash" d="M250 250 H204" marker-end="url(#ah)"/>
+
+    <!-- SentinelApp group -->
+    <rect class="grp" x="250" y="40" width="430" height="390" rx="14"/>
+    <text class="ts" x="266" y="62" style="fill:var(--green)">SentinelApp &middot; one per account</text>
+
+    <rect class="box" x="270" y="80" width="180" height="52" rx="9"/>
+    <text class="t" x="286" y="102">CommandGateway</text><text class="ts" x="286" y="120">+ guards (R1.x rules)</text>
+    <rect class="box" x="470" y="80" width="190" height="52" rx="9"/>
+    <text class="t" x="486" y="102">OrderEngine</text><text class="ts" x="486" y="120">applies events &rarr; state</text>
+
+    <rect class="box hl" x="270" y="150" width="390" height="72" rx="9"/>
+    <text class="t" x="286" y="176">Event ledger  &middot;  append-only</text>
+    <text class="ts" x="286" y="196">events &rarr; projections: orders &middot; positions &middot; fills</text>
+    <text class="tg" x="286" y="213">the single source of truth for intent &amp; history</text>
+
+    <rect class="box" x="270" y="240" width="125" height="52" rx="9"/>
+    <text class="t" x="286" y="262">Reconciler</text><text class="ts" x="286" y="280">halt/retry</text>
+    <rect class="box" x="405" y="240" width="120" height="52" rx="9"/>
+    <text class="t" x="421" y="262">Supervisor</text><text class="ts" x="421" y="280">halt on fatal</text>
+    <rect class="box" x="535" y="240" width="125" height="52" rx="9"/>
+    <text class="t" x="551" y="262">Writer lock</text><text class="ts" x="551" y="280">single-writer</text>
+
+    <!-- bots -->
+    <rect class="grp" x="270" y="312" width="390" height="100" rx="10"/>
+    <text class="ts" x="286" y="332">InstrumentManager &middot; N independent bots</text>
+    <rect class="box" x="286" y="342" width="112" height="56" rx="8"/>
+    <text class="t" x="298" y="364">Bot &middot; BTC</text><text class="ts" x="298" y="382">feed&middot;bars&middot;strat</text>
+    <rect class="box" x="408" y="342" width="112" height="56" rx="8"/>
+    <text class="t" x="420" y="364">Bot &middot; ETH</text><text class="ts" x="420" y="382">runner&middot;terminal</text>
+    <rect class="box" x="530" y="342" width="112" height="56" rx="8"/>
+    <text class="ts" x="548" y="376">&hellip;others</text>
+
+    <!-- ledger db -->
+    <rect class="box led" x="252" y="150" width="0" height="0"/>
+    <path class="flow" d="M460 186 H500" /><!-- spacer, invisible-ish -->
+    <path class="flow" d="M565 222 V240" marker-end="url(#ah)"/>
+    <path class="flow" d="M360 222 V240" marker-end="url(#ah)"/>
+    <path class="flow" d="M360 132 V150" marker-end="url(#ah)"/>
+    <path class="flow" d="M565 132 V150" marker-end="url(#ah)"/>
+
+    <!-- postgres -->
+    <rect class="box led" x="740" y="150" width="180" height="72" rx="10"/>
+    <text class="t" x="760" y="180">PostgreSQL</text>
+    <text class="ts" x="760" y="200">events (append-only)</text>
+    <text class="ts" x="760" y="216">+ rebuildable projections</text>
+    <path class="flow" d="M660 186 H740" marker-end="url(#ah)"/>
+    <path class="flow" d="M740 210 H662" marker-end="url(#ah)"/>
+
+    <!-- venue / exchange -->
+    <rect class="box" x="740" y="260" width="180" height="60" rx="10"/>
+    <text class="t" x="760" y="286">Venue adapter</text>
+    <text class="ts" x="760" y="304">Binance &middot; Bybit &middot; spot</text>
+    <path class="flow" d="M660 280 H740" marker-end="url(#ah)"/>
+
+    <rect class="box" x="740" y="352" width="180" height="52" rx="10"/>
+    <text class="t" x="760" y="378">Exchange</text><text class="ts" x="760" y="396">REST + user-data WS</text>
+    <path class="flow g" d="M830 320 V352" marker-end="url(#ahg)"/>
+    <path class="flow" d="M855 352 V322" marker-end="url(#ah)"/>
+    <text class="ts" x="866" y="342">fills</text>
+  </svg>
+  <figcaption><b>Fig 1.</b> One durable account core; a fleet of bots above it; the exchange and Postgres at the edges.</figcaption>
+  </div></div></figure>
+
+  <div class="col">
+  <div class="tbl"><table>
+    <tr><th>Subsystem</th><th>Responsibility</th></tr>
+    <tr><td>domain</td><td>Pure order model + <code>transition(order, event)</code>. No I/O, no clock &mdash; every rule unit-testable before a broker exists.</td></tr>
+    <tr><td>ledger</td><td>Append-only <code>events</code> and the projections (<code>orders</code>&middot;<code>positions</code>&middot;<code>fills</code>) rebuilt from them.</td></tr>
+    <tr><td>oms</td><td>CommandGateway + guards + the single-writer coordinator that serialises writes per instrument.</td></tr>
+    <tr><td>recon</td><td>Startup recovery and live reconciliation against broker truth &mdash; the halt-or-resolve decisions.</td></tr>
+    <tr><td>broker</td><td>Exchange adapters behind one interface; timeouts, rejects and fills normalised to domain events.</td></tr>
+    <tr><td>risk</td><td>Position sizing, stop/target geometry, leverage &amp; per-pool margin &mdash; the money layer, separate from alpha.</td></tr>
+    <tr><td>ui</td><td>FastAPI + a topic-based change signal that pushes one bot card, or the account, over the WS.</td></tr>
+  </table></div>
+  </div>
+</section>
+
+<div class="col">
+
+<!-- 3 -->
+<section>
+  <span class="num">03</span>
+  <h2>The event-sourced core</h2>
+  <p>Every state change is an <strong>event appended to an immutable log</strong>. Orders, positions and fills are not stored as authoritative tables you mutate &mdash; they're <strong>projections</strong>, folded from the event stream through one pure function. Lose the projections and you rebuild them by replay; the log is the truth.</p>
+  <p>The heart of it is <code>transition(order, event) &rarr; order</code>: a total, side-effect-free function that encodes the entire legal state machine. Because it touches no clock, socket, or database, the whole protocol is tested exhaustively before any real feed exists &mdash; and because it's the <em>only</em> way state moves, a bad strategy can trade badly but can never corrupt the ledger.</p>
+</section>
+</div>
+
+<figure><div class="col"><div class="fig">
+  <svg viewBox="0 0 940 200" role="img" aria-label="Event-sourced write path">
+    <defs><marker id="ah2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#5e7268"/></marker></defs>
+    <rect class="box" x="16" y="70" width="150" height="60" rx="10"/>
+    <text class="t" x="34" y="96">Command</text><text class="ts" x="34" y="115">place / cancel</text>
+    <path class="flow" d="M166 100 H206" marker-end="url(#ah2)"/>
+    <rect class="box" x="206" y="70" width="160" height="60" rx="10"/>
+    <text class="t" x="224" y="96">Guards</text><text class="ts" x="224" y="115">R1.x invariants</text>
+    <path class="flow" d="M366 100 H406" marker-end="url(#ah2)"/>
+    <rect class="box hl" x="406" y="60" width="180" height="80" rx="10"/>
+    <text class="t" x="424" y="88">append event</text><text class="tg" x="424" y="108">events (immutable)</text><text class="ts" x="424" y="126">the source of truth</text>
+    <path class="flow" d="M586 100 H626" marker-end="url(#ah2)"/>
+    <rect class="box" x="626" y="70" width="150" height="60" rx="10"/>
+    <text class="t" x="644" y="92">transition()</text><text class="ts" x="644" y="111">pure &middot; total</text>
+    <path class="flow" d="M776 100 H816" marker-end="url(#ah2)"/>
+    <rect class="box" x="816" y="52" width="110" height="96" rx="10"/>
+    <text class="ts" x="832" y="78">projections</text>
+    <text class="t" x="832" y="100">orders</text><text class="t" x="832" y="120">positions</text><text class="t" x="832" y="140">fills</text>
+    <path class="flow dash" d="M881 148 C881 185 496 190 496 148" marker-end="url(#ah2)"/>
+    <text class="ts" x="470" y="182" style="fill:var(--dimr)">rebuild by replay</text>
+  </svg>
+  <figcaption><b>Fig 2.</b> Commands become events; projections are folded from the log and can always be rebuilt.</figcaption>
+</div></div></figure>
+
+<div class="col">
+  <h3>The schema &mdash; safety in constraints, not code</h3>
+  <p>Eight tables in two groups: the durable <strong>log</strong>, and the <strong>projections</strong> folded from it. Each critical guarantee is a database constraint rather than a trusted code path &mdash; idempotency, exactly-once exposure and no-overfill are <code>UNIQUE</code> / <code>PRIMARY KEY</code> / <code>CHECK</code> constraints, so they hold even if the application code is wrong.</p>
+</div>
+
+<figure><div class="col"><div class="fig">
+<svg viewBox="0 0 920 470" role="img" aria-label="Database schema" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="s" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#5e7268"/></marker>
+    <marker id="sg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#22e07b"/></marker>
+  </defs>
+
+  <text class="lane" x="30" y="30">APPEND-ONLY LOG &#183; the source of truth</text>
+  <text class="lane" x="500" y="30">PROJECTIONS &#183; rebuildable by replay</text>
+
+  <!-- projections group -->
+  <rect class="grp" x="490" y="44" width="410" height="320" rx="12"/>
+
+  <!-- commands -->
+  <rect class="box" x="30" y="48" width="250" height="86" rx="10"/>
+  <text class="th" x="46" y="72">commands</text>
+  <text class="tk" x="46" y="92">seq PK &#183; command_id UNIQUE</text>
+  <text class="ts" x="46" y="110">kind &#183; payload &#183; received_at</text>
+  <text class="tg" x="46" y="127">command_id UNIQUE &#8594; idempotent (R1.2)</text>
+
+  <!-- events -->
+  <rect class="box hl" x="30" y="170" width="250" height="104" rx="10"/>
+  <text class="th" x="46" y="194">events <tspan class="ts">&#183; append-only</tspan></text>
+  <text class="tk" x="46" y="214">seq PK &#183; event_id UNIQUE</text>
+  <text class="ts" x="46" y="232">order_id &#183; kind</text>
+  <text class="ts" x="46" y="250">from_state &#8594; to_state &#183; payload</text>
+  <text class="tg" x="46" y="267">the recovery + audit spine (R1.11)</text>
+
+  <path class="flow" d="M155 134 V170" marker-end="url(#s)"/><text class="ts" x="162" y="158">produces</text>
+
+  <!-- orders -->
+  <rect class="box" x="510" y="60" width="370" height="104" rx="10"/>
+  <text class="th" x="526" y="84">orders</text>
+  <text class="tk" x="526" y="104">order_id PK &#183; client_order_id UNIQUE</text>
+  <text class="ts" x="526" y="122">state &#183; side &#183; qty &#183; filled_qty</text>
+  <text class="ts" x="526" y="140">authority &#183; limit_price &#183; broker_order_id</text>
+  <text class="ts" x="526" y="157" style="fill:#7d928a">CHECK filled_qty &#8804; qty</text>
+
+  <!-- fills -->
+  <rect class="box" x="510" y="196" width="370" height="86" rx="10"/>
+  <text class="th" x="526" y="220">fills</text>
+  <text class="tk" x="526" y="240">exec_id PK &#183; order_id &#8594; orders</text>
+  <text class="ts" x="526" y="258">qty &#183; price &#183; event_seq</text>
+  <text class="tg" x="526" y="275">exec_id PK &#8594; exactly-once exposure (R1.5/1.7)</text>
+
+  <!-- positions -->
+  <rect class="box" x="510" y="312" width="200" height="42" rx="10"/>
+  <text class="th" x="526" y="332">positions</text>
+  <text class="ts" x="526" y="348">instrument PK &#183; qty</text>
+
+  <!-- events -> orders (fold) -->
+  <path class="flow g" d="M280 200 C400 200 400 112 510 112" marker-end="url(#sg)"/>
+  <text class="tg" x="330" y="150">transition() folds</text>
+  <!-- events -> fills (fold) -->
+  <path class="flow g" d="M280 232 C400 232 420 238 510 238" marker-end="url(#sg)"/>
+  <!-- fills -> orders (FK) -->
+  <path class="flow dash" d="M695 196 V164" marker-end="url(#s)"/><text class="ts" x="700" y="184">FK</text>
+  <!-- fills -> positions (aggregate) -->
+  <path class="flow" d="M600 282 V312" marker-end="url(#s)"/><text class="ts" x="606" y="302">&#931; net</text>
+  <!-- rebuild by replay -->
+  <path class="flow dash" d="M760 354 C820 354 820 300 300 274" marker-end="url(#s)"/>
+  <text class="ts" x="600" y="372">drop projections &#8594; rebuild by replay</text>
+
+  <!-- auxiliary -->
+  <rect class="box" x="30" y="330" width="250" height="72" rx="10"/>
+  <text class="th" x="46" y="354">decision_log</text>
+  <text class="ts" x="46" y="373">actor &#183; decision &#183; detail</text>
+  <text class="ts" x="46" y="391" style="fill:#7d928a">WHY &#8212; incl. blocked / clamped trades</text>
+
+  <rect class="box" x="730" y="312" width="150" height="42" rx="10"/>
+  <text class="th" x="746" y="332">checkpoints</text>
+  <text class="ts" x="746" y="348">name PK &#183; last_seq</text>
+</svg>
+  <figcaption><b>Fig 3.</b> An append-only log is the truth; orders / positions / fills are projections, rebuildable by replay.</figcaption>
+</div></div></figure>
+
+<div class="col">
+  <div class="tbl"><table>
+    <tr><th>Table</th><th>Role</th><th>Invariant (DB-enforced)</th></tr>
+    <tr><td>commands</td><td>intent log &middot; append-only</td><td><code>command_id UNIQUE</code> &rarr; idempotent retries</td></tr>
+    <tr><td>events</td><td>the event log &middot; append-only</td><td>the replay spine; <code>event_id UNIQUE</code></td></tr>
+    <tr><td>orders</td><td>projection: order state</td><td><code>CHECK filled_qty &le; qty</code> &rarr; no overfill</td></tr>
+    <tr><td>fills</td><td>exposure ledger</td><td><code>exec_id PRIMARY KEY</code> &rarr; exactly-once exposure</td></tr>
+    <tr><td>positions</td><td>projection: net qty / instrument</td><td>continuously checked <code>= &Sigma; fills</code></td></tr>
+    <tr><td>decision_log</td><td><em>why</em> &mdash; incl. blocked / clamped</td><td>the audit of intent, not just outcome</td></tr>
+  </table></div>
+</div>
+
+<div class="col">
+<!-- 4 -->
+<section>
+  <span class="num">04</span>
+  <h2>The order state machine</h2>
+  <p>The subtlety that separates a real OMS from a toy is what it does when it <em>doesn't know</em>. A submission that times out is not rejected &mdash; its outcome is <strong>unprovable</strong>, so it parks in <code>UNKNOWN</code> and only reconciliation may move it. A fill can race ahead of the ack. A cancel can be confirmed by the venue that we never requested (self-trade prevention). Each of these is an explicit, legal edge &mdash; not an exception that crashes the loop.</p>
+</section>
+</div>
+
+<figure><div class="col"><div class="fig">
+  <svg viewBox="0 0 920 440" role="img" aria-label="Order state machine" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#5e7268"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#22e07b"/></marker>
+    <marker id="aa" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#fbbf24"/></marker>
+    <marker id="av" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#a78bfa"/></marker>
+  </defs>
+
+  <!-- ===== LANE LABELS ===== -->
+  <text class="lane" x="30" y="34">LIVE LIFECYCLE</text>
+  <text class="lane" x="710" y="34">TERMINAL</text>
+  <text class="lane" x="30" y="300" style="fill:#a78bfa">RECOVERY &#183; only reconciliation exits these</text>
+
+  <!-- ===== terminal container ===== -->
+  <rect class="grp" x="690" y="44" width="200" height="176" rx="12"/>
+
+  <!-- ===== recovery container ===== -->
+  <rect class="grp" x="24" y="312" width="600" height="104" rx="12" style="stroke:#3a2f52"/>
+
+  <!-- ===== HAPPY PATH (row y=64) ===== -->
+  <rect class="box" x="30" y="64" width="104" height="46" rx="9"/><text class="t" x="82" y="92" text-anchor="middle">CREATED</text>
+  <rect class="box" x="196" y="64" width="120" height="46" rx="9"/><text class="t" x="256" y="92" text-anchor="middle">SUBMITTING</text>
+  <rect class="box hl" x="378" y="64" width="104" height="46" rx="9"/><text class="t" x="430" y="92" text-anchor="middle">WORKING</text>
+  <rect class="box hl" x="544" y="64" width="104" height="46" rx="9"/><text class="t" x="596" y="92" text-anchor="middle">PARTIAL</text>
+  <rect class="box" x="710" y="64" width="160" height="46" rx="9"/><text class="tg" x="790" y="92" text-anchor="middle">FILLED</text>
+
+  <!-- happy arrows -->
+  <path class="flow g" d="M134 87 H196" marker-end="url(#ag)"/><text class="ts" x="150" y="79">submit</text>
+  <path class="flow g" d="M316 87 H378" marker-end="url(#ag)"/><text class="ts" x="330" y="79">acked</text>
+  <path class="flow g" d="M482 87 H544" marker-end="url(#ag)"/><text class="ts" x="502" y="79">fill</text>
+  <path class="flow g" d="M648 87 H710" marker-end="url(#ag)"/><text class="ts" x="654" y="79">filled</text>
+  <!-- partial self loop -->
+  <path class="flow g" d="M572 64 C572 40 620 40 620 62" marker-end="url(#ag)"/><text class="ts" x="600" y="36" text-anchor="middle">+fills</text>
+
+  <!-- ===== MID ROW (y=150): REJECTED, CANCEL_PENDING, CANCELED ===== -->
+  <rect class="box bad" x="196" y="150" width="120" height="44" rx="9"/><text class="tr" x="256" y="177" text-anchor="middle">REJECTED</text>
+  <rect class="box warn" x="430" y="150" width="164" height="44" rx="9"/><text class="ta" x="512" y="177" text-anchor="middle">CANCEL_PENDING</text>
+  <rect class="box bad" x="710" y="150" width="160" height="44" rx="9"/><text class="tr" x="790" y="177" text-anchor="middle">CANCELED</text>
+
+  <!-- SUBMITTING -> REJECTED (straight down) -->
+  <path class="flow" d="M256 110 V150" marker-end="url(#a)"/><text class="ts" x="262" y="136">reject</text>
+  <!-- WORKING -> CANCEL_PENDING ; PARTIAL -> CANCEL_PENDING (elbows into the top) -->
+  <path class="flow" d="M430 110 V132 H478 V150" marker-end="url(#a)"/>
+  <path class="flow" d="M596 110 V132 H548 V150" marker-end="url(#a)"/>
+  <text class="ts" x="430" y="126" text-anchor="middle">cancel</text>
+  <!-- CANCEL_PENDING -> CANCELED -->
+  <path class="flow" d="M594 172 H710" marker-end="url(#a)"/><text class="ts" x="618" y="164">confirmed</text>
+  <!-- unsolicited STP cancel: PARTIAL bottom-right down and across (dashed, single line) -->
+  <path class="flow dash" d="M648 96 H672 V210 H790 V194" marker-end="url(#a)"/><text class="ts" x="676" y="228">unsolicited cancel (STP)</text>
+
+  <!-- ===== RECOVERY (row y=336) ===== -->
+  <rect class="box warn" x="44" y="336" width="120" height="46" rx="9"/><text class="ta" x="104" y="364" text-anchor="middle">UNKNOWN</text>
+  <rect class="box" x="232" y="336" width="160" height="46" rx="9" style="stroke:#a78bfa"/><text class="tv" x="312" y="364" text-anchor="middle">RECONCILING</text>
+
+  <!-- SUBMITTING -> UNKNOWN (down the far left, no crossings) -->
+  <path class="flow a" d="M196 96 H104 V336" marker-end="url(#aa)"/><text class="ta" x="112" y="240">timeout</text>
+  <!-- UNKNOWN -> RECONCILING -->
+  <path class="flow a" d="M164 359 H232" marker-end="url(#aa)"/><text class="ts" x="176" y="351">reconcile</text>
+  <!-- RECONCILING -> resolve to broker truth (ONE arrow up to the terminal/live area) -->
+  <path class="flow" style="stroke:#a78bfa" d="M392 352 H430 V300 H820 V220" marker-end="url(#av)"/>
+  <text class="tv" x="500" y="292">resolve &#8594; broker truth (any state)</text>
+  <!-- terminal reopen (ONE dashed arrow back to RECONCILING) -->
+  <path class="flow dash" d="M690 176 H656 V404 H312 V382" marker-end="url(#a)"/>
+  <text class="ts" x="470" y="400">reopen only here</text>
+</svg>
+  <figcaption><b>Fig 4.</b> Grouped lanes &mdash; <span style="color:var(--green)">green</span> happy path, <span style="color:var(--amber)">amber</span> recovery, <span style="color:var(--violet)">violet</span> reconciliation. The <code style="background:none;border:none;padding:0;color:var(--violet)">RECONCILING</code> fan-out collapses to one arrow.</figcaption>
+</div></div></figure>
+
+<div class="col">
+<section>
+  <span class="num">05</span>
+  <h2>Reconciliation: halt, don't absorb</h2>
+  <p>On every restart the OMS rebuilds projections from the log, then walks every non-terminal order and asks the broker what really happened. Missing fills are back-filled &mdash; idempotently, keyed by exec-id, so replaying is exactly-once. Then it compares booked quantity to broker truth, and this is where the philosophy lives:</p>
+  <ul>
+    <li><strong>Booked &gt; broker</strong> &mdash; we recorded exposure the exchange doesn't hold. That's the dangerous direction: <span style="color:var(--red)">halt immediately</span>, never absorb.</li>
+    <li><strong>Booked &lt; broker, and it persists</strong> &mdash; genuinely missing fills after back-fill. Halt.</li>
+    <li><strong>Booked &lt; broker, transiently</strong> &mdash; the exchange's fill feed lagging its own <code>executedQty</code> mid-fill. Retry a few times; let it catch up. Only a gap that <em>survives</em> is fatal.</li>
+    <li><strong>A pure connectivity timeout</strong> &mdash; we learned nothing. Retry forever; halting here would only stop risk management while still blind.</li>
+  </ul>
+  <p>The distinction that took real care: a <em>timeout</em> or a <em>lagging feed</em> means "try again"; a genuine <em>disagreement about exposure</em> means "stop the account." Conflating them either makes the system brittle (halts on every network blip) or unsafe (trades through real divergence). Sentinel separates them explicitly.</p>
+</section>
+</div>
+
+<figure><div class="col"><div class="fig">
+  <svg viewBox="0 0 940 330" role="img" aria-label="Reconciliation decision flow">
+    <defs><marker id="ah4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0l7 3-7 3z" fill="#5e7268"/></marker></defs>
+    <rect class="box" x="16" y="140" width="150" height="52" rx="9"/><text class="t" x="32" y="166">query broker</text><text class="ts" x="32" y="184">order truth + fills</text>
+    <path class="flow" d="M166 166 H206" marker-end="url(#ah4)"/>
+
+    <!-- absent diamond -->
+    <path class="box" d="M266 128 L316 166 L266 204 L216 166 Z"/><text class="ts" x="243" y="163">order</text><text class="ts" x="240" y="179">absent?</text>
+    <path class="flow" d="M266 204 V236" marker-end="url(#ah4)"/><text class="ts" x="272" y="224">yes + local fills</text>
+    <rect class="box bad" x="206" y="236" width="120" height="46" rx="8"/><text class="tr" x="232" y="264">HALT</text>
+
+    <path class="flow g" d="M316 166 H360" marker-end="url(#ah4)"/><text class="tg" x="320" y="156">no</text>
+    <rect class="box" x="360" y="140" width="150" height="52" rx="9"/><text class="t" x="376" y="166">back-fill fills</text><text class="ts" x="376" y="184">exec-id dedup</text>
+    <path class="flow" d="M510 166 H548" marker-end="url(#ah4)"/>
+
+    <!-- compare diamond -->
+    <path class="box" d="M610 118 L672 166 L610 214 L548 166 Z"/><text class="ts" x="588" y="162">booked</text><text class="ts" x="588" y="178">vs broker</text>
+
+    <!-- booked > broker -->
+    <path class="flow r" d="M610 118 V70 H500" marker-end="url(#ah4)"/><text class="tr" x="516" y="60">booked &gt; broker</text>
+    <rect class="box bad" x="380" y="46" width="120" height="46" rx="8"/><text class="tr" x="406" y="74">HALT</text>
+    <text class="ts" x="384" y="108" style="opacity:.8">invented exposure</text>
+
+    <!-- transient short -->
+    <path class="flow a" d="M672 166 H720" marker-end="url(#ah4)"/><text class="ta" x="676" y="156">booked &lt; broker</text>
+    <path class="box warn" d="M782 128 L826 166 L782 204 L738 166 Z"/><text class="ts" x="762" y="163">retries</text><text class="ts" x="765" y="179">left?</text>
+    <path class="flow a" d="M782 204 V228" marker-end="url(#ah4)"/><text class="ta" x="788" y="222">yes</text>
+    <rect class="box warn" x="726" y="228" width="150" height="44" rx="8"/><text class="ta" x="740" y="250">retry query</text><text class="ts" x="740" y="266">feed catches up</text>
+    <path class="flow dash" d="M726 250 H435 V182" marker-end="url(#ah4)"/>
+    <path class="flow r" d="M826 166 H872" marker-end="url(#ah4)"/><text class="tr" x="836" y="156">no</text>
+    <rect class="box bad" x="872" y="132" width="56" height="52" rx="8"/><text class="tr" x="882" y="162">HALT</text>
+
+    <!-- resolve (clearly separated below the compare diamond) -->
+    <path class="flow g" d="M610 214 V286" marker-end="url(#ah4)"/><text class="tg" x="618" y="256">equal</text>
+    <rect class="box hl" x="500" y="286" width="150" height="42" rx="8"/><text class="tg" x="516" y="312">resolve &rarr; truth</text>
+  </svg>
+  <figcaption><b>Fig 5.</b> The recovery decision. <span style="color:var(--red)">Red</span> halts on real disagreement; <span style="color:var(--amber)">amber</span> retries transient feed lag; <span style="color:var(--green)">green</span> resolves to broker truth.</figcaption>
+</div></div></figure>
+
+<div class="col">
+<!-- 6 -->
+<section>
+  <span class="num">06</span>
+  <h2>A fleet on one account</h2>
+  <p>Tens of bots trade the same exchange account at once, each independent &mdash; its own feed, bars, strategy and order terminal &mdash; but sharing one ledger, one user-data stream, and one pool of margin. Three things make that safe:</p>
+  <ul>
+    <li><strong>Single-writer per instrument.</strong> A coordinator serialises writes so two bots can never interleave on the same symbol; a per-account write-lock stops a second process from corrupting the same ledger.</li>
+    <li><strong>Exchange-fetched instrument rules.</strong> Lot step, price tick, min-notional and the settlement asset are read from the venue when a symbol is added &mdash; <em>never hardcoded</em>. The same code trades BTC, a low-priced alt, or a USDC-margined perp without a magic number.</li>
+    <li><strong>Per-settlement-asset margin pools, shared across bots.</strong> Each bot sizes off its <em>slice</em> of the pool it actually draws on &mdash; USDC perps against the USDC balance, split across the bots on it &mdash; so N bots can never each size against the whole account. This is the fix for the class of bug where ten bots each think they own 100% of equity.</li>
+  </ul>
+</section>
+
+<!-- 7 -->
+<section>
+  <span class="num">07</span>
+  <h2>The risk layer</h2>
+  <p>Sizing is the part most bots get wrong: they trade a flat notional and let a volatile symbol blow through it. Sentinel ties size to <strong>where the stop is</strong>. The strategy says which way and how convinced; the risk layer decides how much capital that's worth so that a stop-out costs a fixed fraction of equity:</p>
+  <div class="callout"><div class="k">the money layer, separate from alpha</div>
+    <p><code>qty = risk_pct &middot; equity_share &middot; conviction / stop_distance</code>, hard-capped by a leverage limit. The <em>same</em> stop distance feeds both the size and the protective stop-loss &mdash; so size and SL can never disagree.</p></div>
+  <p>The elegant part: a strategy can supply its <em>own</em> stop geometry. The SMA-cross emits the distance from price back to its slow moving average &mdash; a long is wrong once price falls back to the trend line &mdash; and the risk layer sizes and enforces off exactly that, floored so a near-cross entry can't hand it a zero-width stop. Stop-loss and take-profit brackets are computed at a fixed reward:risk, drawn on the chart, and enforced on every poll. Liquidation distance is derived live from the streamed mark, never a fixed-interval fetch.</p>
+</section>
+
+<!-- 8 strategies -->
+<section>
+  <span class="num">08</span>
+  <h2>Strategies are a plug-in interface, not a feature list</h2>
+  <p class="lede">A strategy implements one narrow, <em>pure</em> contract: evaluate a closed bar &rarr; <code>Decision(stance, detail)</code>. The strategies that ship are deliberately trivial &mdash; the point is that the <em>interface</em> takes arbitrarily rich signals, up to an ML model, without the OMS changing.</p>
+  <p><code>stance</code> is the desired position (LONG / FLAT / SHORT); <code>detail</code> is an open dict of risk hooks. Two entry points exist &mdash; <code>on_bar(close)</code> and the richer <code>on_bar_ohlcv(Bar{high,low,close})</code> &mdash; and the runner prefers whichever a strategy exposes. Strategies are <strong>pure and deterministic</strong> (no I/O, clock, or RNG): that buys unit-testing, replay-safety, and the guarantee that a strategy &mdash; however sophisticated &mdash; reconciles through the same gateway a human does and can never corrupt the ledger.</p>
+  <h3>1 &middot; Widen the input, not the interface</h3>
+  <p>A bar today is OHLC &mdash; price only, <em>not even volume yet</em>. The runner already "prefers the richer method if the strategy exposes it"; that <em>is</em> the extension pattern. The same move adds a <code>FeatureBar</code> &mdash; volume, VWAP, realized volatility, funding, open interest, order-book imbalance, cross-asset features &mdash; behind an <code>on_features(&hellip;)</code> a strategy may expose; a price-only one ignores it. A strategy accumulates its own window and derives whatever it needs: <code>regime</code> already computes ATR, ADX, Donchian channels, z-scores and realized vol from the bar stream. <em>Accounting for volatility / volume</em> = feed the raw field, let the strategy compute the feature.</p>
+  <h3>2 &middot; The output already fits anything, including ML</h3>
+  <p><code>Decision(stance, detail)</code> maps straight onto a model's outputs: predicted direction &rarr; <code>stance</code>; predicted edge / probability &rarr; <code>detail["target_weight"]</code> (conviction, [0,1]); predicted volatility or stop &rarr; <code>detail["stop_dist"]</code>. The risk layer consumes conviction and stop geometry <strong>uniformly</strong> &mdash; it never knows whether they came from a moving-average cross or a transformer.</p>
+  <h3>3 &middot; An ML model plugs in as a pure predictor</h3>
+  <p>Inference on fixed weights is deterministic &mdash; same features, same prediction &mdash; so an ML strategy satisfies the pure contract as long as (a) weights load <strong>once at construction</strong>, not per bar; (b) inference is deterministic (no sampling / dropout at inference); (c) features come from the <strong>fed inputs</strong>, not a live fetch. The body is then <code>featurize(window) &rarr; model.predict(x) &rarr; map to Decision</code>. Its "many parameters" are the weights plus a feature spec &mdash; <em>construction</em> config, exactly like <code>RegimeTrendMR(Params(...))</code>; the registry builds <code>MLStrategy(model_path, feature_spec)</code> the same way it builds an SMA. <strong>Nothing about the interface changes.</strong></p>
+  <div class="callout"><div class="k">what stays outside the strategy</div>
+    <p><strong>Live external data</strong> is fed <em>in</em> as features (assembled by the runtime), never fetched mid-decision. <strong>Training is offline</strong> &mdash; it produces weights that get loaded; the live system only runs inference. (ML inference must be made numerically deterministic for exact replay, else the strategy layer is "approximately replayable" &mdash; and we'd say so.)</p></div>
+  <div class="callout good"><div class="k">the payoff &mdash; risk is orthogonal to alpha</div>
+    <p>However the signal is derived, a strategy only ever emits two hooks: <code>stop_dist</code> (<em>where the thesis breaks</em>; the risk layer sizes <strong>and</strong> enforces the SL off the same distance) and <code>target_weight</code> (<em>how convinced</em>; scales the size). The risk layer turns those into size, brackets and margin. Swap an SMA for a neural net and the sizing / execution / reconciliation machinery is untouched &mdash; the pluggability is the capability.</p></div>
+</section>
+
+<!-- 9 -->
+<section>
+  <span class="num">09</span>
+  <h2>Properties worth calling out</h2>
+  <ul>
+    <li><strong>The core is pure.</strong> The domain has no I/O and no clock; the entire state machine and every guard are unit-tested before a broker or feed exists. <strong>315 tests</strong> back it.</li>
+    <li><strong>Rebuildable by construction.</strong> Projections are a fold of the event log &mdash; drop them and replay. Continuously-checked invariants (<code>positions = fills</code>, <code>no_overfill</code>, <code>exits_bounded</code>, <code>audit_traced</code>) prove the fold stayed honest.</li>
+    <li><strong>Fail toward safety, not brittleness.</strong> Timeouts, unknown broker statuses, self-trade-prevention cancels and lagging fill feeds all became <em>legal, tested transitions</em> &mdash; each one, before it was handled, was a real production halt. Only genuine ledger-vs-broker divergence halts now.</li>
+    <li><strong>The browser polls nothing.</strong> A topic-based change signal pushes one bot card, or the account, over a single WebSocket &mdash; with a client-side liveness watchdog so a silently-dead socket reconnects instead of freezing.</li>
+  </ul>
+  <div class="callout good"><div class="k">the through-line</div>
+    <p>Every one of these is the same decision made again: represent uncertainty explicitly, never overwrite truth in place, and stop rather than guess. The strategy is replaceable. The integrity is the product.</p></div>
+</section>
+</div>
+
+<footer>
+  <span>Sentinel OMS &middot; <a href="/">live terminal &#8599;</a></span>
+  <span>Yashvardhan Gaur &middot; <a href="https://github.com/gauryvg98">github.com/gauryvg98</a></span>
+</footer>
+
+</div>

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sentinel-types", "crates/sentinel-domain", "crates/sentinel-journal", "crates/sentinel-record", "crates/sentinel-ledger", "crates/sentinel-venue", "crates/sentinel-engine", "crates/sentinel-risk", "crates/sentinel-binance", "crates/sentinel-delta", "crates/sentineld"]
+members = ["crates/sentinel-types", "crates/sentinel-domain", "crates/sentinel-journal", "crates/sentinel-record", "crates/sentinel-ledger", "crates/sentinel-venue", "crates/sentinel-engine", "crates/sentinel-risk", "crates/sentinel-binance", "crates/sentineld"]
 
 [workspace.package]
 version = "0.1.0"

@@ -20,8 +20,15 @@ adapter.
 > ./run-v2-tests.sh
 > ```
 >
+> v2 now carries the SMA-crossover strategy too, as a separate `strategyd`
+> process that reads the journal and posts through the same control socket a
+> human uses — see [docs/rewrite/STRATEGY.md](docs/rewrite/STRATEGY.md).
+> Trading is opt-in: without `SENTINEL_STRATEGY_LIVE=true` it logs the orders it
+> would have placed and places none.
+>
 > The Python below stays as the reference implementation until v2 has
-> paper-traded a week.
+> paper-traded a week. Its `regime` strategy and the backtester have not been
+> ported.
 
 Most trading-system failures aren't strategy failures — they're integrity failures:
 a timeout treated as a rejection, a blind retry that doubles a position, a fill that

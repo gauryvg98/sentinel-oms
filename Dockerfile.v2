@@ -15,7 +15,8 @@ COPY testdata/ ./testdata/
 WORKDIR /build/go
 RUN CGO_ENABLED=0 go build -o /out/gatewayd ./cmd/gatewayd \
  && CGO_ENABLED=0 go build -o /out/projectord ./cmd/projectord \
- && CGO_ENABLED=0 go build -o /out/adversary ./cmd/adversary
+ && CGO_ENABLED=0 go build -o /out/adversary ./cmd/adversary \
+ && CGO_ENABLED=0 go build -o /out/strategyd ./cmd/strategyd
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -24,7 +25,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=rust-build /build/rust/target/release/sentineld /app/sentineld
-COPY --from=go-build /out/gatewayd /out/projectord /out/adversary /app/
+COPY --from=go-build /out/gatewayd /out/projectord /out/adversary /out/strategyd /app/
 COPY go/static/ /app/static/
 COPY docker/run.sh /app/run.sh
 RUN chmod +x /app/run.sh

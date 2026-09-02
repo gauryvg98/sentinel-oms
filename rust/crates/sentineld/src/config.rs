@@ -49,15 +49,6 @@ pub enum VenueConfig {
         /// Per-symbol leverage to set at boot, when asked for.
         leverage: Option<u32>,
     },
-    /// Delta Exchange India.
-    Delta {
-        /// The API key.
-        api_key: String,
-        /// The secret.
-        secret: String,
-        /// Whether to use testnet rather than production.
-        testnet: bool,
-    },
 }
 
 /// Why the process will not start.
@@ -152,13 +143,6 @@ impl Config {
                 demo: std::env::var("SENTINEL_BINANCE_ENV").as_deref() != Ok("production"),
                 leverage: parse_leverage()?,
             },
-            Ok("delta") => VenueConfig::Delta {
-                api_key: std::env::var("DELTA_API_KEY")
-                    .map_err(|_| ConfigError::Missing("DELTA_API_KEY"))?,
-                secret: std::env::var("DELTA_API_SECRET")
-                    .map_err(|_| ConfigError::Missing("DELTA_API_SECRET"))?,
-                testnet: std::env::var("SENTINEL_DELTA_ENV").as_deref() != Ok("production"),
-            },
             _ => VenueConfig::Simulator,
         };
 
@@ -187,10 +171,7 @@ impl Config {
     /// infer it from a URL in a log line.
     #[must_use]
     pub const fn is_live_money(&self) -> bool {
-        matches!(
-            self.venue,
-            VenueConfig::Binance { demo: false, .. } | VenueConfig::Delta { testnet: false, .. }
-        )
+        matches!(self.venue, VenueConfig::Binance { demo: false, .. })
     }
 
     /// A description with no secret in it.
@@ -200,8 +181,6 @@ impl Config {
             VenueConfig::Simulator => "simulator",
             VenueConfig::Binance { demo: true, .. } => "binance futures demo",
             VenueConfig::Binance { demo: false, .. } => "binance futures PRODUCTION",
-            VenueConfig::Delta { testnet: true, .. } => "delta testnet",
-            VenueConfig::Delta { testnet: false, .. } => "delta PRODUCTION",
         };
         let symbols: Vec<&str> = self
             .instruments
@@ -241,21 +220,12 @@ mod tests {
         }
     }
 
-    fn delta(testnet: bool) -> VenueConfig {
-        VenueConfig::Delta {
-            api_key: "k".into(),
-            secret: "s".into(),
-            testnet,
-        }
-    }
-
     #[test]
     fn only_production_is_live_money() {
         assert!(!config(VenueConfig::Simulator).is_live_money());
         assert!(!config(binance(true)).is_live_money());
-        assert!(!config(delta(true)).is_live_money());
         assert!(config(binance(false)).is_live_money());
-        assert!(config(delta(false)).is_live_money());
+        assert!(!config(VenueConfig::Simulator).is_live_money());
     }
 
     #[test]
@@ -266,24 +236,21 @@ mod tests {
                 .contains("binance futures demo")
         );
         assert!(config(binance(false)).describe().contains("PRODUCTION"));
-        assert!(config(delta(true)).describe().contains("delta testnet"));
+        assert!(
+            config(VenueConfig::Simulator)
+                .describe()
+                .contains("simulator")
+        );
     }
 
     #[test]
     fn the_description_carries_no_secret() {
-        let venues = [
-            VenueConfig::Binance {
-                api_key: "my-key".into(),
-                secret: "my-secret".into(),
-                demo: false,
-                leverage: Some(25),
-            },
-            VenueConfig::Delta {
-                api_key: "my-key".into(),
-                secret: "my-secret".into(),
-                testnet: false,
-            },
-        ];
+        let venues = [VenueConfig::Binance {
+            api_key: "my-key".into(),
+            secret: "my-secret".into(),
+            demo: false,
+            leverage: Some(25),
+        }];
         for venue in venues {
             let described = config(venue).describe();
             assert!(!described.contains("my-secret"), "{described}");

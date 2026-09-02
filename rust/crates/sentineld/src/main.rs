@@ -115,28 +115,6 @@ fn run() -> Result<(), String> {
             runtime::start(engine, venue, config.tick_interval, config.sweep_interval)
                 .map_err(|e| e.to_string())?
         }
-        VenueConfig::Delta {
-            api_key,
-            secret,
-            testnet,
-        } => {
-            let credentials = if *testnet {
-                sentinel_delta::Credentials::testnet(api_key, secret)
-            } else {
-                sentinel_delta::Credentials::production(api_key, secret)
-            };
-            let mut venue = sentinel_delta::DeltaVenue::connect(credentials, &config.instruments)
-                .map_err(|e| format!("cannot reach the venue: {e}"))?;
-            venue
-                .start_stream()
-                .map_err(|e| format!("cannot open the user stream: {e}"))?;
-            println!(
-                "sentineld: {} products loaded, stream up",
-                venue.products().len()
-            );
-            runtime::start(engine, venue, config.tick_interval, config.sweep_interval)
-                .map_err(|e| e.to_string())?
-        }
     };
 
     // The control socket is opened last, so nothing can ask this process to
@@ -154,9 +132,16 @@ fn run() -> Result<(), String> {
     // nothing accepted is lost. Not catching it would still be *safe* — a torn
     // tail is truncated on the next claim and the book rebuilds — but "safe"
     // and "lost the last three commands" are different words.
+    //
+    // Note the separate flag. `signal_hook::flag::register` sets its atomic to
+    // *true*, and the runtime's own flag reads true as "still running" — so
+    // registering that one directly means SIGTERM sets running to the value it
+    // already had, and the wait below spins for ever. This asks for the
+    // opposite question, "has a stop been requested", which is the one a signal
+    // can actually answer.
+    let terminate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        let flag = handle.stop_flag();
-        signal_hook::flag::register(signal, flag)
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&terminate))
             .map_err(|e| format!("cannot handle signal {signal}: {e}"))?;
     }
 
@@ -166,7 +151,7 @@ fn run() -> Result<(), String> {
     );
     // The threads own everything now. This one waits for them to stop, which
     // happens when the writer hits something it must not trade through.
-    while handle.is_running() {
+    while handle.is_running() && !terminate.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     // The threads see the same flag and drain on their way out.

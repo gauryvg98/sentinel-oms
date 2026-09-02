@@ -46,6 +46,14 @@ if [ -n "${SUPABASE_URL:-}" ]; then
   /app/projectord &
 fi
 
+# The strategy is optional too, and is not one of the two that matter: if it
+# dies the container keeps running, because a supervisor that has lost its
+# opinion about what to trade is still the thing holding the position and still
+# has to be reachable. Absent SENTINEL_STRATEGY it is simply not started.
+if [ -n "${SENTINEL_STRATEGY:-}" ]; then
+  /app/strategyd &
+fi
+
 # Stop when either of the two that matter stops. Polled rather than `wait -n`,
 # which dash does not have.
 term() {

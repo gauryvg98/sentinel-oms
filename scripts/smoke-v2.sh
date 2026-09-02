@@ -15,6 +15,7 @@ echo "── build ────────────────────�
 (cd rust && cargo build --release -q -p sentineld)
 (cd go && go build -o "$JOURNAL/bin-gatewayd" ./cmd/gatewayd)
 (cd go && go build -o "$JOURNAL/bin-adversary" ./cmd/adversary)
+(cd go && go build -o "$JOURNAL/bin-strategyd" ./cmd/strategyd)
 
 echo "── sentineld ───────────────────────────────────────────"
 SENTINEL_JOURNAL="$JOURNAL" SENTINEL_INSTRUMENTS=BTCUSDT \
@@ -41,6 +42,28 @@ echo "── what the gateway sees ───────────────
 curl -fsS http://127.0.0.1:8099/api/state |
   python3 -c 'import json,sys; s=json.load(sys.stdin); print(json.dumps({"epoch":s["epoch"],"last_seq":s["last_seq"],"halted":s["halted"],"orders":[{k:o[k] for k in ("client_order_id","state","qty","filled_qty")} for o in s["orders"]]}, indent=1))'
 
+echo "── strategyd reads the same log ────────────────────────"
+# Dry run, and a bar interval short enough that the marks already in the log
+# close bars immediately. What this proves is that it can read the journal the
+# writer produced and reach a decision — not that the rule makes money.
+# Backgrounded and killed rather than `timeout`, which macOS does not have.
+SENTINEL_JOURNAL="$JOURNAL" SENTINEL_STRATEGY_INSTRUMENT=BTCUSDT \
+  SENTINEL_STRATEGY_INTERVAL=1s SENTINEL_STRATEGY_FAST=2 SENTINEL_STRATEGY_SLOW=3 \
+  "$JOURNAL/bin-strategyd" > "$JOURNAL/strategy.log" 2>&1 &
+STRATEGY=$!
+sleep 3
+kill "$STRATEGY" 2>/dev/null || true
+head -3 "$JOURNAL/strategy.log"
+grep -q "dry run" "$JOURNAL/strategy.log" || { echo "FAILED: strategyd did not default to a dry run"; exit 1; }
+
+echo "── strategyd refuses to trade without being told ───────"
+out=$(SENTINEL_JOURNAL="$JOURNAL" SENTINEL_STRATEGY_INSTRUMENT="BTCUSDT,BTCUSDC" \
+  "$JOURNAL/bin-strategyd" 2>&1 || true)
+case "$out" in
+  *"must name one instrument"*) echo "refused a list, as it must" ;;
+  *) echo "FAILED: a two-instrument list was accepted: $out"; exit 1 ;;
+esac
+
 echo "── the adversary, from outside ─────────────────────────"
 "$JOURNAL/bin-adversary" "$JOURNAL"
 
@@ -51,6 +74,28 @@ echo
 sleep 0.5
 curl -fsS http://127.0.0.1:8099/health
 echo
+
+echo "── SIGTERM actually stops the writer ───────────────────"
+# The drain is the whole reason SIGTERM is caught, and for a while it never
+# ran: signal_hook sets its flag to true, the runtime reads true as "running",
+# so the signal set the value it already had and the wait spun for ever. On Fly
+# that means every deploy waits out the kill timeout and is SIGKILLed instead.
+SENTINEL_JOURNAL="$JOURNAL/term" SENTINEL_INSTRUMENTS=BTCUSDT \
+  rust/target/release/sentineld > "$JOURNAL/term.log" 2>&1 &
+TERMPID=$!
+for _ in $(seq 1 50); do [ -S "$JOURNAL/term/control.sock" ] && break; sleep 0.1; done
+kill -TERM "$TERMPID" 2>/dev/null || true
+stopped=no
+for _ in $(seq 1 50); do
+  kill -0 "$TERMPID" 2>/dev/null || { stopped=yes; break; }
+  sleep 0.1
+done
+if [ "$stopped" != yes ]; then
+  kill -9 "$TERMPID" 2>/dev/null || true
+  echo "FAILED: sentineld ignored SIGTERM"
+  exit 1
+fi
+grep -q "stopped" "$JOURNAL/term.log" && echo "drained and stopped, as it must"
 
 echo "── a second writer is refused ──────────────────────────"
 # Captured first, then matched. Under `set -o pipefail` the pipeline would

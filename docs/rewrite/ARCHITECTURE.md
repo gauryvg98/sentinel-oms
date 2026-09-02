@@ -278,3 +278,14 @@ It does not add a strategy, change the risk model, or touch the numbers in
 are out of scope for a rewrite whose entire claim is that behaviour is
 preserved. The Python remains in `src/` as the reference implementation until
 step 10 is green against it.
+
+## What is not in here
+
+The engine has no opinion about what to trade, and that is deliberate: alpha is
+the part of a trading system most likely to be wrong, and it does not belong in
+the process that owns the order log. The strategy is a separate process reading
+the same journal — [STRATEGY.md](STRATEGY.md).
+
+Not ported from the Python, and honestly listed rather than quietly dropped:
+the `regime` strategy, the backtester, the metrics registry, and most of the
+terminal UI (bars, market hub, multi-venue feeds, log buffer).

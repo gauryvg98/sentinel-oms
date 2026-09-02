@@ -9,7 +9,6 @@ repository.workspace = true
 
 [dependencies]
 sentinel-binance = { path = "../sentinel-binance" }
-sentinel-delta = { path = "../sentinel-delta" }
 sentinel-domain = { path = "../sentinel-domain" }
 sentinel-engine = { path = "../sentinel-engine" }
 sentinel-journal = { path = "../sentinel-journal" }

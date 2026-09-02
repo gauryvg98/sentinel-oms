@@ -80,6 +80,35 @@ primary_region = "sin"
   # rather than matched by arithmetic nobody checked.
   SENTINEL_MAX_POSITION = "0.05"
 
+  # ---- strategy -----------------------------------------------------------
+  # Set at all, strategyd starts; unset, it is never launched and this is an
+  # execution system waiting to be told what to do.
+  SENTINEL_STRATEGY = "sma"
+
+  # Fast average above slow means hold long, below means flat. The v1 Python's
+  # defaults, so the two can be compared on the same data.
+  SENTINEL_STRATEGY_FAST = "5"
+  SENTINEL_STRATEGY_SLOW = "20"
+
+  # v2 has 1s marks and no bar history, so a 1m bar means 20 minutes of warm-up
+  # from a cold start before the slow window is full and the strategy has any
+  # opinion at all. Until then it does nothing, which is what it should do.
+  SENTINEL_STRATEGY_INTERVAL = "1m"
+
+  # 0.002 BTC, because BTCUSDC steps at 0.001 with a minNotional of 100: at
+  # ~77k, 0.001 is only ~77 and the venue would refuse it. The smallest thing
+  # this venue will actually accept.
+  SENTINEL_STRATEGY_QTY = "0.002"
+  SENTINEL_STRATEGY_STEP = "0.001"
+
+  # Long-only. "true" makes it stop-and-reverse, always in the market.
+  # SENTINEL_STRATEGY_SHORT = "true"
+
+  # Trading is opt-in, by this exact word. Anything else — unset, misspelt,
+  # "yes" — logs the orders it would have placed and places none. A strategy
+  # that starts trading because a flag was forgotten is not a safe default.
+  # SENTINEL_STRATEGY_LIVE = "true"
+
 [[mounts]]
   source = "sentinel_data"
   destination = "/data"

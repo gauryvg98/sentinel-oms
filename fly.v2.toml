@@ -32,9 +32,15 @@ primary_region = "sin"
   # /data/journal-live holds the format-1 records from the first Binance boot.
   SENTINEL_JOURNAL = "/data/journal-fmt2"
   SENTINEL_GATEWAY_ADDR = ":8000"
-  # BTCUSDT: what the Python deployment trades. BTC's deep USDT book gives the
-  # cleanest fills and the lowest churn.
-  SENTINEL_INSTRUMENTS = "BTCUSDT"
+  # BTCUSDC. Note the grid is coarser than BTCUSDT's: step 0.001 against
+  # 0.0001, and minNotional 100 against 50, so the smallest placeable order is
+  # 0.002 rather than 0.001. Read from exchangeInfo at boot, never hardcoded —
+  # demo and production do not agree on these.
+  #
+  # Anything not listed here is invisible to the sweep, so its position is
+  # never reconciled against the venue. That is the whole cost of narrowing
+  # this list while something is still open elsewhere.
+  SENTINEL_INSTRUMENTS = "BTCUSDC"
 
   # Unset means the simulator, which reaches no venue at all. "binance" (or
   # "futures", the word the Python deployment uses) is Binance USD-M futures;

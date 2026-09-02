@@ -1,106 +1,142 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sentinel</title>
+<title>sentinel · v2</title>
 <style>
+  /* The v1 terminal's palette, because an operator who knows one should not
+     have to learn the other. */
   :root {
-    --bg: #0b0d10; --panel: #12161b; --line: #1e242c;
-    --text: #d7dee6; --dim: #7c8794; --accent: #6fb3ff;
-    --up: #4ec9a0; --down: #e06c75; --warn: #d9a441;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --bg: #0a0e0d; --panel: #101614; --edge: #1d2a25; --ink: #cfe3da;
+    --dim: #5e7268; --green: #22e07b; --red: #f87171; --amber: #fbbf24;
+    --violet: #a78bfa;
+    --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
-  header {
-    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-    padding: .75rem 1rem; border-bottom: 1px solid var(--line);
+  * { box-sizing: border-box; margin: 0; min-width: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--mono);
+    font-size: 13px; padding: 14px 18px 24px; overflow-x: hidden;
   }
-  h1 { font-size: 13px; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
   .dim { color: var(--dim); }
-  .pill {
-    padding: .1rem .5rem; border: 1px solid var(--line); border-radius: 999px;
-    font-size: 11px; letter-spacing: .04em;
-  }
-  .pill.halted { color: var(--warn); border-color: var(--warn); }
-  .pill.live { color: var(--up); border-color: var(--up); }
-  main {
-    display: grid; gap: 1px; background: var(--line);
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  }
-  section { background: var(--panel); padding: .75rem 1rem; min-height: 8rem; }
-  h2 {
-    font-size: 11px; margin: 0 0 .5rem; color: var(--dim);
-    letter-spacing: .08em; text-transform: uppercase;
-  }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: right; padding: .2rem .35rem; white-space: nowrap; }
-  th:first-child, td:first-child { text-align: left; }
-  th { color: var(--dim); font-weight: normal; font-size: 11px; }
-  tbody tr:nth-child(odd) { background: #ffffff06; }
-  .pos { color: var(--up); } .neg { color: var(--down); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
   .num { font-variant-numeric: tabular-nums; }
-  ul { list-style: none; margin: 0; padding: 0; max-height: 15rem; overflow-y: auto; }
-  li { padding: .15rem 0; border-bottom: 1px solid #ffffff08; }
-  footer { padding: .5rem 1rem; color: var(--dim); font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); }
+  .dot.warn { background: var(--amber); }
+
+  /* header ---------------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 4px 2px 14px; border-bottom: 1px solid var(--edge);
+  }
+  .brand { color: var(--green); font-weight: 700; letter-spacing: 2px; font-size: 16px; }
+  .pill {
+    font-size: 10px; padding: 2px 8px; border-radius: 4px;
+    border: 1px solid var(--edge); color: var(--dim); letter-spacing: .04em;
+  }
+  .pill.live { color: var(--green); border-color: var(--green); }
+  .pill.halted { color: var(--amber); border-color: var(--amber); }
+  .stat { display: flex; flex-direction: column; line-height: 1.25; }
+  .stat b { font-size: 14px; font-weight: 700; }
+  .stat span {
+    font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px;
+  }
+  .grow { flex: 1; }
+
+  /* cards ----------------------------------------------------------------- */
+  #grid {
+    display: grid; gap: 14px; margin-top: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card.wide { grid-column: 1 / -1; }
+  .card.run { border-color: #244; box-shadow: 0 0 0 1px rgba(34,224,123,.15) inset; }
+  h2 {
+    font-size: 10px; color: var(--dim); font-weight: 400;
+    text-transform: uppercase; letter-spacing: 1.4px;
+  }
+  .chead { display: flex; align-items: baseline; gap: 8px; }
+  .sym { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
+  .px { margin-left: auto; font-size: 18px; font-weight: 700; }
+  canvas.spark { width: 100%; height: 52px; display: block; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .badge {
+    font-weight: 700; font-size: 11px; padding: 3px 10px;
+    border-radius: 5px; border: 1px solid; letter-spacing: .06em;
+  }
+  .badge.LONG { color: var(--green); border-color: var(--green); }
+  .badge.SHORT { color: var(--red); border-color: var(--red); }
+  .badge.FLAT, .badge.none { color: var(--dim); border-color: var(--edge); }
+  .kvv { display: flex; flex-direction: column; line-height: 1.3; }
+  .kvv b { font-size: 13px; }
+  .kvv span {
+    font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px;
+  }
+  .chain {
+    display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--dim);
+    border-top: 1px solid var(--edge); padding-top: 9px;
+  }
+  .chain span { white-space: nowrap; }
+  .chain b { color: var(--ink); font-weight: 600; }
+
+  /* tables and feeds ------------------------------------------------------ */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: .25rem .4rem; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th {
+    color: var(--dim); font-weight: 400; font-size: 9px;
+    text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--edge);
+  }
+  tbody tr:nth-child(odd) { background: #ffffff05; }
+  .state { font-size: 11px; }
+  .state.FILLED { color: var(--green); }
+  .state.WORKING, .state.PARTIAL { color: var(--amber); }
+  .state.CANCELED, .state.REJECTED { color: var(--dim); }
+  .state.UNKNOWN, .state.RECONCILING { color: var(--violet); }
+  ul { list-style: none; max-height: 17rem; overflow-y: auto; }
+  li { padding: .2rem 0; border-bottom: 1px solid #ffffff08; font-size: 11.5px; }
+  li:last-child { border-bottom: none; }
+  .stale { opacity: .45; }
+  footer { margin-top: 18px; font-size: 11px; color: var(--dim); }
 </style>
 
 <header>
-  <h1>Sentinel</h1>
-  <span id="status" class="pill dim">connecting</span>
-  <span class="dim">epoch <span id="epoch" class="num">–</span></span>
-  <span class="dim">seq <span id="seq" class="num">–</span></span>
-  <span class="dim">fills <span id="fills" class="num">–</span></span>
+  <span class="brand">SENTINEL</span>
+  <span class="pill" id="venue">v2 · rust + go</span>
+  <span class="pill dim" id="status">connecting</span>
+  <div class="stat"><b class="num" id="realized">—</b><span>realised</span></div>
+  <div class="stat"><b class="num" id="unrealized">—</b><span>unrealised</span></div>
+  <div class="stat"><b class="num" id="fills">—</b><span>fills</span></div>
+  <div class="stat"><b class="num" id="epoch">—</b><span>epoch</span></div>
+  <div class="stat"><b class="num" id="seq">—</b><span>sequence</span></div>
+  <div class="grow"></div>
+  <div class="stat" style="text-align:right"><b id="balances">—</b><span>balances</span></div>
 </header>
 
-<main>
-  <section>
-    <h2>Positions</h2>
-    <table>
-      <thead><tr><th>Instrument</th><th>Qty</th><th>Avg</th><th>Mark</th><th>Unrealised</th></tr></thead>
-      <tbody id="positions"></tbody>
-    </table>
-    <p class="dim" style="margin-top:.75rem">
-      realised <span id="realized" class="num">–</span> ·
-      unrealised <span id="unrealized" class="num">–</span>
-    </p>
-  </section>
-
-  <section>
-    <h2>Market <span class="dim">— mark price, live</span></h2>
-    <table>
-      <thead><tr><th>Instrument</th><th>Mark</th><th>Updated</th></tr></thead>
-      <tbody id="marks"></tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Strategy <span class="dim">— what it wants to hold</span></h2>
-    <p><span id="stance" class="pill dim">no opinion yet</span></p>
-    <table>
-      <tbody id="strategy"></tbody>
-    </table>
-    <p class="dim" id="strategy-note" style="margin-top:.5rem">
-      waiting for the first bar to close
-    </p>
-  </section>
-
-  <section>
+<main id="grid">
+  <!-- instrument cards are built from the marks the journal carries -->
+  <div class="card wide" id="orders-card">
     <h2>Orders</h2>
     <table>
-      <thead><tr><th>Id</th><th>Side</th><th>Qty</th><th>Filled</th><th>State</th></tr></thead>
+      <thead><tr>
+        <th>Id</th><th>Instrument</th><th>Side</th><th>Authority</th>
+        <th>Qty</th><th>Filled</th><th>State</th>
+      </tr></thead>
       <tbody id="orders"></tbody>
     </table>
-  </section>
+  </div>
 
-  <section>
-    <h2>Activity</h2>
+  <div class="card">
+    <h2>Activity <span class="dim">— the order lifecycle</span></h2>
     <ul id="activity"></ul>
-  </section>
+  </div>
 
-  <section>
+  <div class="card">
     <h2>Decisions <span class="dim">— including the trades that did not happen</span></h2>
     <ul id="decisions"></ul>
-  </section>
+  </div>
 </main>
 
 <footer>
@@ -111,13 +147,120 @@
 <script>
   // Numbers arrive as strings and stay strings until they are rendered.
   // JavaScript has one numeric type and it is a float64, so parsing a quantity
-  // here would be the one place in the whole system a value gets rounded.
+  // here would be the one place in the whole system a value gets rounded. The
+  // one exception is the sparkline, which is a picture rather than a figure —
+  // it is drawn from floats and no decision is taken from it.
   const $ = (id) => document.getElementById(id);
-  const text = (v) => (v === undefined || v === null ? "–" : String(v));
-
-  // Signed styling without arithmetic: the sign is a character.
+  const text = (v) => (v === undefined || v === null ? "—" : String(v));
   const signClass = (s) => (String(s).startsWith("-") ? "neg" : Number(s) ? "pos" : "");
 
+  const cards = {};   // instrument -> {el, refs}
+  const marks = {};   // instrument -> {price, at, history:[]}
+  let stance = {};    // instrument -> parsed stance detail
+
+  // ---------------------------------------------------------------- cards
+  function card(instrument) {
+    if (cards[instrument]) return cards[instrument];
+    const el = document.createElement("div");
+    el.className = "card";
+    el.innerHTML = `
+      <div class="chead">
+        <span class="sym">${instrument}</span>
+        <span class="px num" data-px>—</span>
+      </div>
+      <canvas class="spark" width="320" height="52" data-spark></canvas>
+      <div class="row">
+        <span class="badge none" data-stance>no opinion</span>
+        <div class="kvv"><b class="num" data-pos>0</b><span>position</span></div>
+        <div class="kvv" style="text-align:right">
+          <b class="num" data-unreal>—</b><span>unrealised</span>
+        </div>
+      </div>
+      <div class="chain" data-chain>
+        <span class="dim">waiting for the first bar to close</span>
+      </div>`;
+    // Cards go above the fixed panels, newest instrument last.
+    $("grid").insertBefore(el, $("orders-card"));
+    const q = (s) => el.querySelector(s);
+    cards[instrument] = {
+      el,
+      px: q("[data-px]"), spark: q("[data-spark]"), stance: q("[data-stance]"),
+      pos: q("[data-pos]"), unreal: q("[data-unreal]"), chain: q("[data-chain]"),
+    };
+    return cards[instrument];
+  }
+
+  // A price that has not ticked since this page connected came out of the log,
+  // not the feed: an instrument no longer subscribed keeps its last mark for
+  // ever. Saying so is the difference between a stale number and a wrong one.
+  function paintMark(instrument) {
+    const c = card(instrument), m = marks[instrument];
+    c.px.textContent = m.price;
+    c.el.classList.toggle("stale", !m.at);
+    drawSpark(c.spark, m.history);
+  }
+
+  // The sparkline. Deliberately unlabelled: it is there to show shape and
+  // direction, and anyone who needs a number has six of them on the same card.
+  function drawSpark(canvas, history) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (history.length < 2) return;
+
+    const lo = Math.min(...history), hi = Math.max(...history);
+    const span = hi - lo || 1;
+    const x = (i) => (i / (history.length - 1)) * w;
+    const y = (v) => h - 4 - ((v - lo) / span) * (h - 8);
+    const rising = history[history.length - 1] >= history[0];
+    const stroke = rising ? "#22e07b" : "#f87171";
+
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(history[0]));
+    history.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+
+    const fill = ctx.createLinearGradient(0, 0, 0, h);
+    fill.addColorStop(0, rising ? "rgba(34,224,123,.22)" : "rgba(248,113,113,.22)");
+    fill.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.save();
+    ctx.lineTo(x(history.length - 1), h);
+    ctx.lineTo(x(0), h);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(history[0]));
+    history.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+  }
+
+  // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the
+  // strategy into the journal, read back here for display only. A note this
+  // cannot parse is shown whole rather than dropped: it is still evidence.
+  function paintStance(decision) {
+    const instrument = decision.instrument;
+    if (!instrument) return;
+    const note = decision.note || "";
+    const word = (note.split(" ")[0] || "").toUpperCase();
+    const c = card(instrument);
+
+    c.stance.textContent = word || "unknown";
+    c.stance.className = "badge " + (["LONG", "SHORT", "FLAT"].includes(word) ? word : "none");
+    c.el.classList.toggle("run", word === "LONG" || word === "SHORT");
+
+    const pairs = [...note.matchAll(/(bar|fast|slow|holding) ([-\d.]+)/g)];
+    stance[instrument] = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
+    c.chain.innerHTML = pairs.length
+      ? pairs.map(([, label, value]) =>
+          `<span>${label === "bar" ? "last close" : label} <b class="num">${value}</b></span>`).join("")
+      : `<span class="dim">${note}</span>`;
+  }
+
+  // ---------------------------------------------------------------- book
   function renderBook(state) {
     $("epoch").textContent = text(state.epoch);
     $("seq").textContent = text(state.last_seq);
@@ -131,81 +274,62 @@
     status.textContent = state.halted ? "halted" : "trading";
     status.className = "pill " + (state.halted ? "halted" : "live");
 
-    $("positions").innerHTML = (state.positions || []).map((p) => `<tr>
-        <td>${p.instrument}</td>
-        <td class="num ${signClass(p.qty)}">${p.qty}</td>
-        <td class="num">${p.cost_basis}</td>
-        <td class="num">${p.mark ?? "–"}</td>
-        <td class="num ${signClass(p.unrealized)}">${p.unrealized ?? "–"}</td>
-      </tr>`).join("") || `<tr><td colspan="5" class="dim">flat</td></tr>`;
+    const balances = Object.entries(state.balances || {})
+      .filter(([, amount]) => Number(amount))
+      .map(([asset, amount]) => `${asset} ${amount}`);
+    $("balances").textContent = balances.length ? balances.join(" · ") : "—";
 
-    renderMarks(state.marks || {});
+    for (const [instrument, price] of Object.entries(state.marks || {})) {
+      marks[instrument] = marks[instrument] || { price, at: null, history: [] };
+      marks[instrument].price = price;
+      paintMark(instrument);
+    }
 
-    // The strategy speaks through the log like everything else, so the newest
-    // stance is simply the newest decision it wrote.
+    // Positions land on the instrument's own card rather than in a table of
+    // their own: one instrument, one place to look.
+    const held = new Set();
+    for (const p of state.positions || []) {
+      held.add(p.instrument);
+      const c = card(p.instrument);
+      c.pos.textContent = p.qty;
+      c.pos.className = "num " + signClass(p.qty);
+      c.unreal.textContent = text(p.unrealized);
+      c.unreal.className = "num " + signClass(p.unrealized);
+    }
+    for (const [instrument, c] of Object.entries(cards)) {
+      if (held.has(instrument)) continue;
+      c.pos.textContent = "0";
+      c.pos.className = "num dim";
+      c.unreal.textContent = "—";
+      c.unreal.className = "num dim";
+    }
+
     const stances = (state.decisions || []).filter((d) => d.kind === "STANCE_DECLARED");
-    if (stances.length) showStance(stances[stances.length - 1]);
+    stances.slice(-4).forEach(paintStance);
 
-    // Live orders first, then the rest — most recent first within each.
-    const orders = (state.orders || []).slice().reverse();
-    $("orders").innerHTML = orders.map((o) => `<tr>
+    $("orders").innerHTML = (state.orders || []).slice().reverse().map((o) => `<tr>
       <td>${o.client_order_id}</td>
-      <td>${o.side}</td>
+      <td>${o.instrument}</td>
+      <td class="${o.side === "BUY" ? "pos" : "neg"}">${o.side}</td>
+      <td class="dim">${(o.authority || "").toLowerCase()}</td>
       <td class="num">${o.qty}</td>
       <td class="num">${o.filled_qty}</td>
-      <td>${o.state}</td>
-    </tr>`).join("") || `<tr><td colspan="5" class="dim">none</td></tr>`;
+      <td class="state ${o.state}">${o.state}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="dim">no orders yet</td></tr>`;
 
-    $("activity").innerHTML = (state.activity || []).slice(-40).reverse().map((a) =>
-      `<li><span class="dim">${a.seq}</span> ${a.client_order_id}
-       <span class="dim">${a.event}</span> ${a.from} → ${a.to}</li>`).join("");
-
-    $("decisions").innerHTML = (state.decisions || []).slice(-40).reverse().map((d) =>
-      `<li><span class="dim">${d.actor}</span> ${d.kind}
-       <span class="dim">${d.note || ""}</span></li>`).join("");
+    $("activity").innerHTML = (state.activity || []).slice(-40).reverse()
+      .map(activityLine).join("");
+    $("decisions").innerHTML = (state.decisions || []).slice(-40).reverse()
+      .map(decisionLine).join("");
   }
 
-  // Marks arrive once a second per instrument. Kept in a map so a quiet
-  // instrument keeps its last price on screen instead of vanishing.
-  const marks = {};
-  function renderMarks(fromBook) {
-    for (const [instrument, price] of Object.entries(fromBook)) {
-      marks[instrument] = marks[instrument] || { price, at: null };
-      marks[instrument].price = price;
-    }
-    const rows = Object.entries(marks).sort(([a], [b]) => a.localeCompare(b));
-    $("marks").innerHTML = rows.map(([instrument, m]) => {
-      // A price that has not ticked since this page connected came out of the
-      // log, not the feed — an instrument no longer subscribed keeps its last
-      // mark for ever. Saying so is the difference between a stale number and
-      // a wrong one.
-      const stale = !m.at;
-      return `<tr${stale ? ' class="dim"' : ""}>
-        <td>${instrument}</td>
-        <td class="num">${m.price}</td>
-        <td class="dim">${stale ? "stale — not streaming" : m.at.toLocaleTimeString()}</td>
-      </tr>`;
-    }).join("") || `<tr><td colspan="3" class="dim">no marks yet</td></tr>`;
-  }
+  const activityLine = (a) =>
+    `<li><span class="dim">${a.seq}</span> ${a.client_order_id}
+     <span class="dim">${a.event}</span> ${a.from} → ${a.to}</li>`;
 
-  // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the
-  // strategy, parsed back for display only. Anything unrecognised is shown
-  // whole rather than dropped: a note this cannot read is still evidence.
-  function showStance(decision) {
-    const note = decision.note || "";
-    const stance = (note.split(" ")[0] || "").toUpperCase();
-    const pill = $("stance");
-    pill.textContent = stance || "unknown";
-    pill.className = "pill " + (stance === "LONG" ? "live"
-      : stance === "SHORT" ? "halted" : "dim");
-
-    const pairs = [...note.matchAll(/(bar|fast|slow|holding) ([-\d.]+)/g)];
-    $("strategy").innerHTML = pairs.map(([, label, value]) => `<tr>
-        <td class="dim">${label === "bar" ? "last close" : label}</td>
-        <td class="num">${value}</td>
-      </tr>`).join("");
-    $("strategy-note").textContent = pairs.length ? "" : note;
-  }
+  const decisionLine = (d) =>
+    `<li><span class="dim">${d.actor || ""}</span>
+     <b>${d.kind}</b> <span class="dim">${d.note || d.asset || ""}</span></li>`;
 
   function prepend(id, html) {
     const list = $(id);
@@ -213,6 +337,7 @@
     while (list.children.length > 40) list.lastElementChild.remove();
   }
 
+  // ---------------------------------------------------------------- stream
   function connect() {
     const source = new EventSource("/api/stream");
 
@@ -222,31 +347,27 @@
 
     source.addEventListener("marks", (e) => {
       const m = JSON.parse(e.data);
-      marks[m.instrument] = { price: m.price, at: new Date() };
-      renderMarks({});
+      const held = marks[m.instrument] || { history: [] };
+      held.price = m.price;
+      held.at = new Date();
+      // Enough points to show the shape of an hour of minute bars, and few
+      // enough that a page left open overnight does not grow without bound.
+      held.history = held.history.concat(Number(m.price)).slice(-180);
+      marks[m.instrument] = held;
+      paintMark(m.instrument);
     });
 
-    source.addEventListener("orders", (e) => {
-      const o = JSON.parse(e.data);
-      prepend("activity",
-        `<li><span class="dim">${o.seq}</span> ${o.client_order_id}
-         <span class="dim">${o.event}</span> ${o.from} → ${o.to}</li>`);
-    });
+    source.addEventListener("orders", (e) => prepend("activity", activityLine(JSON.parse(e.data))));
 
     source.addEventListener("account", (e) => {
       const a = JSON.parse(e.data);
-      if (a.kind === "STANCE_DECLARED") showStance(a);
-      prepend("decisions",
-        `<li><span class="dim">${a.actor || ""}</span> ${a.kind}
-         <span class="dim">${a.note || a.asset || ""}</span></li>`);
+      if (a.kind === "STANCE_DECLARED") paintStance(a);
+      prepend("decisions", decisionLine(a));
     });
 
     // The server says so rather than just hanging up: a client that reconnects
     // assuming continuity is worse off than one that knows it missed something.
-    source.addEventListener("resync", () => {
-      source.close();
-      location.reload();
-    });
+    source.addEventListener("resync", () => { source.close(); location.reload(); });
 
     source.onerror = () => {
       $("status").textContent = "reconnecting";

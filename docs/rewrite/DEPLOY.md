@@ -239,12 +239,18 @@ orders on a process that was never restarted. A halt flag is a claim about a
 variable. Stop the machine:
 
 ```bash
-fly machine stop <id> --app sentinel-oms
+fly scale count 0 --app <the-other-app>
 ```
 
-`fly machine stop` rather than `fly scale count 0`, which destroys machines
-instead of pausing them. No lock in this system can substitute for that step:
-the other writer is a different process on a different host and never asks.
+**`fly machine stop` is not enough.** A stopped machine with services declared
+is restarted by Fly — on a request, on a health check, on its own. Measured
+2026-09-03: a machine stopped by hand was running again a minute later, and for
+that minute two deployments were trading the same account. `fly scale count 0`
+destroys the machine, which is the only form of "off" that stays off. The
+volume, the app and its secrets survive; `fly scale count 1` brings it back.
+
+No lock in this system can substitute for that step: the other writer is a
+different process on a different host and never asks.
 
 **The live journal must start empty.** The simulator's records describe orders
 that never reached an exchange. Interleaving them with real ones leaves a log

@@ -5,7 +5,14 @@
 # this log — it would be a second account trading the same venue, with neither
 # aware of the other. The lock cannot help with that. Do not scale this.
 
-app = "sentinel-v2"
+# sentinel-oms: the name the v1 Python held, reclaimed so the URL in every
+# README, bookmark and write-up keeps working. What it serves is v2.
+#
+# Only one deployment may run against the account at a time. Two writers on one
+# venue is the failure this whole rewrite exists to make impossible, and no lock
+# here can prevent it — a second app is a different process on a different host
+# that never asks. Stop one before starting the other.
+app = "sentinel-oms"
 # Singapore — close to Binance's matching engines in Asia, so placing an order
 # is one short round trip (~5-50ms) rather than ~400ms from the US. Same region
 # as the Python deployment, for the same reason.

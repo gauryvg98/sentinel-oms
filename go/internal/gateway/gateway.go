@@ -25,9 +25,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/gauryvg98/sentinel-oms/go/internal/bars"
 	"github.com/gauryvg98/sentinel-oms/go/internal/book"
 	"github.com/gauryvg98/sentinel-oms/go/internal/fanout"
 	"github.com/gauryvg98/sentinel-oms/go/internal/fixed"
@@ -53,7 +55,18 @@ type Gateway struct {
 
 	mu   sync.RWMutex
 	book *book.Book
+	// series is the candles per instrument, folded from the same marks the
+	// book sees. Guarded by the same lock: it is part of the projection.
+	series map[string]*bars.Series
 }
+
+// How the chart is fed. A minute is the shortest interval the strategy runs on,
+// and six hours of them is enough to see the averages cross without holding a
+// day of candles for every instrument that ever traded.
+const (
+	barInterval = uint64(60_000_000_000)
+	barsKept    = 360
+)
 
 // New returns a gateway with an empty book.
 func New(config Config) *Gateway {
@@ -61,6 +74,7 @@ func New(config Config) *Gateway {
 		config:    config,
 		transport: fanout.NewRing(),
 		book:      book.New(),
+		series:    map[string]*bars.Series{},
 	}
 }
 
@@ -148,6 +162,16 @@ func (g *Gateway) fold(frame *journal.Record) {
 			"note":       decoded.Decision.Note,
 		})
 	case journal.KindMark:
+		// Candles are folded from the same records, so a chart opened now has
+		// the history the log already holds rather than starting blank and
+		// filling in from whatever arrives next.
+		series, ok := g.series[decoded.MarkInstrument]
+		if !ok {
+			series = bars.NewSeries(barInterval, barsKept)
+			g.series[decoded.MarkInstrument] = series
+		}
+		series.Observe(frame.Header.Nanos, decoded.MarkPrice)
+
 		// Conflating: the newest price is the only one worth having.
 		g.publish(fanout.Marks, map[string]any{
 			"instrument": decoded.MarkInstrument,
@@ -264,6 +288,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", g.health)
 	mux.HandleFunc("GET /api/state", g.state)
+	mux.HandleFunc("GET /api/bars", g.bars)
 	mux.HandleFunc("GET /api/stream", g.stream)
 	mux.HandleFunc("POST /api/command", g.command)
 	mux.Handle("GET /", http.FileServer(http.Dir("static")))
@@ -286,6 +311,44 @@ func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
 		"ok":       true,
 		"halted":   halted,
 		"last_seq": seq,
+	})
+}
+
+// bars serves the candles for one instrument.
+//
+// Separate from /api/state deliberately: the book is small and read constantly,
+// and candles are comparatively large and read when a chart opens. Putting them
+// in one payload would make every poll carry six hours of history.
+func (g *Gateway) bars(w http.ResponseWriter, r *http.Request) {
+	instrument := r.URL.Query().Get("instrument")
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if instrument == "" {
+		// No instrument named: say which ones there are, so a client does not
+		// have to guess from the book.
+		out := make([]string, 0, len(g.series))
+		for name := range g.series {
+			out = append(out, name)
+		}
+		sort.Strings(out)
+		writeJSON(w, http.StatusOK, map[string]any{"instruments": out})
+		return
+	}
+
+	series, ok := g.series[instrument]
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"instrument": instrument,
+			"bars":       []bars.Bar{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instrument":       instrument,
+		"interval_seconds": barInterval / 1_000_000_000,
+		"bars":             series.Bars(),
 	})
 }
 

@@ -2,6 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>sentinel · v2</title>
+<script src="/vendor/lightweight-charts.js"></script>
 <style>
   /* The v1 terminal's palette, because an operator who knows one should not
      have to learn the other. */
@@ -60,7 +61,10 @@
   .chead { display: flex; align-items: baseline; gap: 8px; }
   .sym { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
   .px { margin-left: auto; font-size: 18px; font-weight: 700; }
-  canvas.spark { width: 100%; height: 52px; display: block; }
+  .chart { width: 100%; height: 240px; }
+  .chart-legend { display: flex; gap: 14px; font-size: 10px; color: var(--dim); }
+  .chart-legend b { font-weight: 600; }
+  .swatch { display: inline-block; width: 10px; height: 2px; vertical-align: middle; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .badge {
     font-weight: 700; font-size: 11px; padding: 3px 10px;
@@ -157,7 +161,7 @@
   const signClass = (s) => (String(s).startsWith("-") ? "neg" : Number(s) ? "pos" : "");
 
   const cards = {};   // instrument -> {el, refs}
-  const marks = {};   // instrument -> {price, at, history:[]}
+  const marks = {};   // instrument -> {price, at}
   let stance = {};    // instrument -> parsed stance detail
 
   // ---------------------------------------------------------------- cards
@@ -170,7 +174,12 @@
         <span class="sym">${instrument}</span>
         <span class="px num" data-px>—</span>
       </div>
-      <canvas class="spark" width="320" height="52" data-spark></canvas>
+      <div class="chart" data-chart></div>
+      <div class="chart-legend">
+        <span><span class="swatch" style="background:#fbbf24"></span> fast <b data-fast>—</b></span>
+        <span><span class="swatch" style="background:#a78bfa"></span> slow <b data-slow>—</b></span>
+        <span class="dim" data-barcount></span>
+      </div>
       <div class="row">
         <span class="badge none" data-stance>no opinion</span>
         <div class="kvv"><b class="num" data-pos>0</b><span>position</span></div>
@@ -186,9 +195,12 @@
     const q = (s) => el.querySelector(s);
     cards[instrument] = {
       el,
-      px: q("[data-px]"), spark: q("[data-spark]"), stance: q("[data-stance]"),
+      px: q("[data-px]"), stance: q("[data-stance]"),
       pos: q("[data-pos]"), unreal: q("[data-unreal]"), chain: q("[data-chain]"),
+      chart: q("[data-chart]"), fast: q("[data-fast]"), slow: q("[data-slow]"),
+      barcount: q("[data-barcount]"),
     };
+    openChart(instrument, cards[instrument]);
     return cards[instrument];
   }
 
@@ -199,45 +211,112 @@
     const c = card(instrument), m = marks[instrument];
     c.px.textContent = m.price;
     c.el.classList.toggle("stale", !m.at);
-    drawSpark(c.spark, m.history);
   }
 
-  // The sparkline. Deliberately unlabelled: it is there to show shape and
-  // direction, and anyone who needs a number has six of them on the same card.
-  function drawSpark(canvas, history) {
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-    if (history.length < 2) return;
+  // ---------------------------------------------------------------- charts
+  // Candles come from /api/bars, which the gateway folds from the same marks
+  // the book sees — so a chart has history the moment it opens rather than
+  // filling in from whatever arrives after you loaded the page.
+  const charts = {};
 
-    const lo = Math.min(...history), hi = Math.max(...history);
-    const span = hi - lo || 1;
-    const x = (i) => (i / (history.length - 1)) * w;
-    const y = (v) => h - 4 - ((v - lo) / span) * (h - 8);
-    const rising = history[history.length - 1] >= history[0];
-    const stroke = rising ? "#22e07b" : "#f87171";
+  function openChart(instrument, refs) {
+    if (!window.LightweightCharts || !refs.chart) return;
 
-    ctx.beginPath();
-    ctx.moveTo(x(0), y(history[0]));
-    history.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+    const chart = LightweightCharts.createChart(refs.chart, {
+      layout: { background: { color: "transparent" }, textColor: "#5e7268", fontSize: 10 },
+      grid: { vertLines: { color: "#1d2a2540" }, horzLines: { color: "#1d2a2540" } },
+      rightPriceScale: { borderColor: "#1d2a25" },
+      timeScale: { borderColor: "#1d2a25", timeVisible: true, secondsVisible: false },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      handleScale: { axisPressedMouseMove: false },
+    });
+    const candles = chart.addCandlestickSeries({
+      upColor: "#22e07b", downColor: "#f87171",
+      borderUpColor: "#22e07b", borderDownColor: "#f87171",
+      wickUpColor: "#22e07b", wickDownColor: "#f87171",
+    });
+    // The same two windows the strategy trades on, so what you see is what it
+    // decided from rather than a chart that happens to be nearby.
+    const fast = chart.addLineSeries({ color: "#fbbf24", lineWidth: 1, priceLineVisible: false });
+    const slow = chart.addLineSeries({ color: "#a78bfa", lineWidth: 1, priceLineVisible: false });
 
-    const fill = ctx.createLinearGradient(0, 0, 0, h);
-    fill.addColorStop(0, rising ? "rgba(34,224,123,.22)" : "rgba(248,113,113,.22)");
-    fill.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.save();
-    ctx.lineTo(x(history.length - 1), h);
-    ctx.lineTo(x(0), h);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.restore();
+    charts[instrument] = { chart, candles, fast, slow, refs, bars: [] };
+    loadBars(instrument);
 
-    ctx.beginPath();
-    ctx.moveTo(x(0), y(history[0]));
-    history.forEach((v, i) => ctx.lineTo(x(i), y(v)));
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
+    // Redraw on resize: a chart sized once is a chart that is wrong after the
+    // first window drag.
+    new ResizeObserver(() => chart.applyOptions({
+      width: refs.chart.clientWidth, height: refs.chart.clientHeight,
+    })).observe(refs.chart);
+  }
+
+  async function loadBars(instrument) {
+    const c = charts[instrument];
+    if (!c) return;
+    try {
+      const r = await fetch(`/api/bars?instrument=${encodeURIComponent(instrument)}`);
+      const body = await r.json();
+      c.bars = (body.bars || []).map((b) => ({
+        time: b.time,
+        open: Number(b.open), high: Number(b.high),
+        low: Number(b.low), close: Number(b.close),
+      }));
+      drawChart(instrument);
+    } catch (e) {
+      // A chart that cannot load is not a reason to lose the numbers beside it.
+      c.refs.barcount.textContent = "chart unavailable";
+    }
+  }
+
+  // The averages are computed here from the candles on screen, which is the
+  // one place this page does arithmetic on a price. It is a drawing, and the
+  // authoritative fast/slow the strategy actually used are printed under the
+  // card from its own journalled stance.
+  function sma(bars, window) {
+    const out = [];
+    for (let i = window - 1; i < bars.length; i++) {
+      let total = 0;
+      for (let j = i - window + 1; j <= i; j++) total += bars[j].close;
+      out.push({ time: bars[i].time, value: total / window });
+    }
+    return out;
+  }
+
+  function drawChart(instrument) {
+    const c = charts[instrument];
+    if (!c || !c.bars.length) return;
+    c.candles.setData(c.bars);
+    c.fast.setData(sma(c.bars, FAST));
+    c.slow.setData(sma(c.bars, SLOW));
+    c.refs.barcount.textContent = `${c.bars.length} × 1m`;
+  }
+
+  // Windows the strategy runs; overridden from the stance note when it says.
+  let FAST = 5, SLOW = 20;
+
+  // A mark either extends the open candle or starts a new one, the same rule
+  // the gateway uses, so the live edge of the chart matches what a reload
+  // would fetch.
+  function pushMark(instrument, price, atSeconds) {
+    const c = charts[instrument];
+    if (!c) return;
+    const bucket = Math.floor(atSeconds / 60) * 60;
+    const value = Number(price);
+    const last = c.bars[c.bars.length - 1];
+    if (last && last.time === bucket) {
+      last.high = Math.max(last.high, value);
+      last.low = Math.min(last.low, value);
+      last.close = value;
+      c.candles.update(last);
+    } else {
+      const bar = { time: bucket, open: value, high: value, low: value, close: value };
+      c.bars.push(bar);
+      if (c.bars.length > 360) c.bars.shift();
+      c.candles.update(bar);
+    }
+    c.fast.setData(sma(c.bars, FAST));
+    c.slow.setData(sma(c.bars, SLOW));
+    c.refs.barcount.textContent = `${c.bars.length} × 1m`;
   }
 
   // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the
@@ -255,6 +334,9 @@
     c.el.classList.toggle("run", word === "LONG" || word === "SHORT");
 
     const pairs = [...note.matchAll(/(bar|fast|slow|holding) ([-\d.]+)/g)];
+    const found = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
+    if (found.fast) c.fast.textContent = found.fast;
+    if (found.slow) c.slow.textContent = found.slow;
     stance[instrument] = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
     c.chain.innerHTML = pairs.length
       ? pairs.map(([, label, value]) =>
@@ -288,7 +370,7 @@
     $("balances").textContent = balances.length ? balances.join(" · ") : "—";
 
     for (const [instrument, price] of Object.entries(state.marks || {})) {
-      marks[instrument] = marks[instrument] || { price, at: null, history: [] };
+      marks[instrument] = marks[instrument] || { price, at: null };
       marks[instrument].price = price;
       paintMark(instrument);
     }
@@ -355,14 +437,17 @@
 
     source.addEventListener("marks", (e) => {
       const m = JSON.parse(e.data);
-      const held = marks[m.instrument] || { history: [] };
+      const held = marks[m.instrument] || {};
       held.price = m.price;
-      held.at = new Date();
-      // Enough points to show the shape of an hour of minute bars, and few
-      // enough that a page left open overnight does not grow without bound.
-      held.history = held.history.concat(Number(m.price)).slice(-180);
+      held.at = new Date();          // "we have seen this tick", for staleness
       marks[m.instrument] = held;
       paintMark(m.instrument);
+      // The candle bucket comes from the record's own nanos, not from this
+      // clock, so the live edge lands where a reload from /api/bars would put
+      // it. Falling back to the local clock would draw a candle the server
+      // disagrees with.
+      const seconds = m.at ? Math.floor(m.at / 1e9) : Math.floor(Date.now() / 1000);
+      pushMark(m.instrument, m.price, seconds);
     });
 
     source.addEventListener("orders", (e) => prepend("activity", activityLine(JSON.parse(e.data))));

@@ -95,8 +95,17 @@ func main() {
 	if live {
 		mode = "LIVE"
 	}
-	log.Printf("strategyd: %s(%d/%d) on %s, %s bars, size %s, %s",
-		strat.Name(), fast, slow, instrument, interval, size, mode)
+	// Say what it is actually sizing on. Printing the fallback quantity while
+	// sizing off a notional budget is a line that invites exactly the doubt it
+	// should settle.
+	sizing := "size " + size.String()
+	if !budget.IsZero() {
+		sizing = "sizing " + budget.String() + " notional"
+	}
+	log.Printf("strategyd: %s(%d/%d) on %s, %s bars, %s, stop %s-%s, %s",
+		strat.Name(), fast, slow, instrument, interval, sizing,
+		envDec("SENTINEL_STRATEGY_STOP_FLOOR", "0.005"),
+		envDec("SENTINEL_STRATEGY_STOP_CAP", "0.01"), mode)
 
 	r := &runner{
 		journalDir: journalDir,

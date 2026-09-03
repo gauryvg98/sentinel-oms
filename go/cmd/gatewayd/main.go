@@ -18,11 +18,27 @@ import (
 	"github.com/gauryvg98/sentinel-oms/go/internal/gateway"
 )
 
+// barInterval reads the strategy's bar size, which the chart mirrors.
+// SENTINEL_CHART_INTERVAL overrides it for a deployment that wants a different
+// view — but the default is to agree, because a chart that disagrees with the
+// strategy is worse than no chart.
+func barInterval() time.Duration {
+	for _, key := range []string{"SENTINEL_CHART_INTERVAL", "SENTINEL_STRATEGY_INTERVAL"} {
+		if d, err := time.ParseDuration(os.Getenv(key)); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Minute
+}
+
 func main() {
 	config := gateway.Config{
 		JournalDir: env("SENTINEL_JOURNAL", "/data/journal"),
 		AdminToken: os.Getenv("SENTINEL_ADMIN_TOKEN"),
 		Addr:       env("SENTINEL_GATEWAY_ADDR", ":8000"),
+		// The chart follows the strategy's clock, so the averages drawn over
+		// the candles are the averages the strategy actually traded on.
+		BarInterval: barInterval(),
 	}
 
 	g := gateway.New(config)

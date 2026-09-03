@@ -244,7 +244,7 @@
     const fast = chart.addLineSeries({ color: "#fbbf24", lineWidth: 1, priceLineVisible: false });
     const slow = chart.addLineSeries({ color: "#a78bfa", lineWidth: 1, priceLineVisible: false });
 
-    charts[instrument] = { chart, candles, fast, slow, refs, bars: [] };
+    charts[instrument] = { chart, candles, fast, slow, refs, bars: [], interval: 60 };
     loadBars(instrument);
 
     // Redraw on resize: a chart sized once is a chart that is wrong after the
@@ -260,6 +260,7 @@
     try {
       const r = await fetch(`/api/bars?instrument=${encodeURIComponent(instrument)}`);
       const body = await r.json();
+      c.interval = body.interval_seconds || 60;
       c.bars = (body.bars || []).map((b) => ({
         time: b.time,
         open: Number(b.open), high: Number(b.high),
@@ -292,7 +293,15 @@
     c.candles.setData(c.bars);
     c.fast.setData(sma(c.bars, FAST));
     c.slow.setData(sma(c.bars, SLOW));
-    c.refs.barcount.textContent = `${c.bars.length} × 1m`;
+    c.refs.barcount.textContent = `${c.bars.length} × ${intervalLabel(c.interval)}`;
+  }
+
+  // The candle size, said the way a person says it.
+  function intervalLabel(seconds) {
+    if (!seconds) return "?";
+    if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+    if (seconds % 60 === 0) return `${seconds / 60}m`;
+    return `${seconds}s`;
   }
 
   // Windows the strategy runs; overridden from the stance note when it says.
@@ -304,7 +313,10 @@
   function pushMark(instrument, price, atSeconds) {
     const c = charts[instrument];
     if (!c) return;
-    const bucket = Math.floor(atSeconds / 60) * 60;
+    // The same bucket arithmetic the gateway uses, at whatever size it said,
+    // so the live edge lands where a reload would put it.
+    const size = c.interval || 60;
+    const bucket = Math.floor(atSeconds / size) * size;
     const value = Number(price);
     const last = c.bars[c.bars.length - 1];
     if (last && last.time === bucket) {
@@ -320,7 +332,7 @@
     }
     c.fast.setData(sma(c.bars, FAST));
     c.slow.setData(sma(c.bars, SLOW));
-    c.refs.barcount.textContent = `${c.bars.length} × 1m`;
+    c.refs.barcount.textContent = `${c.bars.length} × ${intervalLabel(c.interval)}`;
   }
 
   // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the

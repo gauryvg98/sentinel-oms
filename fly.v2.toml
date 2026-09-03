@@ -119,10 +119,18 @@ primary_region = "sin"
   SENTINEL_STRATEGY_FAST = "5"
   SENTINEL_STRATEGY_SLOW = "20"
 
-  # v2 has 1s marks and no bar history, so a 1m bar means 20 minutes of warm-up
-  # from a cold start before the slow window is full and the strategy has any
-  # opinion at all. Until then it does nothing, which is what it should do.
-  SENTINEL_STRATEGY_INTERVAL = "1m"
+  # What the Python deployment ran (its fly.toml line 36). On 1m bars a 5/20
+  # cross fires constantly in a flat market and pays fees to learn there is no
+  # trend — measured overnight on 2026-09-03/04 as a slow bleed across 32 fills.
+  # On 1h it is the trend follower it was designed to be.
+  #
+  # The chart follows this, so the averages drawn over the candles are the ones
+  # the strategy traded. SENTINEL_CHART_INTERVAL overrides that if a deployment
+  # ever wants a different view.
+  #
+  # Warm-up is 20 bars, so 20 hours from a cold start — but strategyd replays
+  # the journal's marks, so it warms from history rather than from nothing.
+  SENTINEL_STRATEGY_INTERVAL = "1h"
 
   # 0.002 BTC, because BTCUSDC steps at 0.001 with a minNotional of 100: at
   # ~77k, 0.001 is only ~77 and the venue would refuse it. The smallest thing

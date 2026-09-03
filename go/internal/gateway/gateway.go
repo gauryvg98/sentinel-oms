@@ -46,6 +46,14 @@ type Config struct {
 	AdminToken string
 	// Addr to listen on.
 	Addr string
+	// BarInterval is the candle size the chart draws.
+	//
+	// It follows the strategy's interval rather than being a display choice of
+	// its own. The chart overlays the same two moving averages the strategy
+	// trades, and averages computed over a different bar size would show
+	// crossings that never happened — a chart explaining trades with arithmetic
+	// nobody ran. Zero means one minute.
+	BarInterval time.Duration
 }
 
 // Gateway serves the journal.
@@ -60,13 +68,18 @@ type Gateway struct {
 	series map[string]*bars.Series
 }
 
-// How the chart is fed. A minute is the shortest interval the strategy runs on,
-// and six hours of them is enough to see the averages cross without holding a
-// day of candles for every instrument that ever traded.
-const (
-	barInterval = uint64(60_000_000_000)
-	barsKept    = 360
-)
+// How many candles are kept per instrument. At a minute that is six hours; at
+// an hour, a fortnight. Enough either way to see the averages cross, without
+// holding a year of candles for every instrument that ever traded.
+const barsKept = 360
+
+// barInterval is the configured candle size in nanoseconds.
+func (g *Gateway) barInterval() uint64 {
+	if g.config.BarInterval <= 0 {
+		return uint64(time.Minute.Nanoseconds())
+	}
+	return uint64(g.config.BarInterval.Nanoseconds())
+}
 
 // New returns a gateway with an empty book.
 func New(config Config) *Gateway {
@@ -167,7 +180,7 @@ func (g *Gateway) fold(frame *journal.Record) {
 		// filling in from whatever arrives next.
 		series, ok := g.series[decoded.MarkInstrument]
 		if !ok {
-			series = bars.NewSeries(barInterval, barsKept)
+			series = bars.NewSeries(g.barInterval(), barsKept)
 			g.series[decoded.MarkInstrument] = series
 		}
 		series.Observe(frame.Header.Nanos, decoded.MarkPrice)
@@ -347,7 +360,7 @@ func (g *Gateway) bars(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instrument":       instrument,
-		"interval_seconds": barInterval / 1_000_000_000,
+		"interval_seconds": g.barInterval() / 1_000_000_000,
 		"bars":             series.Bars(),
 	})
 }

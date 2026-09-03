@@ -515,6 +515,21 @@ func (b *Book) HaltReason() (string, uint64) { return b.haltReason, b.haltedAt }
 // Fills returns how many executions have been seen.
 func (b *Book) Fills() int { return len(b.fills) }
 
+// FillList returns every fill, oldest first.
+//
+// A count answers "did anything happen"; a chart has to answer "where". These
+// are what the buy and sell markers are drawn from, so a trade appears on the
+// chart at the price it actually happened rather than wherever the candle
+// closed.
+func (b *Book) FillList() []Fill {
+	out := make([]Fill, 0, len(b.fills))
+	for _, f := range b.fills {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At < out[j].At })
+	return out
+}
+
 // Epoch is the writer epoch of the last record folded.
 func (b *Book) Epoch() uint64 { return b.epoch }
 

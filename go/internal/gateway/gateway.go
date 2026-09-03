@@ -46,6 +46,10 @@ type Config struct {
 	AdminToken string
 	// Addr to listen on.
 	Addr string
+	// Leverage the venue was told to use, for display. The gateway has no say
+	// in it — it reads the same variable sentineld does, so a screen showing
+	// 100x is showing what the writer actually set.
+	Leverage string
 	// BarInterval is the candle size the chart draws.
 	//
 	// It follows the strategy's interval rather than being a display choice of
@@ -234,6 +238,8 @@ type State struct {
 	Realized   fixed.Dec            `json:"realized"`
 	Unrealized fixed.Dec            `json:"unrealized"`
 	Fills      int                  `json:"fills"`
+	FillList   []book.Fill          `json:"fill_list"`
+	Leverage   string               `json:"leverage,omitempty"`
 	Decisions  []book.Decision      `json:"decisions"`
 	Activity   []book.Activity      `json:"activity"`
 }
@@ -291,6 +297,8 @@ func (g *Gateway) Snapshot() State {
 		Realized:   g.book.Realized(),
 		Unrealized: g.book.Unrealized(),
 		Fills:      g.book.Fills(),
+		FillList:   g.book.FillList(),
+		Leverage:   g.config.Leverage,
 		Decisions:  g.book.Decisions(),
 		Activity:   g.book.Activity(),
 	}

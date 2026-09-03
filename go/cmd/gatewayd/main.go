@@ -39,6 +39,7 @@ func main() {
 		// The chart follows the strategy's clock, so the averages drawn over
 		// the candles are the averages the strategy actually traded on.
 		BarInterval: barInterval(),
+		Leverage:    os.Getenv("SENTINEL_LEVERAGE"),
 	}
 
 	g := gateway.New(config)

@@ -103,6 +103,7 @@ func main() {
 		strat:      strat,
 		bars:       strategy.NewBars(uint64(interval.Nanoseconds())),
 		book:       book.New(),
+		tick:       envDec("SENTINEL_STRATEGY_TICK", "0.1"),
 	}
 	if err := r.run(); err != nil {
 		log.Fatalf("strategyd: %v", err)
@@ -132,6 +133,17 @@ type runner struct {
 	caughtUp bool
 
 	placed int
+	// stopAt is where the working stop sits, so an unchanged one is not
+	// re-placed every bar.
+	stopAt fixed.Dec
+	// tick is the venue's price grid.
+	tick fixed.Dec
+	// The last bar's answer, kept so a fill can be protected the moment it
+	// lands rather than at the next bar. On an hourly timeframe that is the
+	// difference between a stop in a second and a position naked for an hour.
+	lastDecision strategy.Decision
+	lastClose    fixed.Dec
+	haveDecision bool
 }
 
 // run folds the journal forever, acting when a bar closes.
@@ -173,6 +185,14 @@ func (r *runner) fold(frame *journal.Record) {
 	}
 	r.book.Apply(frame.Header, decoded)
 
+	// A fill changes the position, and a position without a stop is the thing
+	// this must never leave lying around. Checked here rather than at the next
+	// bar, because the next bar may be an hour away.
+	if decoded.Kind == journal.KindOrderEvent && decoded.Event != nil &&
+		decoded.Event.Kind == record.FillReceived && decoded.Event.Applied() && r.haveDecision {
+		r.maintainStop(r.lastDecision, r.lastClose, r.book.PositionIn(r.instrument).Qty)
+	}
+
 	if decoded.Kind != journal.KindMark || decoded.MarkInstrument != r.instrument {
 		return
 	}
@@ -183,6 +203,7 @@ func (r *runner) fold(frame *journal.Record) {
 
 func (r *runner) onBar(closed fixed.Dec) {
 	d := r.strat.OnBar(closed)
+	r.lastDecision, r.lastClose, r.haveDecision = d, closed, true
 	if d.Stance == strategy.NoOpinion {
 		if r.caughtUp {
 			log.Printf("strategyd: bar %s — warming up, %d/%d", closed, d.Have, d.Need)
@@ -211,6 +232,7 @@ func (r *runner) onBar(closed fixed.Dec) {
 			log.Printf("strategyd: bar %s — %s, fast %s slow %s, holding %s",
 				closed, d.Stance, d.Fast, d.Slow, actual)
 		}
+		r.maintainStop(d, closed, actual)
 		return
 	}
 
@@ -238,6 +260,79 @@ func (r *runner) onBar(closed fixed.Dec) {
 	}
 }
 
+// maintainStop keeps a protective stop under an open position.
+//
+// The strategy has computed a stop distance on every directional bar since it
+// was written and nothing ever placed one, so positions ran naked. The stop is
+// anchored on the slow average — the trend line a long is wrong once price
+// falls back to — floored and capped into a tight band by the strategy itself.
+//
+// It is placed as a StopMarket under ProtectiveExit authority, which is what
+// lets it run while the account is halted: R1.13 says a halt must not disarm
+// the stops, because a halt that did would turn a bookkeeping problem into an
+// unbounded position.
+//
+// Replaced rather than trailed on every bar. Cancel-then-place leaves a window
+// with no protection at all, so the new one goes on first and the old is
+// cancelled after — briefly two stops for the same position, which the exit
+// guard bounds to the position actually held (R1.10), against a window with
+// none, which nothing bounds.
+func (r *runner) maintainStop(d strategy.Decision, closed, actual fixed.Dec) {
+	if !r.live || !r.caughtUp {
+		return
+	}
+	live := r.liveStops()
+
+	if actual.IsZero() {
+		// Flat: a stop under nothing is an order waiting to open a position.
+		for _, id := range live {
+			r.cancel(id)
+		}
+		r.stopAt = 0
+		return
+	}
+	if d.StopDist.IsZero() {
+		return
+	}
+
+	// Long stops below, short stops above.
+	want := closed.Sub(d.StopDist)
+	side := "sell"
+	if actual.Raw() < 0 {
+		want = closed.Add(d.StopDist)
+		side = "buy"
+	}
+	want = fixed.FromRaw(strategy.RoundToStep(want, r.tick).Raw())
+
+	// Only move it when it has actually moved. Re-placing an identical stop
+	// every bar is churn the venue charges for and the log has to explain.
+	if len(live) > 0 && want == r.stopAt {
+		return
+	}
+
+	if err := r.placeStop(side, actual.Abs(), want); err != nil {
+		log.Printf("strategyd: could not place the stop: %v", err)
+		return
+	}
+	r.stopAt = want
+	for _, id := range live {
+		r.cancel(id)
+	}
+}
+
+// liveStops is the protective stops this strategy has working on its
+// instrument, read from the book rather than remembered — a restart must find
+// the stop it left behind rather than place a second one.
+func (r *runner) liveStops() []string {
+	var out []string
+	for _, o := range r.book.LiveOrders() {
+		if o.Instrument == r.instrument && o.Authority == "PROTECTIVE_EXIT" && o.StopPrice != nil {
+			out = append(out, o.ClientOrderID)
+		}
+	}
+	return out
+}
+
 // declare records the stance in the journal, through the same socket the
 // orders go through. Best effort: failing to explain a decision must never stop
 // the decision being acted on.
@@ -254,6 +349,45 @@ func (r *runner) declare(d strategy.Decision, closed, desired, actual fixed.Dec)
 	}
 	if _, err := r.send(line); err != nil {
 		log.Printf("strategyd: could not record the stance: %v", err)
+	}
+}
+
+// placeStop puts a protective StopMarket under the position.
+func (r *runner) placeStop(side string, qty, at fixed.Dec) error {
+	r.placed++
+	line, err := json.Marshal(map[string]any{
+		"op":              "place",
+		"client_order_id": fmt.Sprintf("SL-%d-%d", time.Now().Unix(), r.placed),
+		"instrument":      r.instrument,
+		"side":            side,
+		"qty":             qty.String(),
+		"authority":       "exit",
+		"stop_price":      at.String(),
+		"trace_id":        time.Now().UnixNano(),
+	})
+	if err != nil {
+		return err
+	}
+	answer, err := r.send(line)
+	if err != nil {
+		return err
+	}
+	log.Printf("strategyd: stop %s %s at %s -> %s", side, qty, at, answer)
+	return nil
+}
+
+// cancel withdraws an order, best effort. A stop that will not cancel is not a
+// reason to stop trading: it is bounded by the position it can close.
+func (r *runner) cancel(clientOrderID string) {
+	line, err := json.Marshal(map[string]any{
+		"op":              "cancel",
+		"client_order_id": clientOrderID,
+	})
+	if err != nil {
+		return
+	}
+	if _, err := r.send(line); err != nil {
+		log.Printf("strategyd: could not cancel %s: %v", clientOrderID, err)
 	}
 }
 

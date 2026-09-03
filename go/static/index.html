@@ -118,6 +118,7 @@
   <div class="stat"><b class="num" id="realized">—</b><span>realised</span></div>
   <div class="stat"><b class="num" id="unrealized">—</b><span>unrealised</span></div>
   <div class="stat"><b class="num" id="fills">—</b><span>fills</span></div>
+  <div class="stat"><b class="num" id="leverage">—</b><span>leverage</span></div>
   <div class="stat"><b class="num" id="epoch">—</b><span>epoch</span></div>
   <div class="stat"><b class="num" id="seq">—</b><span>sequence</span></div>
   <div class="grow"></div>
@@ -181,7 +182,8 @@
       <div class="chart" data-chart></div>
       <div class="chart-legend">
         <span><span class="swatch" style="background:#fbbf24"></span> fast <b data-fast>—</b></span>
-        <span><span class="swatch" style="background:#a78bfa"></span> slow <b data-slow>—</b></span>
+        <span><span class="swatch" style="background:#c4b5fd"></span> slow <b data-slow>—</b></span>
+        <span><span class="swatch" style="background:#f87171"></span> stop <b data-stop>—</b></span>
         <span class="dim" data-barcount></span>
       </div>
       <div class="row">
@@ -202,7 +204,7 @@
       px: q("[data-px]"), stance: q("[data-stance]"),
       pos: q("[data-pos]"), unreal: q("[data-unreal]"), chain: q("[data-chain]"),
       chart: q("[data-chart]"), fast: q("[data-fast]"), slow: q("[data-slow]"),
-      barcount: q("[data-barcount]"),
+      stop: q("[data-stop]"), barcount: q("[data-barcount]"),
     };
     openChart(instrument, cards[instrument]);
     return cards[instrument];
@@ -241,8 +243,10 @@
     });
     // The same two windows the strategy trades on, so what you see is what it
     // decided from rather than a chart that happens to be nearby.
-    const fast = chart.addLineSeries({ color: "#fbbf24", lineWidth: 1, priceLineVisible: false });
-    const slow = chart.addLineSeries({ color: "#a78bfa", lineWidth: 1, priceLineVisible: false });
+    const fast = chart.addLineSeries({ color: "#fbbf24", lineWidth: 2, priceLineVisible: false });
+    // Both averages at 2px. At 1px the violet slow line disappeared into the
+    // candles, which for the line the stop is anchored on is not a small thing.
+    const slow = chart.addLineSeries({ color: "#c4b5fd", lineWidth: 2, priceLineVisible: false });
 
     charts[instrument] = { chart, candles, fast, slow, refs, bars: [], interval: 60 };
     loadBars(instrument);
@@ -267,6 +271,11 @@
         low: Number(b.low), close: Number(b.close),
       }));
       drawChart(instrument);
+      // The book may have arrived before this chart existed.
+      if (lastState) {
+        drawMarkers(instrument, lastState.fill_list);
+        drawStop(instrument, lastState.orders);
+      }
     } catch (e) {
       // A chart that cannot load is not a reason to lose the numbers beside it.
       c.refs.barcount.textContent = "chart unavailable";
@@ -285,6 +294,51 @@
       out.push({ time: bars[i].time, value: total / window });
     }
     return out;
+  }
+
+  // Every fill on this instrument, drawn where it happened. A trade you can
+  // see against the candle that caused it is the difference between a chart
+  // and a decoration.
+  function drawMarkers(instrument, fills) {
+    const c = charts[instrument];
+    if (!c) return;
+    const mine = (fills || []).filter((f) => f.instrument === instrument);
+    c.candles.setMarkers(mine.map((f) => {
+      const buy = f.side === "BUY";
+      const stop = f.client_order_id.startsWith("SL-");
+      return {
+        time: Math.floor(f.at / 1e9),
+        position: buy ? "belowBar" : "aboveBar",
+        color: stop ? "#f87171" : (buy ? "#22e07b" : "#f87171"),
+        shape: buy ? "arrowUp" : "arrowDown",
+        text: `${stop ? "SL " : ""}${f.side === "BUY" ? "B" : "S"} ${f.qty} @ ${f.price}`,
+      };
+    }));
+  }
+
+  // The working stop, drawn as a line across the chart. A stop you cannot see
+  // is a stop you have to take on trust, and the whole point of this screen is
+  // not having to.
+  function drawStop(instrument, orders) {
+    const c = charts[instrument];
+    if (!c) return;
+    const stop = (orders || []).find((o) =>
+      o.instrument === instrument && o.stop_price &&
+      !["FILLED", "CANCELED", "REJECTED", "EXPIRED"].includes(o.state));
+
+    if (c.stopLine) { c.candles.removePriceLine(c.stopLine); c.stopLine = null; }
+    if (!stop) {
+      c.refs.stop.textContent = "none";
+      c.refs.stop.className = "dim";
+      return;
+    }
+    c.stopLine = c.candles.createPriceLine({
+      price: Number(stop.stop_price),
+      color: "#f87171", lineWidth: 1, lineStyle: 2,
+      axisLabelVisible: true, title: "stop",
+    });
+    c.refs.stop.textContent = stop.stop_price;
+    c.refs.stop.className = "";
   }
 
   function drawChart(instrument) {
@@ -361,7 +415,10 @@
   }
 
   // ---------------------------------------------------------------- book
+  let lastState = null;
+
   function renderBook(state) {
+    lastState = state;
     $("epoch").textContent = text(state.epoch);
     $("seq").textContent = text(state.last_seq);
     $("fills").textContent = text(state.fills);
@@ -412,6 +469,12 @@
 
     const stances = (state.decisions || []).filter((d) => d.kind === "STANCE_DECLARED");
     stances.slice(-4).forEach(paintStance);
+
+    $("leverage").textContent = state.leverage ? state.leverage + "×" : "—";
+    for (const instrument of Object.keys(charts)) {
+      drawMarkers(instrument, state.fill_list);
+      drawStop(instrument, state.orders);
+    }
 
     $("orders").innerHTML = (state.orders || []).slice().reverse().map((o) => `<tr>
       <td>${o.client_order_id}</td>

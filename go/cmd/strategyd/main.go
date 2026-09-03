@@ -112,6 +112,10 @@ func main() {
 	if !budget.IsZero() {
 		sizing = "sizing " + budget.String() + " notional"
 	}
+	if !commitPct.IsZero() {
+		sizing = "committing " + commitPct.String() + " of equity at " +
+			strconv.FormatInt(leverage, 10) + "x"
+	}
 	log.Printf("strategyd: %s(%d/%d) on %s, %s bars, %s, stop %s-%s, %s",
 		strat.Name(), fast, slow, instrument, interval, sizing,
 		envDec("SENTINEL_STRATEGY_STOP_FLOOR", "0.005"),

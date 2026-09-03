@@ -16,6 +16,15 @@
 //   - the strategy stopped deciding. It declares a stance every bar; silence
 //     for several bars means it died while the writer carried on looking
 //     perfectly healthy.
+//   - the venue refused an order. On 2026-09-03 it refused every protective
+//     stop — "Order type not supported for this endpoint" — and the system
+//     carried on reporting healthy, because every check here verified that
+//     what happened was recorded faithfully and none asked whether a thing
+//     that had to happen did. A position ran unprotected for an hour.
+//   - a position is held with no stop under it. That is the invariant the
+//     rejection violated, and the one worth watching directly: it does not
+//     care why there is no stop, only that there is exposure nobody is
+//     protecting.
 //
 // A resume clears the halt and says so, because "it is fixed" is news too.
 package main
@@ -25,6 +34,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +42,35 @@ import (
 	"github.com/gauryvg98/sentinel-oms/go/internal/journal"
 	"github.com/gauryvg98/sentinel-oms/go/internal/record"
 )
+
+// readStance pulls "holding X" and "stop Y" out of a stance note, reporting
+// whether a position is held and whether a stop is armed under it.
+//
+// Parsing a note is not how this ought to work — the numbers should be fields.
+// It is done this way because the alternative was not watching at all, and the
+// note is what the strategy already writes. If the format changes this reports
+// no stop, which fails towards paging rather than towards silence.
+func readStance(note string) (held bool, stopped bool) {
+	for _, part := range []struct {
+		key string
+		out *bool
+	}{{"holding ", &held}, {"stop ", &stopped}} {
+		i := strings.Index(note, part.key)
+		if i < 0 {
+			continue
+		}
+		value := note[i+len(part.key):]
+		if end := strings.IndexByte(value, ' '); end >= 0 {
+			value = value[:end]
+		}
+		if value == "" {
+			continue
+		}
+		// "holding 0" is not holding; any stop at all counts as a stop.
+		*part.out = part.key != "holding " || (value != "0" && value != "0.0")
+	}
+	return held, stopped
+}
 
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -124,6 +163,27 @@ func main() {
 				case decoded.Decision != nil && decoded.Decision.Kind == record.StanceDeclared:
 					lastStance = time.Now()
 					notifier.Clear("strategy-silent")
+
+					// The stance carries what is held and, when there is one,
+					// the armed stop. Exposure with nothing under it is the
+					// condition that matters; the reason is secondary.
+					held, stop := readStance(decoded.Decision.Note)
+					if caughtUp && held && !stop {
+						notifier.Send("naked-position",
+							name+" is holding a position with no stop: "+decoded.Decision.Note)
+					} else if stop {
+						notifier.Clear("naked-position")
+					}
+
+				case decoded.Event != nil && decoded.Event.Kind == record.VenueRejected:
+					// Every rejection, not only the stops. An order the system
+					// decided to place and the venue would not take is a gap
+					// between what this thinks it did and what happened.
+					if caughtUp {
+						notifier.Send("rejected:"+decoded.Event.ClientOrderID,
+							name+" order "+decoded.Event.ClientOrderID+
+								" was REFUSED by the venue: "+decoded.Event.RejectText)
+					}
 				}
 			}
 			continue

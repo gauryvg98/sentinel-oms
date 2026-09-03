@@ -306,12 +306,20 @@
     c.candles.setMarkers(mine.map((f) => {
       const buy = f.side === "BUY";
       const stop = f.client_order_id.startsWith("SL-");
+      // No price labels. Thirty-two fills inside a day of hourly candles turns
+      // labelled markers into an unreadable stack, and the Orders table below
+      // already carries the id, side, size and state of every one. The chart's
+      // job is where and which way; the table's is what.
+      //
+      // A stop firing is the exception and gets a word, because a position
+      // closed by its stop is a different event from one the strategy chose to
+      // close and you should not have to cross-reference to tell them apart.
       return {
         time: Math.floor(f.at / 1e9),
         position: buy ? "belowBar" : "aboveBar",
-        color: stop ? "#f87171" : (buy ? "#22e07b" : "#f87171"),
+        color: stop ? "#f87171" : (buy ? "#22e07b" : "#e0e0e0"),
         shape: buy ? "arrowUp" : "arrowDown",
-        text: `${stop ? "SL " : ""}${f.side === "BUY" ? "B" : "S"} ${f.qty} @ ${f.price}`,
+        text: stop ? "SL" : "",
       };
     }));
   }

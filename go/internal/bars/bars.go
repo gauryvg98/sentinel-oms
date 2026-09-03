@@ -72,6 +72,27 @@ func (s *Series) Observe(atNanos uint64, price fixed.Dec) {
 	}
 }
 
+// Seed installs history fetched from elsewhere, oldest first.
+//
+// Only ever into an empty series, and only candles older than anything already
+// held: backfill fills in what was never seen, it does not overwrite what was.
+// The journal is the record of what this system observed; the venue's history
+// is context in front of it.
+func (s *Series) Seed(history []Bar) {
+	if len(s.bars) > 0 || len(history) == 0 {
+		return
+	}
+	if len(history) > s.max {
+		history = history[len(history)-s.max:]
+	}
+	s.bars = append(s.bars, history...)
+	last := s.bars[len(s.bars)-1]
+	if s.intervalNanos > 0 {
+		//nolint:gosec // a bucket index from a second-resolution timestamp
+		s.bucket = uint64(last.Time) * 1_000_000_000 / s.intervalNanos
+	}
+}
+
 // Bars returns a copy, oldest first.
 func (s *Series) Bars() []Bar {
 	out := make([]Bar, len(s.bars))

@@ -75,7 +75,14 @@ type Gateway struct {
 	// present, and saying so is the difference between a screen that is late
 	// and one that is confidently wrong.
 	caughtUp bool
+	// backfill fetches candle history for an instrument the first time one is
+	// seen. Injected rather than dialled directly so the gateway stays
+	// testable without a venue.
+	backfill func(instrument string) ([]bars.Bar, error)
 }
+
+// Backfill installs the history source.
+func (g *Gateway) Backfill(fn func(string) ([]bars.Bar, error)) { g.backfill = fn }
 
 // How many candles are kept per instrument. At a minute that is six hours; at
 // an hour, a fortnight. Enough either way to see the averages cross, without
@@ -195,6 +202,16 @@ func (g *Gateway) fold(frame *journal.Record) {
 		series, ok := g.series[decoded.MarkInstrument]
 		if !ok {
 			series = bars.NewSeries(g.barInterval(), barsKept)
+			// Ask the venue for the history this journal predates. Without it
+			// a chart shows only what we have watched, and a twenty-period
+			// average over twenty candles is one point, which draws no line.
+			if g.backfill != nil {
+				if history, err := g.backfill(decoded.MarkInstrument); err != nil {
+					log.Printf("gatewayd: no history for %s: %v", decoded.MarkInstrument, err)
+				} else {
+					series.Seed(history)
+				}
+			}
 			g.series[decoded.MarkInstrument] = series
 		}
 		series.Observe(frame.Header.Nanos, decoded.MarkPrice)

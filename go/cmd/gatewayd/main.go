@@ -15,7 +15,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/gauryvg98/sentinel-oms/go/internal/bars"
 	"github.com/gauryvg98/sentinel-oms/go/internal/gateway"
+	"github.com/gauryvg98/sentinel-oms/go/internal/klines"
 )
 
 // barInterval reads the strategy's bar size, which the chart mirrors.
@@ -43,6 +45,24 @@ func main() {
 	}
 
 	g := gateway.New(config)
+
+	// Candle history from the venue, so the chart and its averages start from
+	// context rather than from whatever this journal happens to have watched.
+	history := klines.New(klines.BaseFor(os.Getenv("SENTINEL_BINANCE_ENV")))
+	interval := env("SENTINEL_CHART_INTERVAL", env("SENTINEL_STRATEGY_INTERVAL", "1m"))
+	g.Backfill(func(instrument string) ([]bars.Bar, error) {
+		fetched, err := history.Fetch(instrument, interval, 300)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]bars.Bar, 0, len(fetched))
+		for _, k := range fetched {
+			out = append(out, bars.Bar{
+				Time: k.OpenTime, Open: k.Open, High: k.High, Low: k.Low, Close: k.C,
+			})
+		}
+		return out, nil
+	})
 	if config.AdminToken == "" {
 		log.Print("gatewayd: read-only — set SENTINEL_ADMIN_TOKEN to enable controls")
 	}

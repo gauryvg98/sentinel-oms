@@ -25,6 +25,7 @@ import (
 	"github.com/gauryvg98/sentinel-oms/go/internal/book"
 	"github.com/gauryvg98/sentinel-oms/go/internal/fixed"
 	"github.com/gauryvg98/sentinel-oms/go/internal/journal"
+	"github.com/gauryvg98/sentinel-oms/go/internal/klines"
 	"github.com/gauryvg98/sentinel-oms/go/internal/record"
 	"github.com/gauryvg98/sentinel-oms/go/internal/strategy"
 )
@@ -120,6 +121,35 @@ func main() {
 		book:       book.New(),
 		tick:       envDec("SENTINEL_STRATEGY_TICK", "0.1"),
 	}
+	// Warm the averages from the venue's own history before reading a single
+	// journal record. Without it the strategy averages over whatever this
+	// journal has watched — twenty hours here, nothing at all on a fresh
+	// deployment — and a 20-period average of 20 bars is not the indicator it
+	// claims to be. The Python fetched three hundred bars for this reason.
+	//
+	// Not fatal if it fails: a strategy that warms slowly from live marks is
+	// worse than one that starts informed, and better than one that refuses to
+	// run because a public endpoint was briefly unreachable.
+	seeded := 0
+	history := klines.New(klines.BaseFor(os.Getenv("SENTINEL_BINANCE_ENV")))
+	if fetched, err := history.Fetch(instrument, env("SENTINEL_STRATEGY_INTERVAL", "1h"), 300); err != nil {
+		log.Printf("strategyd: no venue history, warming from live marks: %v", err)
+	} else {
+		for _, bar := range fetched {
+			r.lastDecision = r.strat.OnBar(bar.C)
+			r.lastClose = bar.C
+			r.haveDecision = true
+			seeded++
+		}
+		// The bar aggregator must not re-close a bucket the backfill covered.
+		if len(fetched) > 0 {
+			last := fetched[len(fetched)-1]
+			r.bars.Observe(uint64(last.OpenTime)*1_000_000_000, last.C)
+		}
+		log.Printf("strategyd: warmed on %d bars of venue history, stance %s",
+			seeded, r.lastDecision.Stance)
+	}
+
 	if err := r.run(); err != nil {
 		log.Fatalf("strategyd: %v", err)
 	}

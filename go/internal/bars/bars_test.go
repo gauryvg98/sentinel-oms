@@ -78,3 +78,40 @@ func TestCandleTimesComeFromTheMarkNotAClock(t *testing.T) {
 		}
 	}
 }
+
+func TestSeedFillsAnEmptySeriesAndThenLeavesItAlone(t *testing.T) {
+	s := NewSeries(minute, 100)
+	history := []Bar{
+		{Time: 0, Open: fixed.MustParse("10"), High: fixed.MustParse("11"),
+			Low: fixed.MustParse("9"), Close: fixed.MustParse("10.5")},
+		{Time: 60, Open: fixed.MustParse("10.5"), High: fixed.MustParse("12"),
+			Low: fixed.MustParse("10"), Close: fixed.MustParse("11")},
+	}
+	s.Seed(history)
+	if s.Len() != 2 {
+		t.Fatalf("got %d candles, want 2", s.Len())
+	}
+
+	// A second seed must not double the history.
+	s.Seed(history)
+	if s.Len() != 2 {
+		t.Errorf("got %d after a second seed, want 2 — backfill fills what was "+
+			"never seen, it does not overwrite what was", s.Len())
+	}
+}
+
+func TestAMarkAfterSeedingContinuesRatherThanRestarting(t *testing.T) {
+	s := NewSeries(minute, 100)
+	s.Seed([]Bar{{Time: 0, Open: fixed.MustParse("10"), High: fixed.MustParse("10"),
+		Low: fixed.MustParse("10"), Close: fixed.MustParse("10")}})
+
+	// A mark inside the seeded bucket extends it rather than opening a second
+	// candle for the same minute.
+	s.Observe(30*1_000_000_000, fixed.MustParse("12"))
+	if s.Len() != 1 {
+		t.Fatalf("got %d candles, want 1", s.Len())
+	}
+	if got := s.Bars()[0].High; got != fixed.MustParse("12") {
+		t.Errorf("high = %v, want 12", got)
+	}
+}

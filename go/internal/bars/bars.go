@@ -47,6 +47,18 @@ func (s *Series) Observe(atNanos uint64, price fixed.Dec) {
 	}
 	bucket := atNanos / s.intervalNanos
 
+	// A mark older than the newest candle is history we already hold — the
+	// backfill covered it, from the venue, more completely than our own marks
+	// could. Appending it would drive the series backwards in time, which is
+	// not merely untidy: a chart library given descending times draws nothing
+	// at all, and the whole screen goes blank over one stale record.
+	//
+	// This matters on every restart, because the gateway replays the journal
+	// from the beginning while the backfill has already reached the present.
+	if len(s.bars) > 0 && bucket < s.bucket {
+		return
+	}
+
 	if len(s.bars) > 0 && bucket == s.bucket {
 		last := &s.bars[len(s.bars)-1]
 		if price.Raw() > last.High.Raw() {

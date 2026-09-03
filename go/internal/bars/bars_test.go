@@ -115,3 +115,35 @@ func TestAMarkAfterSeedingContinuesRatherThanRestarting(t *testing.T) {
 		t.Errorf("high = %v, want 12", got)
 	}
 }
+
+func TestTheSeriesNeverGoesBackwards(t *testing.T) {
+	// The gateway seeds from the venue up to now, then replays a journal that
+	// starts hours earlier. Appending those older marks drove the series
+	// backwards, and a chart given descending times renders nothing — the
+	// whole screen went blank over one stale record.
+	s := NewSeries(minute, 100)
+	s.Seed([]Bar{
+		{Time: 600, Open: fixed.MustParse("10"), High: fixed.MustParse("10"),
+			Low: fixed.MustParse("10"), Close: fixed.MustParse("10")},
+		{Time: 660, Open: fixed.MustParse("11"), High: fixed.MustParse("11"),
+			Low: fixed.MustParse("11"), Close: fixed.MustParse("11")},
+	})
+
+	// A mark from long before the seeded history.
+	s.Observe(60*1_000_000_000, fixed.MustParse("99"))
+	// And one from after it, which must still be taken.
+	s.Observe(720*1_000_000_000, fixed.MustParse("12"))
+
+	times := make([]int64, 0, s.Len())
+	for _, b := range s.Bars() {
+		times = append(times, b.Time)
+	}
+	for i := 1; i < len(times); i++ {
+		if times[i] <= times[i-1] {
+			t.Fatalf("times go backwards at %d: %v", i, times)
+		}
+	}
+	if len(times) != 3 || times[2] != 720 {
+		t.Errorf("got %v, want the two seeded candles and the newer mark", times)
+	}
+}

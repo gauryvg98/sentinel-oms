@@ -265,11 +265,19 @@
       const r = await fetch(`/api/bars?instrument=${encodeURIComponent(instrument)}`);
       const body = await r.json();
       c.interval = body.interval_seconds || 60;
-      c.bars = (body.bars || []).map((b) => ({
-        time: b.time,
-        open: Number(b.open), high: Number(b.high),
-        low: Number(b.low), close: Number(b.close),
-      }));
+      // Sorted and de-duplicated before the chart sees them. The library
+      // renders nothing at all when times are not strictly ascending, so one
+      // stale candle blanks the whole screen — a failure mode severe enough to
+      // defend against on both sides rather than trusting the server.
+      const seen = new Set();
+      c.bars = (body.bars || [])
+        .map((b) => ({
+          time: b.time,
+          open: Number(b.open), high: Number(b.high),
+          low: Number(b.low), close: Number(b.close),
+        }))
+        .sort((a, b) => a.time - b.time)
+        .filter((b) => !seen.has(b.time) && seen.add(b.time));
       drawChart(instrument);
       // The book may have arrived before this chart existed.
       if (lastState) {

@@ -70,6 +70,11 @@ func main() {
 	fast := envInt("SENTINEL_STRATEGY_FAST", 5)
 	slow := envInt("SENTINEL_STRATEGY_SLOW", 20)
 	size := envDec("SENTINEL_STRATEGY_QTY", "0.002")
+	// The Python sized by notional (SENTINEL_STRATEGY_USDT = 200), not by a
+	// fixed quantity, so the position stayed the same money as the price moved.
+	// A fixed 0.002 BTC is 160 USDC at 80k and 200 at 100k, which is a
+	// different bet without anyone deciding to make one.
+	budget := envDec("SENTINEL_STRATEGY_USDT", "0")
 	step := envDec("SENTINEL_STRATEGY_STEP", "0.001")
 	allowShort := env("SENTINEL_STRATEGY_SHORT", "") == "true"
 
@@ -97,6 +102,7 @@ func main() {
 		journalDir: journalDir,
 		instrument: instrument,
 		size:       size,
+		budget:     budget,
 		step:       step,
 		allowShort: allowShort,
 		live:       live,
@@ -114,6 +120,7 @@ type runner struct {
 	journalDir string
 	instrument string
 	size       fixed.Dec
+	budget     fixed.Dec
 	step       fixed.Dec
 	allowShort bool
 	live       bool
@@ -222,7 +229,7 @@ func (r *runner) onBar(closed fixed.Dec) {
 		return
 	}
 
-	desired, ok := strategy.Target(d.Stance, r.size, r.allowShort)
+	desired, ok := strategy.Target(d.Stance, r.sizeAt(closed), r.allowShort)
 	if !ok {
 		return
 	}
@@ -329,6 +336,18 @@ func (r *runner) maintainStop(d strategy.Decision, closed, actual fixed.Dec) {
 	for _, id := range live {
 		r.cancel(id)
 	}
+}
+
+// sizeAt is how much to hold, at this price.
+//
+// A notional budget divides by the price; without one it is a fixed quantity.
+// Rounded down to the venue's step by the caller, which is where a size that
+// rounds to nothing becomes no trade rather than a rejection.
+func (r *runner) sizeAt(price fixed.Dec) fixed.Dec {
+	if r.budget.IsZero() || price.IsZero() {
+		return r.size
+	}
+	return fixed.FromRaw(fixed.MulDiv(r.budget.Raw(), fixed.Scale, price.Raw()))
 }
 
 // liveStops is the protective stops this strategy has working on its

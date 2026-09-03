@@ -168,3 +168,33 @@ func TestResetForgetsTheOldTimeframe(t *testing.T) {
 		t.Errorf("after Reset = %v, want NoOpinion", d.Stance)
 	}
 }
+
+func TestTheLongShortVariantIsAlwaysInTheMarket(t *testing.T) {
+	// What the Python deployment ran: SENTINEL_STRATEGY = "sma-ls". Below the
+	// cross it is short, not flat, so it can profit in a downtrend. The plain
+	// variant sits out the same move.
+	prices := []string{"100", "100", "100", "100", "98", "96", "94", "92"}
+	plain := feed(t, build(t, 2, 4, false), prices...)
+	ls := feed(t, build(t, 2, 4, true), prices...)
+
+	if last := plain[len(plain)-1]; last != Flat {
+		t.Errorf("long-only ends %v, want Flat", last)
+	}
+	if last := ls[len(ls)-1]; last != Short {
+		t.Errorf("long-short ends %v, want Short", last)
+	}
+}
+
+func TestAShortCarriesAStopAboveThePrice(t *testing.T) {
+	// The stop is a distance; which side it sits on is the runner's business,
+	// but a short with no stop distance would be a short with no stop.
+	s := build(t, 2, 4, true)
+	feed(t, s, "100", "100", "100", "100")
+	d := s.OnBar(fixed.MustParse("94"))
+	if d.Stance != Short {
+		t.Fatalf("stance %v, want Short", d.Stance)
+	}
+	if d.StopDist.IsZero() {
+		t.Error("a short with no stop distance cannot be protected")
+	}
+}

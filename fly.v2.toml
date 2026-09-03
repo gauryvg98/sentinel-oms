@@ -119,6 +119,13 @@ primary_region = "sin"
   SENTINEL_STRATEGY_FAST = "5"
   SENTINEL_STRATEGY_SLOW = "20"
 
+  # The Python's stop band (SENTINEL_SMA_STOP_FLOOR_PCT / _CAP_PCT). Tighter
+  # than this crate's defaults of 0.005/0.01 — trend-following cuts losses
+  # short, and a stop half a percent from price is the difference between a
+  # scratch and a real loss at 100x.
+  SENTINEL_STRATEGY_STOP_FLOOR = "0.003"
+  SENTINEL_STRATEGY_STOP_CAP = "0.005"
+
   # What the Python deployment ran (its fly.toml line 36). On 1m bars a 5/20
   # cross fires constantly in a flat market and pays fees to learn there is no
   # trend — measured overnight on 2026-09-03/04 as a slow bleed across 32 fills.
@@ -132,14 +139,24 @@ primary_region = "sin"
   # the journal's marks, so it warms from history rather than from nothing.
   SENTINEL_STRATEGY_INTERVAL = "1h"
 
-  # 0.002 BTC, because BTCUSDC steps at 0.001 with a minNotional of 100: at
-  # ~77k, 0.001 is only ~77 and the venue would refuse it. The smallest thing
-  # this venue will actually accept.
+  # Sized by notional, as the Python was (its SENTINEL_STRATEGY_USDT = 200), so
+  # the position is the same money as the price moves. A fixed quantity is 160
+  # USDC at 80k and 200 at 100k — a different bet nobody decided to make.
+  SENTINEL_STRATEGY_USDT = "200"
+
+  # The fallback when no notional is set, and the floor either way: BTCUSDC
+  # steps at 0.001 with a minNotional of 100, so at ~80k a 0.001 order is worth
+  # ~80 and the venue refuses it.
   SENTINEL_STRATEGY_QTY = "0.002"
   SENTINEL_STRATEGY_STEP = "0.001"
+  SENTINEL_STRATEGY_TICK = "0.1"
 
-  # Long-only. "true" makes it stop-and-reverse, always in the market.
-  # SENTINEL_STRATEGY_SHORT = "true"
+  # Long AND short. The Python deployment ran "sma-ls" — the stop-and-reverse
+  # variant, short below the cross rather than flat, always in the market. This
+  # was long-only until 2026-09-04 because the rewrite took the code's default
+  # instead of the deployment's setting, which is the same mistake that left it
+  # on 1m bars.
+  SENTINEL_STRATEGY_SHORT = "true"
 
   # Trading is opt-in, by this exact word. Anything else — unset, misspelt,
   # "yes" — logs the orders it would have placed and places none. A strategy

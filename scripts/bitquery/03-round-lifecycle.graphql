@@ -1,0 +1,33 @@
+# ROUND DISCOVERY + RESOLUTION, from the operator key's own transactions.
+# `initialize_market` gives each round's UP/DOWN mints and its start/end window;
+# `determine_outcome` gives the winner. Together they label the tape -- which is
+# what turns a stream of prices into counted rounds we can measure a lock rate over.
+#
+# Operator key: DDucv2DeUsTsg1rfAcWAnUSUVpqfdHEzxX66ARB2JYVg (~6,000 sigs/min --
+# filter tightly on time and expect volume).
+{
+  Solana(network: solana) {
+    Instructions(
+      where: {
+        Instruction: {
+          Program: { Address: { is: "prediCtPZCttYMvm2W3PtxmMxLmT1dtN7riU6Cxh6tM" } }
+        }
+        Transaction: {
+          Signer: { is: "DDucv2DeUsTsg1rfAcWAnUSUVpqfdHEzxX66ARB2JYVg" }
+          Result: { Success: true }
+        }
+        Block: { Time: { since: "2026-08-27T00:00:00Z" } }
+      }
+      limit: { count: 500 }
+      orderBy: { descending: Block_Time }
+    ) {
+      Block { Time }
+      Transaction { Signature }
+      Instruction {
+        Data                       # disc(8) tells initialize_market from determine_outcome
+        Program { Method }
+        Accounts { Address Token { Mint ProgramId } }
+      }
+    }
+  }
+}

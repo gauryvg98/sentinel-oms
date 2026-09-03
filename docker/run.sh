@@ -56,6 +56,13 @@ if [ -n "${SENTINEL_STRATEGY:-}" ]; then
   /app/strategyd &
 fi
 
+# The alerter, also optional and also not one of the two that matter. A dead
+# alerter must not stop a working supervisor — but it does mean nobody is
+# watching, which is why it says so on the way out rather than exiting quietly.
+if [ -n "${SENTINEL_ALERT_WEBHOOK:-}" ]; then
+  /app/alertd &
+fi
+
 # Stop when either of the two that matter stops. Polled rather than `wait -n`,
 # which dash does not have.
 term() {

@@ -87,6 +87,28 @@ primary_region = "sin"
   # rather than matched by arithmetic nobody checked.
   SENTINEL_MAX_POSITION = "0.05"
 
+  # ---- alerting -----------------------------------------------------------
+  # SENTINEL_ALERT_WEBHOOK is a secret, not set here. Without it alertd never
+  # starts and nothing reports anything — which is exactly the state that let a
+  # false-positive halt sit unnoticed for ten hours on 2026-09-03.
+  #
+  # Payload is {"content": "..."}, the shape v1 sent, so an existing Discord or
+  # Slack webhook works unchanged.
+  SENTINEL_ALERT_NAME = "sentinel-oms"
+
+  # A writer that ticks every second and has said nothing for two minutes is
+  # not a quiet market. Neither trading nor halted is the worst of the three
+  # states, because nothing else reports it.
+  SENTINEL_ALERT_STALL_AFTER = "2m"
+
+  # Several bars, so one missed evaluation is not a page. The strategy declares
+  # a stance every bar even when it wants what it already holds, which is what
+  # makes silence detectable at all.
+  SENTINEL_ALERT_STRATEGY_SILENT_AFTER = "15m"
+
+  # How long a condition that stays true stays quiet after firing once.
+  SENTINEL_ALERT_REPEAT = "1h"
+
   # ---- strategy -----------------------------------------------------------
   # Set at all, strategyd starts; unset, it is never launched and this is an
   # execution system waiting to be told what to do.

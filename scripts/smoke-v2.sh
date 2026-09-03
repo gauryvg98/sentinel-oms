@@ -16,6 +16,7 @@ echo "── build ────────────────────�
 (cd go && go build -o "$JOURNAL/bin-gatewayd" ./cmd/gatewayd)
 (cd go && go build -o "$JOURNAL/bin-adversary" ./cmd/adversary)
 (cd go && go build -o "$JOURNAL/bin-strategyd" ./cmd/strategyd)
+(cd go && go build -o "$JOURNAL/bin-alertd" ./cmd/alertd)
 
 echo "── sentineld ───────────────────────────────────────────"
 SENTINEL_JOURNAL="$JOURNAL" SENTINEL_INSTRUMENTS=BTCUSDT \
@@ -101,6 +102,34 @@ if [ "$stopped" != yes ]; then
   exit 1
 fi
 grep -q "stopped" "$JOURNAL/term.log" && echo "drained and stopped, as it must"
+
+echo "── a halt reaches the webhook ──────────────────────────"
+# The account was halted two steps ago and is still halted, so an alerter
+# starting now must say so rather than assume somebody saw the first one.
+python3 - "$JOURNAL" <<'PYEOF' &
+import sys, json, http.server
+d = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        open(d + "/alerts.txt", "a").write(json.loads(body)["content"] + "\n")
+        self.send_response(204); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", 8798), H).serve_forever()
+PYEOF
+HOOK=$!
+sleep 1
+SENTINEL_JOURNAL="$JOURNAL" SENTINEL_ALERT_WEBHOOK=http://127.0.0.1:8798/hook \
+  SENTINEL_ALERT_NAME=smoke "$JOURNAL/bin-alertd" > "$JOURNAL/alertd.log" 2>&1 &
+ALERTER=$!
+sleep 3
+kill "$ALERTER" "$HOOK" 2>/dev/null || true
+if grep -q "HALTED" "$JOURNAL/alerts.txt" 2>/dev/null; then
+  echo "paged: $(head -1 "$JOURNAL/alerts.txt")"
+else
+  echo "FAILED: a halted account did not reach the webhook"
+  exit 1
+fi
 
 echo "── a second writer is refused ──────────────────────────"
 # Captured first, then matched. Under `set -o pipefail` the pipeline would

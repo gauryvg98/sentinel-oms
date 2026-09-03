@@ -338,22 +338,32 @@
   function drawStop(instrument, orders) {
     const c = charts[instrument];
     if (!c) return;
-    const stop = (orders || []).find((o) =>
+
+    // A stop resting at the venue is an order. A stop this venue refused to
+    // hold lives in the strategy and reaches here through its stance. Reading
+    // only the orders reports "none" over a stop that is being watched, which
+    // is the same lie as reporting no position over a live one.
+    const resting = (orders || []).find((o) =>
       o.instrument === instrument && o.stop_price &&
       !["FILLED", "CANCELED", "REJECTED", "EXPIRED"].includes(o.state));
+    const watched = stance[instrument] && stance[instrument].stop;
+    const level = resting ? resting.stop_price : watched;
 
     if (c.stopLine) { c.candles.removePriceLine(c.stopLine); c.stopLine = null; }
-    if (!stop) {
+    if (!level) {
       c.refs.stop.textContent = "none";
       c.refs.stop.className = "dim";
       return;
     }
     c.stopLine = c.candles.createPriceLine({
-      price: Number(stop.stop_price),
-      color: "#f87171", lineWidth: 1, lineStyle: 2,
-      axisLabelVisible: true, title: "stop",
+      price: Number(level),
+      color: "#f87171", lineWidth: 1,
+      // Solid where the venue holds it, dashed where this system does. The
+      // difference matters: a watched stop dies with the process holding it.
+      lineStyle: resting ? 0 : 2,
+      axisLabelVisible: true, title: resting ? "stop" : "stop (watched)",
     });
-    c.refs.stop.textContent = stop.stop_price;
+    c.refs.stop.textContent = level + (resting ? "" : " (watched)");
     c.refs.stop.className = "";
   }
 
@@ -423,7 +433,7 @@
     c.stance.className = "badge " + (["LONG", "SHORT", "FLAT"].includes(word) ? word : "none");
     c.el.classList.toggle("run", word === "LONG" || word === "SHORT");
 
-    const pairs = [...note.matchAll(/(bar|fast|slow|holding) ([-\d.]+)/g)];
+    const pairs = [...note.matchAll(/(bar|fast|slow|holding|stop) ([-\d.]+)/g)];
     const found = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
     if (found.fast) c.fast.textContent = found.fast;
     if (found.slow) c.slow.textContent = found.slow;

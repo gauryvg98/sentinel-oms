@@ -414,6 +414,12 @@ func (r *runner) maintainStop(d strategy.Decision, closed, actual fixed.Dec) {
 		log.Printf("strategyd: watching the stop at %s (%s) — the venue will not hold one",
 			want, side)
 	}
+	// Say so now rather than at the next bar. On an hourly timeframe a screen
+	// that learns about the stop an hour late is a screen that spends an hour
+	// reporting none.
+	if r.haveDecision {
+		r.declare(r.lastDecision, r.lastClose, want, actual)
+	}
 }
 
 // watchStop fires the stop this process is holding, when the venue would not.
@@ -459,6 +465,14 @@ func (r *runner) sizeAt(price fixed.Dec) fixed.Dec {
 	return fixed.FromRaw(fixed.MulDiv(r.budget.Raw(), fixed.Scale, price.Raw()))
 }
 
+// stopNote reports the armed level, if there is one.
+func (r *runner) stopNote() string {
+	if r.stopLevel.IsZero() {
+		return ""
+	}
+	return " stop " + r.stopLevel.String()
+}
+
 // liveStops is the protective stops this strategy has working on its
 // instrument, read from the book rather than remembered — a restart must find
 // the stop it left behind rather than place a second one.
@@ -480,8 +494,13 @@ func (r *runner) declare(d strategy.Decision, closed, desired, actual fixed.Dec)
 		"op":         "decide",
 		"instrument": r.instrument,
 		"value":      desired.String(),
-		"note": fmt.Sprintf("%s bar %s fast %s slow %s holding %s",
-			d.Stance, closed, d.Fast, d.Slow, actual),
+		// The armed stop rides along in the stance, because a watched stop
+		// exists nowhere else a reader can see it: the venue refused the order,
+		// so a screen reading orders finds a rejection and reports no stop
+		// while one is being held here. A display that says "none" over a live
+		// stop is the same lie as one that says "none" over a live position.
+		"note": fmt.Sprintf("%s bar %s fast %s slow %s holding %s%s",
+			d.Stance, closed, d.Fast, d.Slow, actual, r.stopNote()),
 	})
 	if err != nil {
 		return

@@ -184,6 +184,23 @@ type runner struct {
 	stopAt fixed.Dec
 	// tick is the venue's price grid.
 	tick fixed.Dec
+	// stopLevel is where the protective stop sits, whether or not the venue
+	// agreed to hold it. When the venue refuses the order type — Binance Demo
+	// Trading answers "Order type not supported for this endpoint" to
+	// STOP_MARKET — this process watches the mark itself and exits at market
+	// when the level is breached.
+	//
+	// A watched stop is strictly weaker than one resting at the venue: it dies
+	// with this process, and it cannot fire between marks. It is not a choice
+	// over a venue stop, it is what there is when the venue will not hold one,
+	// and it is unambiguously better than nothing, which is what a rejected
+	// order leaves behind.
+	stopLevel fixed.Dec
+	stopSide  string
+	// venueHoldsStop is false once the venue has refused the order type, so
+	// this does not re-attempt a rejection every bar.
+	venueHoldsStop   bool
+	venueRefusedStop bool
 	// The last bar's answer, kept so a fill can be protected the moment it
 	// lands rather than at the next bar. On an hourly timeframe that is the
 	// difference between a stop in a second and a position naked for an hour.
@@ -250,9 +267,23 @@ func (r *runner) fold(frame *journal.Record) {
 		r.maintainStop(r.lastDecision, r.lastClose, r.book.PositionIn(r.instrument).Qty)
 	}
 
+	// The venue refusing the order type is a fact about the venue, not this
+	// order: remember it, stop re-attempting, and watch the level here instead.
+	if decoded.Kind == journal.KindOrderEvent && decoded.Event != nil &&
+		decoded.Event.Kind == record.VenueRejected &&
+		strings.HasPrefix(decoded.Event.ClientOrderID, "SL-") && !r.venueRefusedStop {
+		r.venueRefusedStop = true
+		log.Printf("strategyd: the venue refused a stop order (%s) — watching the level here instead",
+			decoded.Event.RejectText)
+	}
+
 	if decoded.Kind != journal.KindMark || decoded.MarkInstrument != r.instrument {
 		return
 	}
+
+	// Every mark, not every bar: a stop that only checked hourly would be a
+	// stop in name.
+	r.watchStop(decoded.MarkPrice)
 	if closed, ok := r.bars.Observe(frame.Header.Nanos, decoded.MarkPrice); ok {
 		r.onBar(closed)
 	}
@@ -367,13 +398,52 @@ func (r *runner) maintainStop(d strategy.Decision, closed, actual fixed.Dec) {
 		return
 	}
 
-	if err := r.placeStop(side, actual.Abs(), want); err != nil {
-		log.Printf("strategyd: could not place the stop: %v", err)
-		return
+	// The level is armed here regardless of what the venue says about it, so a
+	// refused order downgrades the stop rather than removing it.
+	r.stopLevel, r.stopSide, r.stopAt = want, side, want
+
+	if !r.venueRefusedStop {
+		if err := r.placeStop(side, actual.Abs(), want); err != nil {
+			log.Printf("strategyd: could not place the stop: %v", err)
+		}
 	}
-	r.stopAt = want
 	for _, id := range live {
 		r.cancel(id)
+	}
+	if r.venueRefusedStop {
+		log.Printf("strategyd: watching the stop at %s (%s) — the venue will not hold one",
+			want, side)
+	}
+}
+
+// watchStop fires the stop this process is holding, when the venue would not.
+//
+// Called on every mark. Market, not stop-market: the level has already been
+// breached, so the order that gets out is the one that does not need the venue
+// to accept a condition.
+func (r *runner) watchStop(price fixed.Dec) {
+	if !r.live || !r.caughtUp || r.stopLevel.IsZero() {
+		return
+	}
+	held := r.book.PositionIn(r.instrument).Qty
+	if held.IsZero() {
+		r.stopLevel = 0
+		return
+	}
+
+	breached := (r.stopSide == "sell" && price.Raw() <= r.stopLevel.Raw()) ||
+		(r.stopSide == "buy" && price.Raw() >= r.stopLevel.Raw())
+	if !breached {
+		return
+	}
+
+	log.Printf("strategyd: stop breached at %s (level %s) — closing %s",
+		price, r.stopLevel, held)
+	// Disarm first. A second mark under the level before the fill lands would
+	// otherwise send a second exit for a position already being closed.
+	r.stopLevel = 0
+	if err := r.place(strategy.Order{Side: r.stopSide, Qty: held.Abs(), Exit: true}); err != nil {
+		log.Printf("strategyd: stop exit failed: %v", err)
 	}
 }
 

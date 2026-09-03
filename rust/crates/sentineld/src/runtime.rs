@@ -310,6 +310,8 @@ pub fn engine_config(config: &crate::config::Config) -> EngineConfig {
             position_confirmed: false,
         },
         stale_after_nanos: u64::try_from(config.stale_after.as_nanos()).unwrap_or(u64::MAX),
+        tick_write_after_nanos: u64::try_from(config.tick_write_after.as_nanos())
+            .unwrap_or(u64::MAX),
         ..EngineConfig::default()
     }
 }

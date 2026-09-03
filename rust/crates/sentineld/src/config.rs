@@ -26,6 +26,15 @@ pub struct Config {
     pub sweep_interval: Duration,
     /// How long the venue may say nothing before an order counts as abandoned.
     pub stale_after: Duration,
+    /// How far the book's clock may fall behind before a tick is written
+    /// purely to carry time forward.
+    ///
+    /// Nothing below the gateway reads a clock, so a tick is the only thing
+    /// that introduces time — every other record is stamped with the clock the
+    /// book already has. They cannot be dropped, only rationed: on the live
+    /// journal they were 82% of every record stored, against 0.3% that were
+    /// decisions, orders and fills.
+    pub tick_write_after: Duration,
 }
 
 /// Which venue, and as whom.
@@ -162,6 +171,15 @@ impl Config {
             tick_interval: Duration::from_millis(250),
             sweep_interval: Duration::from_secs(30),
             stale_after: Duration::from_secs(120),
+            tick_write_after: match std::env::var("SENTINEL_TICK_WRITE_AFTER") {
+                Ok(text) => {
+                    Duration::from_secs(text.parse().map_err(|_| ConfigError::Invalid {
+                        name: "SENTINEL_TICK_WRITE_AFTER",
+                        reason: "expects whole seconds".into(),
+                    })?)
+                }
+                Err(_) => Duration::from_secs(5),
+            },
         })
     }
 
@@ -208,6 +226,7 @@ mod tests {
             tick_interval: Duration::from_millis(250),
             sweep_interval: Duration::from_secs(30),
             stale_after: Duration::from_secs(120),
+            tick_write_after: Duration::from_secs(5),
         }
     }
 

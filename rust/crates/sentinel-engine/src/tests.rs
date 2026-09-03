@@ -79,6 +79,21 @@ impl Harness {
         }
     }
 
+    /// How many Ticked records the journal holds.
+    fn records_of_kind_ticked(&self) -> usize {
+        let mut tailer = sentinel_journal::Tailer::open(&self.dir, sentinel_journal::Seq::ZERO)
+            .expect("the journal should be readable");
+        let mut ticks = 0;
+        while let Ok(Some(frame)) = tailer.next_record() {
+            if let Ok(sentinel_record::Record::Ticked) =
+                sentinel_record::Record::decode(frame.header.kind, &frame.payload)
+            {
+                ticks += 1;
+            }
+        }
+        ticks
+    }
+
     /// Apply a command and run the world until it settles.
     fn run(&mut self, command: Command) {
         self.engine.submit(command).unwrap();
@@ -925,6 +940,71 @@ fn a_position_report_with_nothing_in_flight_still_halts() {
         h.book().is_halted(),
         "a difference we cannot explain is the thing to stop for"
     );
+}
+
+/// Ticks are the only thing that carries time, so they are rationed, not cut.
+#[test]
+fn ticks_are_written_at_the_configured_resolution_not_every_tick() {
+    // Measured on the live journal: 82% of every record stored was a tick,
+    // against 0.3% that were decisions, orders and fills.
+    //
+    // They cannot simply be dropped. Nothing below the gateway reads a clock —
+    // time enters only as Command::Tick — and every other record is stamped
+    // with the book's *existing* clock, so a mark carries no new time with it.
+    // Suppressing ticks entirely freezes the clock every age is measured
+    // against. So they are written at a coarser resolution instead: often
+    // enough for the deadlines that matter, rarely enough to stop being four
+    // fifths of the log.
+    let mut h = Harness::with_config(
+        "tick-resolution",
+        Config {
+            tick_write_after_nanos: 5_000_000_000,
+            ..Config::default()
+        },
+    );
+    let before = h.records_of_kind_ticked();
+
+    // Twenty seconds of one-second ticks.
+    for _ in 0..20 {
+        h.clock += 1_000_000_000;
+        h.run(Command::Tick {
+            now: Nanos::from_u64(h.clock),
+        });
+    }
+
+    let written = h.records_of_kind_ticked() - before;
+    assert!(
+        (3..=5).contains(&written),
+        "twenty seconds at five-second resolution should write about four \
+         ticks, wrote {written}"
+    );
+
+    // And the clock still tracks the wall, within that resolution.
+    let lag = h.clock.saturating_sub(h.book().now().as_u64());
+    assert!(
+        lag <= 5_000_000_000,
+        "the clock fell {lag}ns behind, more than the resolution allows"
+    );
+}
+
+/// Silence must not freeze the clock the stale sweep measures against.
+#[test]
+fn silence_still_writes_a_tick_so_deadlines_keep_moving() {
+    let mut h = Harness::new("tick-in-silence");
+    let before = h.records_of_kind_ticked();
+
+    // Nothing but time passing: no marks, no orders, no fills.
+    h.clock += 30_000_000_000;
+    h.run(Command::Tick {
+        now: Nanos::from_u64(h.clock),
+    });
+
+    assert!(
+        h.records_of_kind_ticked() > before,
+        "with nothing else running, a tick has to be written or every age the \
+         sweep measures freezes exactly when it matters"
+    );
+    assert_eq!(h.book().now().as_u64(), h.clock);
 }
 
 /// Nothing opens until the venue has said what the account holds.

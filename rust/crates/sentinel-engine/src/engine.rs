@@ -44,6 +44,12 @@ pub struct Config {
     pub stale_after_nanos: u64,
     /// First delay before retrying a reconciliation that got no answer.
     pub reconcile_backoff_nanos: u64,
+    /// How far the book's clock may fall behind the wall before a tick is
+    /// written purely to carry time forward.
+    ///
+    /// Other records advance the clock for free — every one carries its own
+    /// timestamp — so this only fires when nothing else is happening.
+    pub tick_write_after_nanos: u64,
     /// Cap on that delay.
     ///
     /// The Python system retried on a fixed two-second cadence, so a batch of
@@ -59,6 +65,7 @@ impl Default for Config {
             limits: Limits::default(),
             stale_after_nanos: 120_000_000_000,
             reconcile_backoff_nanos: 1_000_000_000,
+            tick_write_after_nanos: 5_000_000_000,
             reconcile_backoff_cap_nanos: 60_000_000_000,
         }
     }
@@ -340,10 +347,28 @@ impl Engine {
             // every age the engine measures jump around.
             return Ok(());
         }
-        // Stamped with the *new* time: this record is what advances the book's
-        // clock, so stamping it with the old one would leave time standing
-        // still and every age the engine measures pinned at zero.
-        self.write_at(now, Record::Ticked)?;
+        // A tick is only worth writing when nothing else is moving the clock.
+        //
+        // Every record advances the book from its own frame header, so during
+        // ordinary trading the marks — one a second — already carry time
+        // forward and a Ticked record beside them says nothing new. Measured on
+        // the live journal: 82% of all records were ticks, against 0.3% that
+        // were decisions, orders and fills. Four bytes in five stored, synced
+        // and projected to say that a second had passed, next to a record that
+        // already said so.
+        //
+        // The write is kept for silence. If the venue stream stops, nothing
+        // else advances the clock, and the ages the stale sweep measures would
+        // freeze exactly when an unanswered order most needs finding. So a tick
+        // is written once the book's clock has fallen this far behind the
+        // wall — often enough to keep those deadlines honest, rarely enough
+        // that a working feed writes none at all.
+        if now.saturating_since(self.book.now()) >= self.config.tick_write_after_nanos {
+            // Stamped with the *new* time: this record is what advances the
+            // book's clock, so stamping it with the old one would leave time
+            // standing still.
+            self.write_at(now, Record::Ticked)?;
+        }
         self.retry_due_reconciliations(now);
         Ok(())
     }

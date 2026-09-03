@@ -19,6 +19,7 @@
   }
   .dim { color: var(--dim); }
   .pos { color: var(--green); } .neg { color: var(--red); }
+  .warn { color: var(--amber); }
   .num { font-variant-numeric: tabular-nums; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .dot.ok { background: var(--green); } .dot.bad { background: var(--red); }
@@ -115,6 +116,11 @@
   <span class="pill" id="venue">v2 · rust + go</span>
   <span class="pill dim" id="status">connecting</span>
   <span id="halt" style="color:var(--amber);font-size:11px"></span>
+  <div class="stat"><b class="num" id="equity">—</b><span>equity</span></div>
+  <div class="stat"><b class="num" id="available">—</b><span>available</span></div>
+  <div class="stat"><b class="num" id="committed">—</b><span>committed</span></div>
+  <div class="stat"><b class="num" id="blocked">—</b><span>blocked (orders)</span></div>
+  <div class="stat"><b class="num" id="notional">—</b><span>notional</span></div>
   <div class="stat"><b class="num" id="realized">—</b><span>realised</span></div>
   <div class="stat"><b class="num" id="unrealized">—</b><span>unrealised</span></div>
   <div class="stat"><b class="num" id="fills">—</b><span>fills</span></div>
@@ -151,7 +157,9 @@
 
 <footer>
   Read-only. Every number here is folded from the journal; nothing on this page
-  asks the engine anything. &nbsp;·&nbsp;
+  asks the engine anything. Capital figures are derived from the wallet balance,
+  the marks and the book — the venue's own account page is authoritative and
+  sees funding and fees these do not. &nbsp;·&nbsp;
   <a href="/engineering/" style="color:var(--dim)">engineering write-up</a>
 </footer>
 
@@ -509,6 +517,19 @@
     stances.slice(-4).forEach(paintStance);
 
     $("leverage").textContent = state.leverage ? state.leverage + "×" : "—";
+
+    // Derived from the book — the wallet the venue reported, the marks it
+    // streamed, the positions and orders this system booked. Exact against our
+    // own records, and not a substitute for Binance's account page, which sees
+    // funding and fees this does not.
+    const cap = state.capital || {};
+    $("equity").textContent = text(cap.equity);
+    $("available").textContent = text(cap.available);
+    $("committed").textContent = text(cap.committed);
+    $("committed").className = "num " + (Number(cap.committed) ? "pos" : "dim");
+    $("blocked").textContent = text(cap.blocked);
+    $("blocked").className = "num " + (Number(cap.blocked) ? "warn" : "dim");
+    $("notional").textContent = text(cap.notional);
     for (const instrument of Object.keys(charts)) {
       drawMarkers(instrument, state.fill_list);
       drawStop(instrument, state.orders);

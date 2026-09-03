@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -270,6 +271,7 @@ type State struct {
 	Fills      int                  `json:"fills"`
 	FillList   []book.Fill          `json:"fill_list"`
 	Leverage   string               `json:"leverage,omitempty"`
+	Capital    Capital              `json:"capital"`
 	Decisions  []book.Decision      `json:"decisions"`
 	Activity   []book.Activity      `json:"activity"`
 }
@@ -279,6 +281,74 @@ type State struct {
 // A client with nothing gets a complete one rather than a promise of one: the
 // alternative is a screen that fills in as events happen to arrive, which for a
 // quiet account means a screen that stays blank.
+// Capital is where the money is, derived from the book.
+//
+// Every figure here is arithmetic over what the journal already holds — the
+// wallet balance the venue reported, the marks it streamed, the positions and
+// orders this system booked — rather than a second call to the venue. That
+// makes it exact with respect to our own records and *not* a substitute for
+// Binance's own account figures, which include funding and fees this does not
+// see. Where they disagree, the venue is right and the difference is worth
+// asking about.
+type Capital struct {
+	// Wallet is what the venue last said the balance was.
+	Wallet fixed.Dec `json:"wallet"`
+	// Equity is the wallet plus what open positions are currently worth.
+	Equity fixed.Dec `json:"equity"`
+	// Notional is the face value of what is held, unlevered.
+	Notional fixed.Dec `json:"notional"`
+	// Committed is margin behind open positions: notional over leverage.
+	Committed fixed.Dec `json:"committed"`
+	// Blocked is margin behind orders that are working but not yet filled.
+	// Money that is neither free nor yet at risk.
+	Blocked fixed.Dec `json:"blocked"`
+	// Available is what is left to open something new with.
+	Available fixed.Dec `json:"available"`
+}
+
+// capital works out where the money is.
+//
+// Margin is notional over leverage, which is the venue's own definition of
+// initial margin. Blocked counts only orders still working: a filled order's
+// margin has become committed, and counting it twice would show money that is
+// not there. A protective exit is deliberately not counted as blocked — it
+// releases margin rather than reserving it, and treating a stop as a claim on
+// capital would make protecting a position look like risking more of it.
+func (g *Gateway) capital(positions []PositionView) Capital {
+	out := Capital{}
+	for _, amount := range g.book.Balances() {
+		out.Wallet = out.Wallet.Add(amount)
+	}
+
+	leverage := int64(1)
+	if n, err := strconv.ParseInt(g.config.Leverage, 10, 64); err == nil && n > 0 {
+		leverage = n
+	}
+
+	var unrealized fixed.Dec
+	for _, p := range positions {
+		out.Notional = out.Notional.Add(p.Qty.Abs().Mul(p.Mark))
+		unrealized = unrealized.Add(p.Unrealized)
+	}
+	out.Committed = fixed.FromRaw(out.Notional.Raw() / leverage)
+
+	for _, o := range g.book.LiveOrders() {
+		if o.Authority == "PROTECTIVE_EXIT" {
+			continue
+		}
+		price := g.book.Mark(o.Instrument)
+		if o.LimitPrice != nil {
+			price = *o.LimitPrice
+		}
+		notional := o.RemainingQty.Abs().Mul(price)
+		out.Blocked = out.Blocked.Add(fixed.FromRaw(notional.Raw() / leverage))
+	}
+
+	out.Equity = out.Wallet.Add(unrealized)
+	out.Available = out.Equity.Sub(out.Committed).Sub(out.Blocked)
+	return out
+}
+
 // PositionView is a position with the two numbers a screen needs beside it.
 //
 // Computed here, in exact arithmetic, because the browser has none: a P&L put
@@ -314,6 +384,7 @@ func (g *Gateway) Snapshot() State {
 	}
 
 	return State{
+		Capital:    g.capital(positions),
 		Epoch:      g.book.Epoch(),
 		LastSeq:    g.book.LastSeq(),
 		Now:        g.book.Now(),

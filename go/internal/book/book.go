@@ -457,6 +457,12 @@ func (b *Book) PositionIn(instrument string) Position {
 // Mark returns the last price seen.
 func (b *Book) Mark(instrument string) fixed.Dec { return b.marks[instrument] }
 
+// SetBalanceForTest seeds a balance without a journal record behind it.
+// Only for tests: nothing in the running system may invent a balance.
+func (b *Book) SetBalanceForTest(asset string, amount fixed.Dec) {
+	b.balances[asset] = amount
+}
+
 // Marks returns every mark the book has seen.
 //
 // Every one, not only those with a position behind them: a screen that shows a

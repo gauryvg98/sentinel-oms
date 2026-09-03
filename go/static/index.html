@@ -53,6 +53,10 @@
     padding: 14px; display: flex; flex-direction: column; gap: 10px;
   }
   .card.wide { grid-column: 1 / -1; }
+  /* An instrument card carries a chart, and a chart in a 340px column is a
+     smudge. Two columns where there is room, all of it where there is not. */
+  .card.instrument { grid-column: span 2; }
+  @media (max-width: 760px) { .card.instrument { grid-column: 1 / -1; } }
   .card.run { border-color: #244; box-shadow: 0 0 0 1px rgba(34,224,123,.15) inset; }
   h2 {
     font-size: 10px; color: var(--dim); font-weight: 400;
@@ -61,7 +65,7 @@
   .chead { display: flex; align-items: baseline; gap: 8px; }
   .sym { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
   .px { margin-left: auto; font-size: 18px; font-weight: 700; }
-  .chart { width: 100%; height: 240px; }
+  .chart { width: 100%; height: 300px; }
   .chart-legend { display: flex; gap: 14px; font-size: 10px; color: var(--dim); }
   .chart-legend b { font-weight: 600; }
   .swatch { display: inline-block; width: 10px; height: 2px; vertical-align: middle; }
@@ -168,7 +172,7 @@
   function card(instrument) {
     if (cards[instrument]) return cards[instrument];
     const el = document.createElement("div");
-    el.className = "card";
+    el.className = "card instrument";
     el.innerHTML = `
       <div class="chead">
         <span class="sym">${instrument}</span>

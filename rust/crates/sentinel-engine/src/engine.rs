@@ -694,6 +694,45 @@ impl Engine {
                 continue;
             }
 
+            // An order in flight explains the difference, so it is not one.
+            //
+            // The venue fills before it tells us. Between the ack and the fill
+            // arriving there is a window — milliseconds, but the sweep runs on
+            // a timer and does not care — in which the venue's position legally
+            // leads our book by up to the size of what is working. Comparing
+            // the two numbers in that window and halting on the mismatch is a
+            // check reaching a verdict on information it knows to be
+            // incomplete, which is the same mistake as the distributed lock
+            // this system was built to replace. Measured: a live account halted
+            // at seq 106060 between an ack at 106058 and its fill at 106062,
+            // and stayed halted for ten hours over a disagreement that had
+            // resolved itself two records later.
+            //
+            // So defer. The sweep runs again, and by then either the fill has
+            // landed and the books agree, or the order has gone terminal and a
+            // difference really is one.
+            if self
+                .book
+                .live_orders_on(&reported.instrument)
+                .next()
+                .is_some()
+            {
+                self.decide(
+                    reported.instrument,
+                    Actor::Reconciler,
+                    DecisionKind::ReconcileScheduled,
+                    TraceId::NONE,
+                    Money::from_raw(reported.qty.raw()),
+                    Note::new(&format!(
+                        "venue holds {}, book holds {ours}, an order is in \
+                         flight — deferred to the next sweep",
+                        reported.qty
+                    ))
+                    .unwrap_or_default(),
+                )?;
+                continue;
+            }
+
             self.decide(
                 reported.instrument,
                 Actor::Reconciler,

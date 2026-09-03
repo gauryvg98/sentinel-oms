@@ -188,6 +188,8 @@ type State struct {
 	LastSeq    uint64               `json:"last_seq"`
 	Now        uint64               `json:"now"`
 	Halted     bool                 `json:"halted"`
+	HaltReason string               `json:"halt_reason,omitempty"`
+	HaltedAt   uint64               `json:"halted_at,omitempty"`
 	Orders     []*book.Order        `json:"orders"`
 	Positions  []PositionView       `json:"positions"`
 	Balances   map[string]fixed.Dec `json:"balances"`
@@ -223,6 +225,8 @@ func (g *Gateway) Snapshot() State {
 	// you look at to understand why there is no position.
 	marks := g.book.Marks()
 
+	haltReason, haltedAt := g.book.HaltReason()
+
 	// Unrealised is attached per position here rather than left to the client.
 	// The browser has no exact arithmetic, and a P&L rounded through a double
 	// is a number that disagrees with the ledger about money.
@@ -241,6 +245,8 @@ func (g *Gateway) Snapshot() State {
 		LastSeq:    g.book.LastSeq(),
 		Now:        g.book.Now(),
 		Halted:     g.book.IsHalted(),
+		HaltReason: haltReason,
+		HaltedAt:   haltedAt,
 		Orders:     g.book.Orders(),
 		Positions:  positions,
 		Balances:   g.book.Balances(),

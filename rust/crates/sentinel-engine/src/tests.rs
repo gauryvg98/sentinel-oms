@@ -865,6 +865,68 @@ fn a_rejected_order_leaves_no_exposure() {
     h.assert_sound();
 }
 
+/// The venue fills before it tells us, and the sweep must not race that.
+#[test]
+fn a_position_report_during_an_in_flight_order_does_not_halt() {
+    // Reproduces a live false positive: an account halted at seq 106060
+    // between an ack at 106058 and that order's fill at 106062, then sat
+    // halted for ten hours over a disagreement that resolved two records
+    // later. The venue had filled; the book had not heard yet.
+    let mut h = Harness::new("inflight-divergence");
+
+    // An entry that reaches the venue and is working, with no fill yet.
+    h.place(entry("UI-1", Side::Buy, 3));
+    assert_eq!(
+        h.book().order(&coid("UI-1")).map(|o| o.core.state),
+        Some(OrderState::Working),
+        "the order should be live with nothing filled"
+    );
+    assert_eq!(h.position(), Qty::ZERO, "the book has booked nothing");
+
+    // The venue, meanwhile, already holds it.
+    h.confirm_positions(&[VenuePosition {
+        instrument: btc(),
+        qty: Qty::whole(3),
+        entry_price: Some(px("100")),
+    }]);
+
+    assert!(
+        !h.book().is_halted(),
+        "an order in flight explains the difference, so it is not a divergence"
+    );
+
+    // And when the fill lands, the books agree without anyone intervening.
+    h.venue.fill(coid("UI-1"), Qty::whole(3), px("100"));
+    h.settle();
+    assert_eq!(h.position(), Qty::whole(3));
+    assert!(!h.book().is_halted());
+}
+
+/// With nothing in flight, a real disagreement still stops the account.
+#[test]
+fn a_position_report_with_nothing_in_flight_still_halts() {
+    let mut h = Harness::new("real-divergence");
+    h.place(entry("UI-1", Side::Buy, 3));
+    h.venue.fill(coid("UI-1"), Qty::whole(3), px("100"));
+    h.settle();
+    assert_eq!(h.position(), Qty::whole(3));
+    assert!(
+        h.book().live_orders_on(&btc()).next().is_none(),
+        "nothing should be in flight"
+    );
+
+    // The venue says something else entirely, and nothing explains it.
+    h.confirm_positions(&[VenuePosition {
+        instrument: btc(),
+        qty: Qty::whole(9),
+        entry_price: Some(px("100")),
+    }]);
+    assert!(
+        h.book().is_halted(),
+        "a difference we cannot explain is the thing to stop for"
+    );
+}
+
 /// Nothing opens until the venue has said what the account holds.
 #[test]
 fn an_entry_is_refused_until_the_venue_confirms_the_position() {

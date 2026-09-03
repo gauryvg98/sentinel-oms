@@ -132,10 +132,12 @@ type Book struct {
 	decisions []Decision
 	activity  []Activity
 
-	epoch   uint64
-	lastSeq uint64
-	now     uint64
-	halted  bool
+	epoch      uint64
+	lastSeq    uint64
+	now        uint64
+	halted     bool
+	haltReason string
+	haltedAt   uint64
 }
 
 // New returns an empty book.
@@ -286,8 +288,17 @@ func (b *Book) applyDecision(header journal.Header, decision *record.Decision) {
 	switch decision.Kind {
 	case record.Halted:
 		b.halted = true
+		// Kept outside the ring on purpose. The reason an account stopped
+		// trading is the single most important thing in the log, and the ring
+		// holds two hundred decisions — an hour of ordinary activity buries it,
+		// after which "why is it halted" has no answer anywhere. A halt that
+		// cannot explain itself is an outage with no cause.
+		b.haltReason = decision.Note
+		b.haltedAt = header.Seq
 	case record.Resumed:
 		b.halted = false
+		b.haltReason = ""
+		b.haltedAt = 0
 	}
 	b.push(&b.decisions, decisionRing, Decision{
 		Seq:        header.Seq,
@@ -496,6 +507,10 @@ func (b *Book) Decisions() []Decision { return append([]Decision(nil), b.decisio
 
 // Activity returns the recent lifecycle events, newest last.
 func (b *Book) Activity() []Activity { return append([]Activity(nil), b.activity...) }
+
+// HaltReason is why the account stopped trading, and the sequence it stopped
+// at. Empty when it is trading.
+func (b *Book) HaltReason() (string, uint64) { return b.haltReason, b.haltedAt }
 
 // Fills returns how many executions have been seen.
 func (b *Book) Fills() int { return len(b.fills) }

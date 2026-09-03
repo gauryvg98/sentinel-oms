@@ -106,6 +106,7 @@
   <span class="brand">SENTINEL</span>
   <span class="pill" id="venue">v2 · rust + go</span>
   <span class="pill dim" id="status">connecting</span>
+  <span id="halt" style="color:var(--amber);font-size:11px"></span>
   <div class="stat"><b class="num" id="realized">—</b><span>realised</span></div>
   <div class="stat"><b class="num" id="unrealized">—</b><span>unrealised</span></div>
   <div class="stat"><b class="num" id="fills">—</b><span>fills</span></div>
@@ -274,6 +275,12 @@
     const status = $("status");
     status.textContent = state.halted ? "halted" : "trading";
     status.className = "pill " + (state.halted ? "halted" : "live");
+    // A halt without its reason is an outage with no cause, so the reason sits
+    // beside the word rather than in a feed that scrolls it away.
+    $("halt").textContent = state.halted
+      ? (state.halt_reason || "no reason recorded") +
+        (state.halted_at ? ` · at seq ${state.halted_at}` : "")
+      : "";
 
     const balances = Object.entries(state.balances || {})
       .filter(([, amount]) => Number(amount))

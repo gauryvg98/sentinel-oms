@@ -40,9 +40,11 @@ done
 /app/gatewayd &
 GATEWAY=$!
 
-# The projector is optional: with no Supabase configured it would exit
-# immediately, and that is a deployment choice rather than a fault.
-if [ -n "${SUPABASE_URL:-}" ]; then
+# The projector is optional: with no database configured it would exit
+# immediately, and that is a deployment choice rather than a fault. It is also
+# not one of the two that matter — the journal is the source of truth, and a
+# projection falling behind is a reporting problem, not a trading one.
+if [ -n "${DATABASE_URL:-}" ] || [ -n "${SUPABASE_URL:-}" ]; then
   /app/projectord &
 fi
 

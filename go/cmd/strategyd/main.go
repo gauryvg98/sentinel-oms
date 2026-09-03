@@ -76,6 +76,15 @@ func main() {
 	// A fixed 0.002 BTC is 160 USDC at 80k and 200 at 100k, which is a
 	// different bet without anyone deciding to make one.
 	budget := envDec("SENTINEL_STRATEGY_USDT", "0")
+	// Size to a share of capital rather than a fixed notional: hold enough that
+	// the margin behind the position is this fraction of equity. At 100x a
+	// 200-notional order commits 2 USDC of a 4,300 account, which is not a
+	// position, it is a rounding error.
+	commitPct := envDec("SENTINEL_STRATEGY_COMMIT_PCT", "0")
+	leverage := int64(1)
+	if n, err := strconv.ParseInt(env("SENTINEL_LEVERAGE", "1"), 10, 64); err == nil && n > 0 {
+		leverage = n
+	}
 	step := envDec("SENTINEL_STRATEGY_STEP", "0.001")
 	allowShort := env("SENTINEL_STRATEGY_SHORT", "") == "true"
 
@@ -113,6 +122,8 @@ func main() {
 		instrument: instrument,
 		size:       size,
 		budget:     budget,
+		commitPct:  commitPct,
+		leverage:   leverage,
 		step:       step,
 		allowShort: allowShort,
 		live:       live,
@@ -160,6 +171,8 @@ type runner struct {
 	instrument string
 	size       fixed.Dec
 	budget     fixed.Dec
+	commitPct  fixed.Dec
+	leverage   int64
 	step       fixed.Dec
 	allowShort bool
 	live       bool
@@ -459,10 +472,34 @@ func (r *runner) watchStop(price fixed.Dec) {
 // Rounded down to the venue's step by the caller, which is where a size that
 // rounds to nothing becomes no trade rather than a rejection.
 func (r *runner) sizeAt(price fixed.Dec) fixed.Dec {
-	if r.budget.IsZero() || price.IsZero() {
+	if price.IsZero() {
 		return r.size
 	}
-	return fixed.FromRaw(fixed.MulDiv(r.budget.Raw(), fixed.Scale, price.Raw()))
+
+	// A share of capital wins over a fixed notional, which wins over a fixed
+	// quantity. Each is a weaker statement about intent than the one before.
+	if !r.commitPct.IsZero() {
+		margin := r.equity().Mul(r.commitPct)
+		notional := fixed.FromRaw(margin.Raw() * r.leverage)
+		return fixed.FromRaw(fixed.MulDiv(notional.Raw(), fixed.Scale, price.Raw()))
+	}
+	if !r.budget.IsZero() {
+		return fixed.FromRaw(fixed.MulDiv(r.budget.Raw(), fixed.Scale, price.Raw()))
+	}
+	return r.size
+}
+
+// equity is the wallet the venue reported plus what open positions are worth.
+//
+// From the book, so it is the same number the dashboard shows and moves with
+// the account rather than being a constant somebody set once. A position sized
+// off stale equity is a position sized off someone's memory.
+func (r *runner) equity() fixed.Dec {
+	var total fixed.Dec
+	for _, amount := range r.book.Balances() {
+		total = total.Add(amount)
+	}
+	return total.Add(r.book.Unrealized())
 }
 
 // stopNote reports the armed level, if there is one.

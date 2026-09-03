@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gauryvg98/sentinel-oms/go/internal/fixed"
 	"github.com/gauryvg98/sentinel-oms/go/internal/journal"
 	"github.com/gauryvg98/sentinel-oms/go/internal/pg"
 	"github.com/gauryvg98/sentinel-oms/go/internal/record"
@@ -239,10 +240,88 @@ func toRow(frame *journal.Record) (pg.Row, bool) {
 		row.Instrument = decoded.MarkInstrument
 	}
 
-	if payload, err := json.Marshal(decoded); err == nil {
+	if payload, err := json.Marshal(readable(decoded)); err == nil {
 		row.Payload = payload
 	}
 	return row, true
+}
+
+// readable turns a decoded record into JSON somebody would want to query.
+//
+// Marshalling the struct directly is the obvious thing and it produces
+// `{"Kind":5,"To":8,"From":3}` — technically the whole record, practically
+// unusable, because answering "show me the fills" means first knowing that
+// five is a fill and eight is filled. Enums go in by name, the event or
+// decision is flattened to the top level rather than nested under the variant
+// that happened to carry it, and empty fields are dropped so a query can tell
+// absent from zero.
+func readable(r record.Record) map[string]any {
+	out := map[string]any{}
+	put := func(key string, value any) {
+		switch v := value.(type) {
+		case string:
+			if v == "" {
+				return
+			}
+		case fixed.Dec:
+			if v.IsZero() {
+				return
+			}
+			out[key] = v.String()
+			return
+		}
+		out[key] = value
+	}
+
+	switch r.Kind {
+	case journal.KindIntentPersisted:
+		i := r.Intent
+		put("client_order_id", i.ClientOrderID)
+		put("instrument", i.Instrument)
+		put("side", i.Side.String())
+		put("authority", i.Authority.String())
+		put("order_kind", i.Kind.String())
+		put("qty", i.Qty)
+		put("limit_price", i.LimitPrice)
+		put("stop_price", i.StopPrice)
+		put("trace_id", i.TraceID)
+	case journal.KindOrderEvent:
+		e := r.Event
+		put("client_order_id", e.ClientOrderID)
+		put("event", e.Kind.String())
+		put("from_state", e.From.String())
+		put("to_state", e.To.String())
+		out["applied"] = e.Applied()
+		put("qty", e.Qty)
+		put("price", e.Price)
+		put("filled_qty", e.FilledQty)
+		put("exec_id", e.ExecID)
+		put("venue_order_id", e.VenueOrderID)
+		put("reject_text", e.RejectText)
+		if e.RejectCode != 0 {
+			out["reject_code"] = e.RejectCode
+		}
+		put("resolved_state", e.ResolvedState.String())
+		put("trace_id", e.TraceID)
+	case journal.KindDecision:
+		d := r.Decision
+		put("decision", d.Kind.String())
+		put("actor", d.Actor.String())
+		put("instrument", d.Instrument)
+		put("value", d.Value)
+		put("note", d.Note)
+		put("trace_id", d.TraceID)
+	case journal.KindMark:
+		put("instrument", r.MarkInstrument)
+		put("price", r.MarkPrice)
+	case journal.KindBalance:
+		put("asset", r.Asset)
+		put("amount", r.Amount)
+	case journal.KindEpochClaimed:
+		out["epoch"] = r.Epoch
+		out["resumed_from"] = r.ResumedFrom
+	}
+	return out
 }
 
 func env(name, fallback string) string {

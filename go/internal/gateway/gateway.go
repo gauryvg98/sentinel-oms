@@ -70,6 +70,11 @@ type Gateway struct {
 	// series is the candles per instrument, folded from the same marks the
 	// book sees. Guarded by the same lock: it is part of the projection.
 	series map[string]*bars.Series
+	// caughtUp is false while folding the journal that already existed at
+	// startup. Until it is true the book is a point in history, not the
+	// present, and saying so is the difference between a screen that is late
+	// and one that is confidently wrong.
+	caughtUp bool
 }
 
 // How many candles are kept per instrument. At a minute that is six hours; at
@@ -119,6 +124,11 @@ func (g *Gateway) Tail(poll time.Duration) error {
 			}
 			g.fold(frame)
 			published++
+		}
+		if !g.caughtUp {
+			g.mu.Lock()
+			g.caughtUp = true
+			g.mu.Unlock()
 		}
 		if published > 0 {
 			// The book is published once per drain, not once per record: it is
@@ -225,10 +235,13 @@ func (g *Gateway) publishBook() {
 
 // State is everything a client needs to render from cold.
 type State struct {
-	Epoch      uint64               `json:"epoch"`
-	LastSeq    uint64               `json:"last_seq"`
-	Now        uint64               `json:"now"`
-	Halted     bool                 `json:"halted"`
+	Epoch   uint64 `json:"epoch"`
+	LastSeq uint64 `json:"last_seq"`
+	Now     uint64 `json:"now"`
+	Halted  bool   `json:"halted"`
+	// CatchingUp is true while the projection is still replaying the journal.
+	// A client showing these numbers as current would be showing history.
+	CatchingUp bool                 `json:"catching_up,omitempty"`
 	HaltReason string               `json:"halt_reason,omitempty"`
 	HaltedAt   uint64               `json:"halted_at,omitempty"`
 	Orders     []*book.Order        `json:"orders"`
@@ -288,6 +301,7 @@ func (g *Gateway) Snapshot() State {
 		LastSeq:    g.book.LastSeq(),
 		Now:        g.book.Now(),
 		Halted:     g.book.IsHalted(),
+		CatchingUp: !g.caughtUp,
 		HaltReason: haltReason,
 		HaltedAt:   haltedAt,
 		Orders:     g.book.Orders(),

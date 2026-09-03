@@ -440,8 +440,16 @@
     $("unrealized").className = "num " + signClass(state.unrealized);
 
     const status = $("status");
-    status.textContent = state.halted ? "halted" : "trading";
-    status.className = "pill " + (state.halted ? "halted" : "live");
+    // Rebuilding wins over everything: numbers from a half-folded journal are
+    // history wearing the present's clothes, and every other field on this page
+    // is one of them.
+    if (state.catching_up) {
+      status.textContent = "rebuilding";
+      status.className = "pill halted";
+    } else {
+      status.textContent = state.halted ? "halted" : "trading";
+      status.className = "pill " + (state.halted ? "halted" : "live");
+    }
     // A halt without its reason is an outage with no cause, so the reason sits
     // beside the word rather than in a feed that scrolls it away.
     $("halt").textContent = state.halted

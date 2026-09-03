@@ -170,6 +170,17 @@ func (r *runner) run() error {
 		if !r.caughtUp {
 			r.caughtUp = true
 			log.Printf("strategyd: caught up with the journal, trading from here")
+
+			// A position may already be open — this process restarts far more
+			// often than an hourly bar closes, and until now the stop was only
+			// ever placed on a fill or at a bar close. A deploy in between left
+			// the position naked for up to an interval, which on this timeframe
+			// is an hour. The replay has warmed the strategy, so its stop
+			// distance is available immediately; use it.
+			if held := r.book.PositionIn(r.instrument).Qty; !held.IsZero() && r.haveDecision {
+				log.Printf("strategyd: resuming with %s held, checking its stop", held)
+				r.maintainStop(r.lastDecision, r.lastClose, held)
+			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

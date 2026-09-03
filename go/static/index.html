@@ -355,6 +355,10 @@
     c.candles.setData(c.bars);
     c.fast.setData(sma(c.bars, FAST));
     c.slow.setData(sma(c.bars, SLOW));
+    // Fill the width. Twenty-nine hourly candles left to their own devices sit
+    // in a corner with most of the chart empty, which wastes the pixels that
+    // were the reason for having a chart at all.
+    c.chart.timeScale().fitContent();
     c.refs.barcount.textContent = `${c.bars.length} × ${intervalLabel(c.interval)}`;
   }
 

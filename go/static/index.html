@@ -1,0 +1,610 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>sentinel · v2</title>
+<script src="/vendor/lightweight-charts.js"></script>
+<style>
+  /* The v1 terminal's palette, because an operator who knows one should not
+     have to learn the other. */
+  :root {
+    --bg: #0a0e0d; --panel: #101614; --edge: #1d2a25; --ink: #cfe3da;
+    --dim: #5e7268; --green: #22e07b; --red: #f87171; --amber: #fbbf24;
+    --violet: #a78bfa;
+    --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; min-width: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--mono);
+    font-size: 13px; padding: 14px 18px 24px; overflow-x: hidden;
+  }
+  .dim { color: var(--dim); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .warn { color: var(--amber); }
+  .num { font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); }
+  .dot.warn { background: var(--amber); }
+
+  /* header ---------------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 4px 2px 14px; border-bottom: 1px solid var(--edge);
+  }
+  .brand { color: var(--green); font-weight: 700; letter-spacing: 2px; font-size: 16px; }
+  .pill {
+    font-size: 10px; padding: 2px 8px; border-radius: 4px;
+    border: 1px solid var(--edge); color: var(--dim); letter-spacing: .04em;
+  }
+  .pill.live { color: var(--green); border-color: var(--green); }
+  .pill.halted { color: var(--amber); border-color: var(--amber); }
+  .stat { display: flex; flex-direction: column; line-height: 1.25; }
+  .stat b { font-size: 14px; font-weight: 700; }
+  .stat span {
+    font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px;
+  }
+  .grow { flex: 1; }
+
+  /* cards ----------------------------------------------------------------- */
+  #grid {
+    display: grid; gap: 14px; margin-top: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card.wide { grid-column: 1 / -1; }
+  /* An instrument card carries a chart, and a chart in a 340px column is a
+     smudge. Two columns where there is room, all of it where there is not. */
+  .card.instrument { grid-column: span 2; }
+  @media (max-width: 760px) { .card.instrument { grid-column: 1 / -1; } }
+  .card.run { border-color: #244; box-shadow: 0 0 0 1px rgba(34,224,123,.15) inset; }
+  h2 {
+    font-size: 10px; color: var(--dim); font-weight: 400;
+    text-transform: uppercase; letter-spacing: 1.4px;
+  }
+  .chead { display: flex; align-items: baseline; gap: 8px; }
+  .sym { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
+  .px { margin-left: auto; font-size: 18px; font-weight: 700; }
+  .chart { width: 100%; height: 300px; }
+  .chart-legend { display: flex; gap: 14px; font-size: 10px; color: var(--dim); }
+  .chart-legend b { font-weight: 600; }
+  .swatch { display: inline-block; width: 10px; height: 2px; vertical-align: middle; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .badge {
+    font-weight: 700; font-size: 11px; padding: 3px 10px;
+    border-radius: 5px; border: 1px solid; letter-spacing: .06em;
+  }
+  .badge.LONG { color: var(--green); border-color: var(--green); }
+  .badge.SHORT { color: var(--red); border-color: var(--red); }
+  .badge.FLAT, .badge.none { color: var(--dim); border-color: var(--edge); }
+  .kvv { display: flex; flex-direction: column; line-height: 1.3; }
+  .kvv b { font-size: 13px; }
+  .kvv span {
+    font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px;
+  }
+  .chain {
+    display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--dim);
+    border-top: 1px solid var(--edge); padding-top: 9px;
+  }
+  .chain span { white-space: nowrap; }
+  .chain b { color: var(--ink); font-weight: 600; }
+
+  /* tables and feeds ------------------------------------------------------ */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: .25rem .4rem; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th {
+    color: var(--dim); font-weight: 400; font-size: 9px;
+    text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--edge);
+  }
+  tbody tr:nth-child(odd) { background: #ffffff05; }
+  .state { font-size: 11px; }
+  .state.FILLED { color: var(--green); }
+  .state.WORKING, .state.PARTIAL { color: var(--amber); }
+  .state.CANCELED, .state.REJECTED { color: var(--dim); }
+  .state.UNKNOWN, .state.RECONCILING { color: var(--violet); }
+  ul { list-style: none; max-height: 17rem; overflow-y: auto; }
+  li { padding: .2rem 0; border-bottom: 1px solid #ffffff08; font-size: 11.5px; }
+  li:last-child { border-bottom: none; }
+  .stale { opacity: .45; }
+  footer { margin-top: 18px; font-size: 11px; color: var(--dim); }
+</style>
+
+<header>
+  <span class="brand">SENTINEL</span>
+  <span class="pill" id="venue">v2 · rust + go</span>
+  <span class="pill dim" id="status">connecting</span>
+  <span id="halt" style="color:var(--amber);font-size:11px"></span>
+  <div class="stat"><b class="num" id="equity">—</b><span>equity</span></div>
+  <div class="stat"><b class="num" id="available">—</b><span>available</span></div>
+  <div class="stat"><b class="num" id="committed">—</b><span>committed</span></div>
+  <div class="stat"><b class="num" id="blocked">—</b><span>blocked (orders)</span></div>
+  <div class="stat"><b class="num" id="notional">—</b><span>notional</span></div>
+  <div class="stat"><b class="num" id="realized">—</b><span>realised</span></div>
+  <div class="stat"><b class="num" id="unrealized">—</b><span>unrealised</span></div>
+  <div class="stat"><b class="num" id="fills">—</b><span>fills</span></div>
+  <div class="stat"><b class="num" id="leverage">—</b><span>leverage</span></div>
+  <div class="stat"><b class="num" id="epoch">—</b><span>epoch</span></div>
+  <div class="stat"><b class="num" id="seq">—</b><span>sequence</span></div>
+  <div class="grow"></div>
+  <div class="stat" style="text-align:right"><b id="balances">—</b><span>balances</span></div>
+</header>
+
+<main id="grid">
+  <!-- instrument cards are built from the marks the journal carries -->
+  <div class="card wide" id="orders-card">
+    <h2>Orders</h2>
+    <table>
+      <thead><tr>
+        <th>Id</th><th>Instrument</th><th>Side</th><th>Authority</th>
+        <th>Qty</th><th>Filled</th><th>State</th>
+      </tr></thead>
+      <tbody id="orders"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Activity <span class="dim">— the order lifecycle</span></h2>
+    <ul id="activity"></ul>
+  </div>
+
+  <div class="card">
+    <h2>Decisions <span class="dim">— including the trades that did not happen</span></h2>
+    <ul id="decisions"></ul>
+  </div>
+</main>
+
+<footer>
+  Read-only. Every number here is folded from the journal; nothing on this page
+  asks the engine anything. Capital figures are derived from the wallet balance,
+  the marks and the book — the venue's own account page is authoritative and
+  sees funding and fees these do not. &nbsp;·&nbsp;
+  <a href="/engineering/" style="color:var(--dim)">engineering write-up</a>
+</footer>
+
+<script>
+  // Numbers arrive as strings and stay strings until they are rendered.
+  // JavaScript has one numeric type and it is a float64, so parsing a quantity
+  // here would be the one place in the whole system a value gets rounded. The
+  // one exception is the sparkline, which is a picture rather than a figure —
+  // it is drawn from floats and no decision is taken from it.
+  const $ = (id) => document.getElementById(id);
+  const text = (v) => (v === undefined || v === null ? "—" : String(v));
+  const signClass = (s) => (String(s).startsWith("-") ? "neg" : Number(s) ? "pos" : "");
+
+  const cards = {};   // instrument -> {el, refs}
+  const marks = {};   // instrument -> {price, at}
+  let stance = {};    // instrument -> parsed stance detail
+
+  // ---------------------------------------------------------------- cards
+  function card(instrument) {
+    if (cards[instrument]) return cards[instrument];
+    const el = document.createElement("div");
+    el.className = "card instrument";
+    el.innerHTML = `
+      <div class="chead">
+        <span class="sym">${instrument}</span>
+        <span class="px num" data-px>—</span>
+      </div>
+      <div class="chart" data-chart></div>
+      <div class="chart-legend">
+        <span><span class="swatch" style="background:#fbbf24"></span> fast <b data-fast>—</b></span>
+        <span><span class="swatch" style="background:#c4b5fd"></span> slow <b data-slow>—</b></span>
+        <span><span class="swatch" style="background:#f87171"></span> stop <b data-stop>—</b></span>
+        <span class="dim" data-barcount></span>
+      </div>
+      <div class="row">
+        <span class="badge none" data-stance>no opinion</span>
+        <div class="kvv"><b class="num" data-pos>0</b><span>position</span></div>
+        <div class="kvv" style="text-align:right">
+          <b class="num" data-unreal>—</b><span>unrealised</span>
+        </div>
+      </div>
+      <div class="chain" data-chain>
+        <span class="dim">waiting for the first bar to close</span>
+      </div>`;
+    // Cards go above the fixed panels, newest instrument last.
+    $("grid").insertBefore(el, $("orders-card"));
+    const q = (s) => el.querySelector(s);
+    cards[instrument] = {
+      el,
+      px: q("[data-px]"), stance: q("[data-stance]"),
+      pos: q("[data-pos]"), unreal: q("[data-unreal]"), chain: q("[data-chain]"),
+      chart: q("[data-chart]"), fast: q("[data-fast]"), slow: q("[data-slow]"),
+      stop: q("[data-stop]"), barcount: q("[data-barcount]"),
+    };
+    openChart(instrument, cards[instrument]);
+    return cards[instrument];
+  }
+
+  // A price that has not ticked since this page connected came out of the log,
+  // not the feed: an instrument no longer subscribed keeps its last mark for
+  // ever. Saying so is the difference between a stale number and a wrong one.
+  function paintMark(instrument) {
+    const c = card(instrument), m = marks[instrument];
+    c.px.textContent = m.price;
+    c.el.classList.toggle("stale", !m.at);
+  }
+
+  // ---------------------------------------------------------------- charts
+  // Candles come from /api/bars, which the gateway folds from the same marks
+  // the book sees — so a chart has history the moment it opens rather than
+  // filling in from whatever arrives after you loaded the page.
+  const charts = {};
+
+  function openChart(instrument, refs) {
+    if (!window.LightweightCharts || !refs.chart) return;
+
+    const chart = LightweightCharts.createChart(refs.chart, {
+      layout: { background: { color: "transparent" }, textColor: "#5e7268", fontSize: 10 },
+      grid: { vertLines: { color: "#1d2a2540" }, horzLines: { color: "#1d2a2540" } },
+      rightPriceScale: { borderColor: "#1d2a25" },
+      timeScale: { borderColor: "#1d2a25", timeVisible: true, secondsVisible: false },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      handleScale: { axisPressedMouseMove: false },
+    });
+    const candles = chart.addCandlestickSeries({
+      upColor: "#22e07b", downColor: "#f87171",
+      borderUpColor: "#22e07b", borderDownColor: "#f87171",
+      wickUpColor: "#22e07b", wickDownColor: "#f87171",
+    });
+    // The same two windows the strategy trades on, so what you see is what it
+    // decided from rather than a chart that happens to be nearby.
+    const fast = chart.addLineSeries({ color: "#fbbf24", lineWidth: 2, priceLineVisible: false });
+    // Both averages at 2px. At 1px the violet slow line disappeared into the
+    // candles, which for the line the stop is anchored on is not a small thing.
+    const slow = chart.addLineSeries({ color: "#c4b5fd", lineWidth: 2, priceLineVisible: false });
+
+    charts[instrument] = { chart, candles, fast, slow, refs, bars: [], interval: 60 };
+    loadBars(instrument);
+
+    // Redraw on resize: a chart sized once is a chart that is wrong after the
+    // first window drag.
+    new ResizeObserver(() => chart.applyOptions({
+      width: refs.chart.clientWidth, height: refs.chart.clientHeight,
+    })).observe(refs.chart);
+  }
+
+  async function loadBars(instrument) {
+    const c = charts[instrument];
+    if (!c) return;
+    try {
+      const r = await fetch(`/api/bars?instrument=${encodeURIComponent(instrument)}`);
+      const body = await r.json();
+      c.interval = body.interval_seconds || 60;
+      // Sorted and de-duplicated before the chart sees them. The library
+      // renders nothing at all when times are not strictly ascending, so one
+      // stale candle blanks the whole screen — a failure mode severe enough to
+      // defend against on both sides rather than trusting the server.
+      const seen = new Set();
+      c.bars = (body.bars || [])
+        .map((b) => ({
+          time: b.time,
+          open: Number(b.open), high: Number(b.high),
+          low: Number(b.low), close: Number(b.close),
+        }))
+        .sort((a, b) => a.time - b.time)
+        .filter((b) => !seen.has(b.time) && seen.add(b.time));
+      drawChart(instrument);
+      // The book may have arrived before this chart existed.
+      if (lastState) {
+        drawMarkers(instrument, lastState.fill_list);
+        drawStop(instrument, lastState.orders);
+      }
+    } catch (e) {
+      // A chart that cannot load is not a reason to lose the numbers beside it.
+      c.refs.barcount.textContent = "chart unavailable";
+    }
+  }
+
+  // The averages are computed here from the candles on screen, which is the
+  // one place this page does arithmetic on a price. It is a drawing, and the
+  // authoritative fast/slow the strategy actually used are printed under the
+  // card from its own journalled stance.
+  function sma(bars, window) {
+    const out = [];
+    for (let i = window - 1; i < bars.length; i++) {
+      let total = 0;
+      for (let j = i - window + 1; j <= i; j++) total += bars[j].close;
+      out.push({ time: bars[i].time, value: total / window });
+    }
+    return out;
+  }
+
+  // Every fill on this instrument, drawn where it happened. A trade you can
+  // see against the candle that caused it is the difference between a chart
+  // and a decoration.
+  function drawMarkers(instrument, fills) {
+    const c = charts[instrument];
+    if (!c) return;
+    const mine = (fills || []).filter((f) => f.instrument === instrument);
+    c.candles.setMarkers(mine.map((f) => {
+      const buy = f.side === "BUY";
+      const stop = f.client_order_id.startsWith("SL-");
+      // No price labels. Thirty-two fills inside a day of hourly candles turns
+      // labelled markers into an unreadable stack, and the Orders table below
+      // already carries the id, side, size and state of every one. The chart's
+      // job is where and which way; the table's is what.
+      //
+      // A stop firing is the exception and gets a word, because a position
+      // closed by its stop is a different event from one the strategy chose to
+      // close and you should not have to cross-reference to tell them apart.
+      return {
+        time: Math.floor(f.at / 1e9),
+        position: buy ? "belowBar" : "aboveBar",
+        color: stop ? "#f87171" : (buy ? "#22e07b" : "#e0e0e0"),
+        shape: buy ? "arrowUp" : "arrowDown",
+        text: stop ? "SL" : "",
+      };
+    }));
+  }
+
+  // The working stop, drawn as a line across the chart. A stop you cannot see
+  // is a stop you have to take on trust, and the whole point of this screen is
+  // not having to.
+  function drawStop(instrument, orders) {
+    const c = charts[instrument];
+    if (!c) return;
+
+    // A stop resting at the venue is an order. A stop this venue refused to
+    // hold lives in the strategy and reaches here through its stance. Reading
+    // only the orders reports "none" over a stop that is being watched, which
+    // is the same lie as reporting no position over a live one.
+    const resting = (orders || []).find((o) =>
+      o.instrument === instrument && o.stop_price &&
+      !["FILLED", "CANCELED", "REJECTED", "EXPIRED"].includes(o.state));
+    const watched = stance[instrument] && stance[instrument].stop;
+    const level = resting ? resting.stop_price : watched;
+
+    if (c.stopLine) { c.candles.removePriceLine(c.stopLine); c.stopLine = null; }
+    if (!level) {
+      c.refs.stop.textContent = "none";
+      c.refs.stop.className = "dim";
+      return;
+    }
+    c.stopLine = c.candles.createPriceLine({
+      price: Number(level),
+      color: "#f87171", lineWidth: 1,
+      // Solid where the venue holds it, dashed where this system does. The
+      // difference matters: a watched stop dies with the process holding it.
+      lineStyle: resting ? 0 : 2,
+      axisLabelVisible: true, title: resting ? "stop" : "stop (watched)",
+    });
+    c.refs.stop.textContent = level + (resting ? "" : " (watched)");
+    c.refs.stop.className = "";
+  }
+
+  function drawChart(instrument) {
+    const c = charts[instrument];
+    if (!c || !c.bars.length) return;
+    c.candles.setData(c.bars);
+    c.fast.setData(sma(c.bars, FAST));
+    c.slow.setData(sma(c.bars, SLOW));
+    // Fill the width. Twenty-nine hourly candles left to their own devices sit
+    // in a corner with most of the chart empty, which wastes the pixels that
+    // were the reason for having a chart at all.
+    c.chart.timeScale().fitContent();
+    c.refs.barcount.textContent = `${c.bars.length} × ${intervalLabel(c.interval)}`;
+  }
+
+  // The candle size, said the way a person says it.
+  function intervalLabel(seconds) {
+    if (!seconds) return "?";
+    if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+    if (seconds % 60 === 0) return `${seconds / 60}m`;
+    return `${seconds}s`;
+  }
+
+  // Windows the strategy runs; overridden from the stance note when it says.
+  let FAST = 5, SLOW = 20;
+
+  // A mark either extends the open candle or starts a new one, the same rule
+  // the gateway uses, so the live edge of the chart matches what a reload
+  // would fetch.
+  function pushMark(instrument, price, atSeconds) {
+    const c = charts[instrument];
+    if (!c) return;
+    // The same bucket arithmetic the gateway uses, at whatever size it said,
+    // so the live edge lands where a reload would put it.
+    const size = c.interval || 60;
+    const bucket = Math.floor(atSeconds / size) * size;
+    const value = Number(price);
+    const last = c.bars[c.bars.length - 1];
+    if (last && last.time === bucket) {
+      last.high = Math.max(last.high, value);
+      last.low = Math.min(last.low, value);
+      last.close = value;
+      c.candles.update(last);
+    } else {
+      const bar = { time: bucket, open: value, high: value, low: value, close: value };
+      c.bars.push(bar);
+      if (c.bars.length > 360) c.bars.shift();
+      c.candles.update(bar);
+    }
+    c.fast.setData(sma(c.bars, FAST));
+    c.slow.setData(sma(c.bars, SLOW));
+    c.refs.barcount.textContent = `${c.bars.length} × ${intervalLabel(c.interval)}`;
+  }
+
+  // "LONG bar 77246 fast 77262.28 slow 77284.21 holding 0" — written by the
+  // strategy into the journal, read back here for display only. A note this
+  // cannot parse is shown whole rather than dropped: it is still evidence.
+  function paintStance(decision) {
+    const instrument = decision.instrument;
+    if (!instrument) return;
+    const note = decision.note || "";
+    const word = (note.split(" ")[0] || "").toUpperCase();
+    const c = card(instrument);
+
+    c.stance.textContent = word || "unknown";
+    c.stance.className = "badge " + (["LONG", "SHORT", "FLAT"].includes(word) ? word : "none");
+    c.el.classList.toggle("run", word === "LONG" || word === "SHORT");
+
+    const pairs = [...note.matchAll(/(bar|fast|slow|holding|stop) ([-\d.]+)/g)];
+    const found = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
+    if (found.fast) c.fast.textContent = found.fast;
+    if (found.slow) c.slow.textContent = found.slow;
+    stance[instrument] = Object.fromEntries(pairs.map(([, k, v]) => [k, v]));
+    c.chain.innerHTML = pairs.length
+      ? pairs.map(([, label, value]) =>
+          `<span>${label === "bar" ? "last close" : label} <b class="num">${value}</b></span>`).join("")
+      : `<span class="dim">${note}</span>`;
+  }
+
+  // ---------------------------------------------------------------- book
+  let lastState = null;
+
+  function renderBook(state) {
+    lastState = state;
+    $("epoch").textContent = text(state.epoch);
+    $("seq").textContent = text(state.last_seq);
+    $("fills").textContent = text(state.fills);
+    $("realized").textContent = text(state.realized);
+    $("realized").className = "num " + signClass(state.realized);
+    $("unrealized").textContent = text(state.unrealized);
+    $("unrealized").className = "num " + signClass(state.unrealized);
+
+    const status = $("status");
+    // Rebuilding wins over everything: numbers from a half-folded journal are
+    // history wearing the present's clothes, and every other field on this page
+    // is one of them.
+    if (state.catching_up) {
+      status.textContent = "rebuilding";
+      status.className = "pill halted";
+    } else {
+      status.textContent = state.halted ? "halted" : "trading";
+      status.className = "pill " + (state.halted ? "halted" : "live");
+    }
+    // A halt without its reason is an outage with no cause, so the reason sits
+    // beside the word rather than in a feed that scrolls it away.
+    $("halt").textContent = state.halted
+      ? (state.halt_reason || "no reason recorded") +
+        (state.halted_at ? ` · at seq ${state.halted_at}` : "")
+      : "";
+
+    const balances = Object.entries(state.balances || {})
+      .filter(([, amount]) => Number(amount))
+      .map(([asset, amount]) => `${asset} ${amount}`);
+    $("balances").textContent = balances.length ? balances.join(" · ") : "—";
+
+    for (const [instrument, price] of Object.entries(state.marks || {})) {
+      marks[instrument] = marks[instrument] || { price, at: null };
+      marks[instrument].price = price;
+      paintMark(instrument);
+    }
+
+    // Positions land on the instrument's own card rather than in a table of
+    // their own: one instrument, one place to look.
+    const held = new Set();
+    for (const p of state.positions || []) {
+      held.add(p.instrument);
+      const c = card(p.instrument);
+      c.pos.textContent = p.qty;
+      c.pos.className = "num " + signClass(p.qty);
+      c.unreal.textContent = text(p.unrealized);
+      c.unreal.className = "num " + signClass(p.unrealized);
+    }
+    for (const [instrument, c] of Object.entries(cards)) {
+      if (held.has(instrument)) continue;
+      c.pos.textContent = "0";
+      c.pos.className = "num dim";
+      c.unreal.textContent = "—";
+      c.unreal.className = "num dim";
+    }
+
+    const stances = (state.decisions || []).filter((d) => d.kind === "STANCE_DECLARED");
+    stances.slice(-4).forEach(paintStance);
+
+    $("leverage").textContent = state.leverage ? state.leverage + "×" : "—";
+
+    // Derived from the book — the wallet the venue reported, the marks it
+    // streamed, the positions and orders this system booked. Exact against our
+    // own records, and not a substitute for Binance's account page, which sees
+    // funding and fees this does not.
+    const cap = state.capital || {};
+    $("equity").textContent = text(cap.equity);
+    $("available").textContent = text(cap.available);
+    $("committed").textContent = text(cap.committed);
+    $("committed").className = "num " + (Number(cap.committed) ? "pos" : "dim");
+    $("blocked").textContent = text(cap.blocked);
+    $("blocked").className = "num " + (Number(cap.blocked) ? "warn" : "dim");
+    $("notional").textContent = text(cap.notional);
+    for (const instrument of Object.keys(charts)) {
+      drawMarkers(instrument, state.fill_list);
+      drawStop(instrument, state.orders);
+    }
+
+    $("orders").innerHTML = (state.orders || []).slice().reverse().map((o) => `<tr>
+      <td>${o.client_order_id}</td>
+      <td>${o.instrument}</td>
+      <td class="${o.side === "BUY" ? "pos" : "neg"}">${o.side}</td>
+      <td class="dim">${(o.authority || "").toLowerCase()}</td>
+      <td class="num">${o.qty}</td>
+      <td class="num">${o.filled_qty}</td>
+      <td class="state ${o.state}">${o.state}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="dim">no orders yet</td></tr>`;
+
+    $("activity").innerHTML = (state.activity || []).slice(-40).reverse()
+      .map(activityLine).join("");
+    $("decisions").innerHTML = (state.decisions || []).slice(-40).reverse()
+      .map(decisionLine).join("");
+  }
+
+  const activityLine = (a) =>
+    `<li><span class="dim">${a.seq}</span> ${a.client_order_id}
+     <span class="dim">${a.event}</span> ${a.from} → ${a.to}</li>`;
+
+  const decisionLine = (d) =>
+    `<li><span class="dim">${d.actor || ""}</span>
+     <b>${d.kind}</b> <span class="dim">${d.note || d.asset || ""}</span></li>`;
+
+  function prepend(id, html) {
+    const list = $(id);
+    list.insertAdjacentHTML("afterbegin", html);
+    while (list.children.length > 40) list.lastElementChild.remove();
+  }
+
+  // ---------------------------------------------------------------- stream
+  function connect() {
+    const source = new EventSource("/api/stream");
+
+    // The book arrives complete on connect and once per drain after that, so a
+    // client with nothing gets a whole picture rather than a promise of one.
+    source.addEventListener("book", (e) => renderBook(JSON.parse(e.data)));
+
+    source.addEventListener("marks", (e) => {
+      const m = JSON.parse(e.data);
+      const held = marks[m.instrument] || {};
+      held.price = m.price;
+      held.at = new Date();          // "we have seen this tick", for staleness
+      marks[m.instrument] = held;
+      paintMark(m.instrument);
+      // The candle bucket comes from the record's own nanos, not from this
+      // clock, so the live edge lands where a reload from /api/bars would put
+      // it. Falling back to the local clock would draw a candle the server
+      // disagrees with.
+      const seconds = m.at ? Math.floor(m.at / 1e9) : Math.floor(Date.now() / 1000);
+      pushMark(m.instrument, m.price, seconds);
+    });
+
+    source.addEventListener("orders", (e) => prepend("activity", activityLine(JSON.parse(e.data))));
+
+    source.addEventListener("account", (e) => {
+      const a = JSON.parse(e.data);
+      if (a.kind === "STANCE_DECLARED") paintStance(a);
+      prepend("decisions", decisionLine(a));
+    });
+
+    // The server says so rather than just hanging up: a client that reconnects
+    // assuming continuity is worse off than one that knows it missed something.
+    source.addEventListener("resync", () => { source.close(); location.reload(); });
+
+    source.onerror = () => {
+      $("status").textContent = "reconnecting";
+      $("status").className = "pill dim";
+    };
+  }
+
+  fetch("/api/state").then((r) => r.json()).then(renderBook).finally(connect);
+</script>

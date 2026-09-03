@@ -1,11 +1,34 @@
 # Sentinel OMS
 
-**Live demo:** [sentinel-oms.fly.dev](https://sentinel-oms.fly.dev) &nbsp;·&nbsp; **Engineering write-up:** [sentinel-oms.fly.dev/engineering](https://sentinel-oms.fly.dev/engineering)
+**Live demo:** [sentinel-v2.fly.dev](https://sentinel-v2.fly.dev) &nbsp;·&nbsp; **Engineering write-up:** [sentinel-v2.fly.dev/engineering](https://sentinel-v2.fly.dev/engineering/)
 
 An **execution-integrity-first Order Management System** for automated trading.
-Python 3.11 · asyncio · PostgreSQL. Broker-agnostic by construction — all broker
-behavior lives behind an adapter boundary, with a deterministic, failure-scriptable
-simulator as the first adapter.
+Broker-agnostic by construction — all venue behaviour lives behind an adapter
+boundary, with a deterministic, failure-scriptable simulator as the first
+adapter.
+
+> **v2 is being built alongside this**, in Rust and Go: the same integrity model,
+> with the durability boundary moved off Postgres and onto a local append-only
+> journal. It exists because the deployed Python took **ten seconds at the median
+> to place an order** — it paid a database round trip per state transition and
+> held the instrument lock across the venue call. Start at
+> [docs/rewrite/ARCHITECTURE.md](docs/rewrite/ARCHITECTURE.md); the format both
+> languages read is [docs/rewrite/JOURNAL-FORMAT.md](docs/rewrite/JOURNAL-FORMAT.md);
+> deployment is [docs/rewrite/DEPLOY.md](docs/rewrite/DEPLOY.md).
+>
+> ```bash
+> ./run-v2-tests.sh
+> ```
+>
+> v2 now carries the SMA-crossover strategy too, as a separate `strategyd`
+> process that reads the journal and posts through the same control socket a
+> human uses — see [docs/rewrite/STRATEGY.md](docs/rewrite/STRATEGY.md).
+> Trading is opt-in: without `SENTINEL_STRATEGY_LIVE=true` it logs the orders it
+> would have placed and places none.
+>
+> The Python below stays as the reference implementation until v2 has
+> paper-traded a week. Its `regime` strategy and the backtester have not been
+> ported.
 
 Most trading-system failures aren't strategy failures — they're integrity failures:
 a timeout treated as a rejection, a blind retry that doubles a position, a fill that

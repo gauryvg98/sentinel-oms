@@ -1,0 +1,16 @@
+[package]
+name = "sentinel-record"
+description = "The journal's vocabulary and its byte layout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sentinel-domain = { path = "../sentinel-domain" }
+sentinel-journal = { path = "../sentinel-journal" }
+sentinel-types = { path = "../sentinel-types" }
+
+[lints]
+workspace = true

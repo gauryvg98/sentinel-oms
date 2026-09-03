@@ -1,0 +1,18 @@
+[package]
+name = "sentinel-journal"
+description = "The append-only log: framing, group commit, torn-tail recovery, tailing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies. The durability boundary is the part of this system that has
+# to be small enough to reason about, and the checksum and the file lock are
+# both in reach without help — CRC-32C is thirty lines with a published test
+# vector, and `File::try_lock` has been in std since 1.89.
+[dependencies]
+sentinel-types = { path = "../sentinel-types" }
+
+[lints]
+workspace = true

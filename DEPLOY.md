@@ -89,6 +89,8 @@ Visit once:
 
 ```
 https://sentinel-oms.fly.dev/admin?token=<the ADMIN_TOKEN from step 3>
+(The v1 app was destroyed on 2026-09-03; this document describes a deployment
+that no longer exists. v2 is docs/rewrite/DEPLOY.md.)
 ```
 
 It drops an http-only cookie and redirects to `/`. The "+ add instrument",

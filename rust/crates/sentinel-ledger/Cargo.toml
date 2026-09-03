@@ -1,0 +1,17 @@
+[package]
+name = "sentinel-ledger"
+description = "In-memory projections folded from the journal, and the invariants over them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sentinel-domain = { path = "../sentinel-domain" }
+sentinel-journal = { path = "../sentinel-journal" }
+sentinel-record = { path = "../sentinel-record" }
+sentinel-types = { path = "../sentinel-types" }
+
+[lints]
+workspace = true

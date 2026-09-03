@@ -1,0 +1,194 @@
+# Sentinel v2 on Fly. ONE machine, one volume, three processes.
+#
+# The single-writer proof is a flock on a file in /data. A second machine would
+# have its own volume and its own journal, so it would not be a second writer on
+# this log — it would be a second account trading the same venue, with neither
+# aware of the other. The lock cannot help with that. Do not scale this.
+
+# sentinel-oms: the name the v1 Python held, reclaimed so the URL in every
+# README, bookmark and write-up keeps working. What it serves is v2.
+#
+# Only one deployment may run against the account at a time. Two writers on one
+# venue is the failure this whole rewrite exists to make impossible, and no lock
+# here can prevent it — a second app is a different process on a different host
+# that never asks. Stop one before starting the other.
+app = "sentinel-oms"
+# Singapore — close to Binance's matching engines in Asia, so placing an order
+# is one short round trip (~5-50ms) rather than ~400ms from the US. Same region
+# as the Python deployment, for the same reason.
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile.v2"
+
+# Recreate the single machine in place, so two writers never overlap.
+[deploy]
+  strategy = "immediate"
+
+[env]
+  # A fresh journal for the live venue, named for the format it holds.
+  #
+  # Two reasons it is not /data/journal. The simulator's log lives there, and
+  # its records describe orders that never reached an exchange — interleaving
+  # those with real ones would leave a log that cannot be read back as an
+  # account of what happened. And journal format 2 added a byte that a format-1
+  # record cannot supply, so a v1 segment is refused rather than guessed at: a
+  # format bump always needs a new directory, and naming it after the format
+  # means the next one is obvious rather than archaeological.
+  #
+  # /data/journal-live holds the format-1 records from the first Binance boot.
+  SENTINEL_JOURNAL = "/data/journal-fmt2"
+  SENTINEL_GATEWAY_ADDR = ":8000"
+  # BTCUSDC. Note the grid is coarser than BTCUSDT's: step 0.001 against
+  # 0.0001, and minNotional 100 against 50, so the smallest placeable order is
+  # 0.002 rather than 0.001. Read from exchangeInfo at boot, never hardcoded —
+  # demo and production do not agree on these.
+  #
+  # Anything not listed here is invisible to the sweep, so its position is
+  # never reconciled against the venue. That is the whole cost of narrowing
+  # this list while something is still open elsewhere.
+  # BTCUSDC only: the inherited BTCUSDT short was closed on 2026-09-03 at a
+  # realised -40.45, so there is nothing left to keep reconciled there.
+  #
+  # Note the grid is coarser than BTCUSDT's — step 0.001 against 0.0001, and
+  # minNotional 100 against 50 — so the smallest placeable order is 0.002, not
+  # 0.001. Read from exchangeInfo at boot, never hardcoded: demo and production
+  # do not agree on these.
+  #
+  # Anything not listed here is never swept, never quoted, and refused outright
+  # by `submit` for want of symbol rules. Do not narrow this list while a
+  # position is open on what it drops.
+  SENTINEL_INSTRUMENTS = "BTCUSDC"
+
+  # Unset means the simulator, which reaches no venue at all. "binance" (or
+  # "futures", the word the Python deployment uses) is Binance USD-M futures;
+  # "delta" is Delta India.
+  SENTINEL_VENUE = "futures"
+
+  # Production is opt-in by this exact word. Anything else — unset, misspelt,
+  # "yes" — is Demo Trading, which is what the Python deployment runs on:
+  # ui/__main__.py defaults to demo-fapi.binance.com and fly.toml never
+  # overrides it. Measured 2026-08-27: demo-fstream streams fine from here and
+  # production fstream accepts the handshake and then sends nothing, from this
+  # machine and from Fly alike.
+  # SENTINEL_BINANCE_ENV = "production"
+
+  # The Python deployment's value. Unset leaves the account's own, which is the
+  # safe default.
+  SENTINEL_LEVERAGE = "100"
+
+  # Fat-finger backstop on absolute position, in BTC. Not a risk model: sizing
+  # decides how much to trade, and this only decides what is obviously wrong.
+  #
+  # The Python deployment caps notional instead (SENTINEL_MAX_NOTIONAL=200000),
+  # which at ~78,600 is about 2.5 BTC. This caps base units, because the guard
+  # runs before there is a price to convert with — so it is deliberately far
+  # tighter than the notional cap it replaces, and should be raised knowingly
+  # rather than matched by arithmetic nobody checked.
+  SENTINEL_MAX_POSITION = "0.05"
+
+  # ---- alerting -----------------------------------------------------------
+  # SENTINEL_ALERT_WEBHOOK is a secret, not set here. Without it alertd never
+  # starts and nothing reports anything — which is exactly the state that let a
+  # false-positive halt sit unnoticed for ten hours on 2026-09-03.
+  #
+  # Payload is {"content": "..."}, the shape v1 sent, so an existing Discord or
+  # Slack webhook works unchanged.
+  SENTINEL_ALERT_NAME = "sentinel-oms"
+
+  # A writer that ticks every second and has said nothing for two minutes is
+  # not a quiet market. Neither trading nor halted is the worst of the three
+  # states, because nothing else reports it.
+  SENTINEL_ALERT_STALL_AFTER = "2m"
+
+  # Several bars, so one missed evaluation is not a page. The strategy declares
+  # a stance every bar even when it wants what it already holds, which is what
+  # makes silence detectable at all.
+  SENTINEL_ALERT_STRATEGY_SILENT_AFTER = "15m"
+
+  # How long a condition that stays true stays quiet after firing once.
+  SENTINEL_ALERT_REPEAT = "1h"
+
+  # ---- strategy -----------------------------------------------------------
+  # Set at all, strategyd starts; unset, it is never launched and this is an
+  # execution system waiting to be told what to do.
+  SENTINEL_STRATEGY = "sma"
+
+  # Fast average above slow means hold long, below means flat. The v1 Python's
+  # defaults, so the two can be compared on the same data.
+  SENTINEL_STRATEGY_FAST = "5"
+  SENTINEL_STRATEGY_SLOW = "20"
+
+  # The Python's stop band (SENTINEL_SMA_STOP_FLOOR_PCT / _CAP_PCT). Tighter
+  # than this crate's defaults of 0.005/0.01 — trend-following cuts losses
+  # short, and a stop half a percent from price is the difference between a
+  # scratch and a real loss at 100x.
+  SENTINEL_STRATEGY_STOP_FLOOR = "0.003"
+  SENTINEL_STRATEGY_STOP_CAP = "0.005"
+
+  # What the Python deployment ran (its fly.toml line 36). On 1m bars a 5/20
+  # cross fires constantly in a flat market and pays fees to learn there is no
+  # trend — measured overnight on 2026-09-03/04 as a slow bleed across 32 fills.
+  # On 1h it is the trend follower it was designed to be.
+  #
+  # The chart follows this, so the averages drawn over the candles are the ones
+  # the strategy traded. SENTINEL_CHART_INTERVAL overrides that if a deployment
+  # ever wants a different view.
+  #
+  # Warm-up is 20 bars, so 20 hours from a cold start — but strategyd replays
+  # the journal's marks, so it warms from history rather than from nothing.
+  SENTINEL_STRATEGY_INTERVAL = "1h"
+
+  # Sized by notional, as the Python was (its SENTINEL_STRATEGY_USDT = 200), so
+  # the position is the same money as the price moves. A fixed quantity is 160
+  # USDC at 80k and 200 at 100k — a different bet nobody decided to make.
+  SENTINEL_STRATEGY_USDT = "200"
+
+  # The fallback when no notional is set, and the floor either way: BTCUSDC
+  # steps at 0.001 with a minNotional of 100, so at ~80k a 0.001 order is worth
+  # ~80 and the venue refuses it.
+  SENTINEL_STRATEGY_QTY = "0.002"
+  SENTINEL_STRATEGY_STEP = "0.001"
+  SENTINEL_STRATEGY_TICK = "0.1"
+
+  # Long AND short. The Python deployment ran "sma-ls" — the stop-and-reverse
+  # variant, short below the cross rather than flat, always in the market. This
+  # was long-only until 2026-09-04 because the rewrite took the code's default
+  # instead of the deployment's setting, which is the same mistake that left it
+  # on 1m bars.
+  SENTINEL_STRATEGY_SHORT = "true"
+
+  # Trading is opt-in, by this exact word. Anything else — unset, misspelt,
+  # "yes" — logs the orders it would have placed and places none. A strategy
+  # that starts trading because a flag was forgotten is not a safe default.
+  # SENTINEL_STRATEGY_LIVE = "true"
+
+[[mounts]]
+  source = "sentinel_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  # Liveness only. This deliberately does NOT fail when the account is halted:
+  # a halt is an intentional safety state, and restarting would not clear a real
+  # divergence — it would hide it behind a crash loop. That mistake is why the
+  # previous deployment looked healthy for five days while refusing to trade.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+# The writer is one thread that does no I/O, the venue worker blocks on the
+# network, and the gateway serves. Two shared CPUs is enough for all three at
+# this order rate, with the headroom that matters being the writer's — it must
+# never wait for anything but the disk.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "512mb"
